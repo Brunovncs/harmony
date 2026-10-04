@@ -4,7 +4,7 @@ import { AudioBridge } from './audio-bridge.js';
 import { runConnectionTest } from './connection-test.js';
 import { ClipBuffer, CLIP_SECONDS } from './clip-buffer.js';
 import { VoiceSession } from './voice.js';
-import { createSink, MAX_GAIN, asPercent, playSample } from './gain.js';
+import { createSink, MAX_GAIN, asPercent, playSample, setOutputDevice } from './gain.js';
 
 // ---------------------------------------------------------------------------
 // Quality presets
@@ -133,6 +133,9 @@ const el = {
   soundpadFile: $('soundpad-file'),
   soundpadGrid: $('soundpad-grid'),
   channelVideo: $('channel-video'),
+  voiceInput: $('voice-input'),
+  voiceOutput: $('voice-output'),
+  voiceDeviceNote: $('voice-device-note'),
   voiceCam: $('voice-cam'),
   voiceScreen: $('voice-screen'),
   voiceMute: $('voice-mute'),
@@ -255,7 +258,23 @@ const state = {
    * `list` and `occupancy` are mirrors of server pushes -- never edited
    * locally, so there is nothing to reconcile when a push arrives.
    */
-  channels: { list: [], occupancy: {}, roster: [], joining: false },
+  channels: {
+    list: [],
+    occupancy: {},
+    /** The roster of the channel WE are in. */
+    roster: [],
+    /**
+     * Every channel's roster, keyed by channel id.
+     *
+     * The server already broadcasts voice:roster for every channel to every
+     * client, not just to that channel's members -- it has to, or a sidebar
+     * could never show occupancy. Keeping the whole roster rather than only
+     * its length is what lets the sidebar name the people in a channel you
+     * are not in, which is the entire point of a sidebar.
+     */
+    rosters: {},
+    joining: false,
+  },
 
   /**
    * Everyone with an account, by id.
@@ -940,13 +959,17 @@ async function enterChannels() {
     const hello = await harmony.realtime.connect(state.server, state.auth.token);
     state.channels.list = hello.channels ?? [];
     state.channels.occupancy = hello.occupancy ?? {};
+    // A client that just connected has missed every roster broadcast, so the
+    // whole picture arrives once with the hello.
+    state.channels.rosters = hello.rosters ?? {};
   } catch (err) {
     showChannelsError(`Live updates unavailable: ${err.message}`);
     // Fall back to the REST list so the lobby is still usable read-only.
     try {
-      const { channels, occupancy } = await harmony.api.channels(state.server);
+      const { channels, occupancy, rosters } = await harmony.api.channels(state.server);
       state.channels.list = channels;
       state.channels.occupancy = occupancy ?? {};
+      state.channels.rosters = rosters ?? {};
     } catch { /* nothing more to try */ }
   }
   renderChannels();
@@ -1006,6 +1029,9 @@ function rowButton(label, title, onClick) {
 function renderChannels() {
   const items = state.channels.list.map((channel, index) => {
     const li = document.createElement('li');
+    // Named, because the member list under a channel is an <li> too and
+    // "every li in the sidebar" stopped meaning "every channel".
+    li.className = 'channel-row';
     li.dataset.id = String(channel.id);
     if (channel.id === state.voice.channelId) li.setAttribute('data-active', '');
 
@@ -1057,10 +1083,45 @@ function renderChannels() {
     }
 
     li.addEventListener('click', () => onChannelClick(channel));
-    return li;
+
+    // Who is in this voice channel, under it, the way a sidebar shows it.
+    //
+    // Returned as a SECOND top-level node rather than nested inside the row:
+    // the row has a click handler that joins the channel, and a nested list
+    // would make every click on a member's name join it too.
+    const members = state.channels.rosters[channel.id] ?? [];
+    if (channel.kind !== 'voice' || members.length === 0) return [li];
+
+    const list = document.createElement('li');
+    list.className = 'channel-members';
+    list.dataset.for = String(channel.id);
+    list.append(...members.map((member) => {
+      const row = document.createElement('span');
+      row.className = 'channel-member';
+      row.append(avatarEl(knownUser(member.userId) ?? { nickname: member.nickname }, 'tiny'));
+
+      const name = document.createElement('span');
+      name.className = 'member-name';
+      name.textContent = member.nickname;
+      row.append(name);
+
+      // Exactly the indicators the voice pane shows, from the same helper --
+      // the two lists are looked at side by side, and nothing is more
+      // confusing than the same person reading differently in each.
+      if (member.forceMuted) row.setAttribute('data-forced', '');
+      else if (member.muted) row.setAttribute('data-muted', '');
+
+      const status = document.createElement('span');
+      status.className = 'status';
+      renderStatus(status, member);
+      row.append(status);
+      return row;
+    }));
+
+    return [li, list];
   });
 
-  el.channelItems.replaceChildren(...items);
+  el.channelItems.replaceChildren(...items.flat());
 }
 
 async function onChannelClick(channel) {
@@ -1115,7 +1176,11 @@ async function joinVoice(channel, password) {
     el.voiceIdle.hidden = true;
     el.voiceActive.hidden = false;
 
-    await state.voice.startMic(reply.publish.voice, state.settings.audioInputId || undefined);
+    await state.voice.startMic(
+      reply.publish.voice,
+      // The voice preference, not the capture-card one. See settings.js.
+      deviceForVoiceInput(),
+    );
     // Tell the server the path is live, so other members know to subscribe.
     await harmony.realtime.request('voice:publishing', {
       channelId: channel.id, kind: 'v', on: true,
@@ -1125,6 +1190,16 @@ async function joinVoice(channel, password) {
     renderVoiceRoster(reply.roster ?? []);
     renderChannelVideo();
     renderChannels();
+    // Labels are only populated once a getUserMedia has been granted, which
+    // startMic above has just done -- so this is the first moment the pickers
+    // can show device names rather than blanks.
+    await refreshVoiceDevices({ apply: false });
+    await applyVoiceOutput(el.voiceOutput.value);
+
+    // The speaking ring. 100 ms is the usual figure for this: slower and a
+    // short word never lights it, faster and it costs more than it is worth
+    // for something nobody can perceive.
+    addTimer(setInterval(renderSpeaking, SPEAKING_POLL_MS), 'voice');
 
     // Reconcile subscriptions on a slow timer as well as on roster pushes.
     //
@@ -1188,45 +1263,185 @@ function applyVoiceButtons() {
   el.voiceScreen.toggleAttribute('data-on', sharing);
 }
 
+/**
+ * What somebody's state is, as small glyphs.
+ *
+ * One helper for the sidebar and the voice pane, so the two can never
+ * disagree about what a person is doing -- which they would within a week if
+ * each built its own.
+ *
+ * Muted and admin-muted are deliberately the SAME glyph in different colours
+ * rather than two different symbols: they mean the same thing to a listener
+ * (this person is not audible), and the difference is who decided, which is
+ * what the colour and the tooltip carry.
+ */
+const STATUS = [
+  { key: 'forced', glyph: '\u{1F507}', title: 'muted by an admin' },
+  { key: 'muted', glyph: '\u{1F507}', title: 'muted themselves' },
+  { key: 'cam', glyph: '\u{1F4F7}', title: 'camera on' },
+  { key: 'screen', glyph: '\u{1F5A5}', title: 'sharing a screen' },
+];
+
+function statusKeys(member) {
+  const keys = [];
+  if (member.forceMuted) keys.push('forced');
+  else if (member.muted) keys.push('muted');
+  if (member.publishing?.includes('c')) keys.push('cam');
+  if (member.publishing?.includes('s')) keys.push('screen');
+  return keys;
+}
+
+/** Fill a container with the glyphs for this member, reusing it in place. */
+function renderStatus(container, member) {
+  const keys = statusKeys(member);
+  container.replaceChildren(...keys.map((key) => {
+    const { glyph, title } = STATUS.find((x) => x.key === key);
+    const span = document.createElement('span');
+    span.className = 'status-dot';
+    span.dataset.kind = key;
+    span.textContent = glyph;
+    span.title = title;
+    return span;
+  }));
+  container.hidden = keys.length === 0;
+}
+
+/**
+ * Build one roster row.
+ *
+ * Split from the update below because rows are REUSED: a volume slider
+ * rebuilt underneath a finger stops moving, and a roster push arrives every
+ * time anybody mutes. Only the parts that change are rewritten.
+ */
+function voiceRow(member) {
+  const li = document.createElement('li');
+  li.dataset.mid = String(member.mid);
+
+  /*
+   * Which person this row is for, read off the ROW at click time rather than
+   * captured in the handlers.
+   *
+   * Rows are reused across roster pushes, so a closure here holds whichever
+   * member object happened to be current when the row was first built. A slot
+   * is also reused -- the lowest free number goes to the next person to join
+   * -- so that stale object can end up describing somebody else entirely, and
+   * a volume set on one person silently lands on another.
+   */
+  const owner = () => Number(li.dataset.userId);
+
+  li.append(avatarEl(knownUser(member.userId) ?? { nickname: member.nickname }));
+
+  const name = document.createElement('span');
+  name.className = 'member-name';
+  li.append(name);
+
+  const status = document.createElement('span');
+  status.className = 'status';
+  li.append(status);
+
+  if (member.mid === state.voice.mid) return li;
+
+  // --- per-person audio, for everybody except yourself -------------------
+  //
+  // Local only: nothing here is sent anywhere. Turning somebody down is about
+  // your speakers, and broadcasting it would be both useless and rude.
+  const controls = document.createElement('span');
+  controls.className = 'peer-audio';
+
+  const mute = document.createElement('button');
+  mute.className = 'ghost tiny peer-mute';
+  mute.addEventListener('click', () => {
+    const id = owner();
+    const now = state.voice.setPeerMuted(id, !state.voice.peerMuted(id));
+    // Un-muting somebody who is still at zero would be a no-op that looks
+    // like a broken button.
+    if (!now && state.voice.peerGain(id) === 0) state.voice.setPeerGain(id, 1);
+    renderVoiceRoster(state.channels.roster);
+  });
+
+  const volume = document.createElement('input');
+  volume.type = 'range';
+  volume.className = 'peer-volume';
+  volume.min = '0';
+  volume.max = String(asPercent(MAX_GAIN));
+  volume.step = '5';
+  volume.title = 'How loudly you hear this person';
+
+  const label = document.createElement('span');
+  label.className = 'peer-volume-label';
+
+  volume.addEventListener('input', () => {
+    const percent = Number(volume.value);
+    state.voice.setPeerGain(owner(), percent / 100);
+    applyPeerVolumeLook(volume, label, percent, false);
+  });
+
+  controls.append(mute, volume, label);
+  li.append(controls);
+  return li;
+}
+
+/**
+ * Show a volume, and show when it is doing something unusual.
+ *
+ * Past 100% the signal is being amplified rather than attenuated, which can
+ * distort and is the first thing to suspect when somebody sounds bad. It is
+ * worth making impossible to miss rather than leaving it to be read off a
+ * slider position.
+ */
+function applyPeerVolumeLook(volume, label, percent, muted) {
+  volume.value = String(percent);
+  const boosted = percent > 100;
+  volume.toggleAttribute('data-boosted', boosted && !muted);
+  label.toggleAttribute('data-boosted', boosted && !muted);
+  label.textContent = muted ? 'muted' : `${percent}%`;
+  label.title = boosted && !muted
+    ? 'Louder than the original. Amplified audio can distort.'
+    : '';
+}
+
 function renderVoiceRoster(roster) {
   state.channels.roster = roster;
   el.voiceCount.textContent = `${roster.length} ${roster.length === 1 ? 'person' : 'people'}`;
 
+  // Rows are reused rather than rebuilt. A roster push arrives on every mute,
+  // join and leave; rebuilding would drop a half-dragged volume slider and
+  // close an open move menu every time somebody else did anything.
+  const existing = new Map(
+    [...el.voiceRoster.children].map((li) => [li.dataset.mid, li]),
+  );
+
   el.voiceRoster.replaceChildren(...roster.map((member) => {
-    const li = document.createElement('li');
+    const li = existing.get(String(member.mid)) ?? voiceRow(member);
+    li.dataset.userId = String(member.userId);
 
-    li.append(avatarEl(knownUser(member.userId) ?? { nickname: member.nickname }));
+    const picture = avatarEl(knownUser(member.userId) ?? { nickname: member.nickname });
+    li.querySelector('.avatar').replaceChildren(...picture.childNodes);
 
-    const name = document.createElement('span');
-    name.textContent = member.nickname + (member.mid === state.voice.mid ? ' (you)' : '');
-    li.append(name);
+    li.querySelector('.member-name').textContent =
+      member.nickname + (member.mid === state.voice.mid ? ' (you)' : '');
+    renderStatus(li.querySelector('.status'), member);
 
-    // What they are sending, so a silent tile is distinguishable from a
-    // camera nobody has turned on.
-    for (const [kind, label] of [['c', 'camera'], ['s', 'screen']]) {
-      if (!member.publishing?.includes(kind)) continue;
-      const tag = document.createElement('span');
-      tag.className = 'tag';
-      tag.textContent = label;
-      li.append(tag);
+    const volume = li.querySelector('.peer-volume');
+    if (volume) {
+      const muted = state.voice.peerMuted(member.userId);
+      const percent = asPercent(state.voice.peerGain(member.userId));
+      applyPeerVolumeLook(volume, li.querySelector('.peer-volume-label'), percent, muted);
+      // Greys their picture: you can still see them talking, which is the
+      // point, but it should not look like audio that is failing.
+      li.toggleAttribute('data-local-muted', muted);
+      const button = li.querySelector('.peer-mute');
+      button.textContent = muted ? '\u{1F507}' : '\u{1F509}';
+      button.title = muted ? `Unmute ${member.nickname} for yourself` : `Mute ${member.nickname} for yourself`;
+      button.toggleAttribute('data-on', muted);
     }
 
-    if (member.forceMuted) {
-      const tag = document.createElement('span');
-      tag.className = 'tag forced';
-      tag.textContent = 'muted by admin';
-      li.append(tag);
-    } else if (member.muted) {
-      const tag = document.createElement('span');
-      tag.className = 'tag';
-      tag.textContent = 'muted';
-      li.append(tag);
-    }
-
-    // An admin can silence or remove anyone but themselves.
-    if (isAdmin() && member.mid !== state.voice.mid) {
+    // Admin controls are added once, on first build, and left alone after.
+    if (li.dataset.admin === '1' || !isAdmin() || member.mid === state.voice.mid) return li;
+    li.dataset.admin = '1';
+    {
       const mute = document.createElement('button');
-      mute.className = 'ghost small';
+      mute.className = 'ghost small force-mute';
       mute.textContent = member.forceMuted ? 'Unmute' : 'Force mute';
       mute.addEventListener('click', () => {
         harmony.realtime.request('admin:force-mute', {
@@ -1268,7 +1483,168 @@ function renderVoiceRoster(roster) {
 
     return li;
   }));
+
+  // The force-mute button's own label is the one admin bit that changes.
+  for (const member of roster) {
+    const li = el.voiceRoster.querySelector(`li[data-mid="${member.mid}"]`);
+    const force = li?.querySelector('.force-mute');
+    if (force) force.textContent = member.forceMuted ? 'Unmute' : 'Force mute';
+  }
 }
+
+/**
+ * Paint the speaking ring.
+ *
+ * Polled rather than pushed: whether somebody is talking changes several
+ * times a second, and an event per change would be a storm for something
+ * that is only ever a CSS class. Reading an AnalyserNode is cheap, and this
+ * touches one attribute per person.
+ */
+function renderSpeaking() {
+  if (!state.voice.channelId) return;
+  const speaking = state.voice.speakingMids();
+
+  for (const li of el.voiceRoster.children) {
+    li.toggleAttribute('data-speaking', speaking.has(Number(li.dataset.mid)));
+  }
+
+  // The sidebar too: it is the list you look at when you are in another
+  // channel, and "who is talking in there" is most of why you would look.
+  const members = state.channels.rosters[state.voice.channelId] ?? [];
+  const list = el.channelItems.querySelector(
+    `.channel-members[data-for="${state.voice.channelId}"]`,
+  );
+  if (!list) return;
+  [...list.children].forEach((row, i) => {
+    const member = members[i];
+    row.toggleAttribute('data-speaking', Boolean(member) && speaking.has(member.mid));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Voice devices
+//
+// Two choices, remembered, and both of them hot-pluggable.
+//
+// The rule throughout is that a saved device id is a PREFERENCE rather than a
+// requirement. Unplugging a headset mid-call falls back to the system default
+// and keeps the preference, so plugging it back in picks it up again without
+// anybody opening a menu -- which is what people mean by "it should just
+// work", and the opposite of what storing "whatever is selected right now"
+// would do.
+// ---------------------------------------------------------------------------
+
+/** Devices seen at the last enumeration, so a change can be compared. */
+let lastDevices = { inputs: [], outputs: [] };
+
+const deviceNote = (text) => {
+  el.voiceDeviceNote.textContent = text;
+};
+
+/**
+ * Fill one picker, keeping the saved preference selected where it still
+ * exists and falling back to the default where it does not.
+ *
+ * @returns {string} the device actually selected
+ */
+function fillDevicePicker(select, devices, preferred, defaultLabel) {
+  const options = [
+    { id: '', name: defaultLabel },
+    ...devices.map((d, i) => ({ id: d.deviceId, name: d.label || `Device ${i + 1}` })),
+  ];
+  select.replaceChildren(...options.map(({ id, name }) => {
+    const option = document.createElement('option');
+    option.value = id;
+    option.textContent = name;
+    return option;
+  }));
+
+  const available = devices.some((d) => d.deviceId === preferred);
+  select.value = available ? preferred : '';
+  // The preference is NOT rewritten here. It stays pointing at the device
+  // that is missing, which is what lets it come back on its own.
+  return select.value;
+}
+
+/**
+ * Enumerate, repopulate both pickers, and apply anything that changed.
+ *
+ * Called on joining a channel and again on every devicechange. Idempotent:
+ * applying a device that is already in use is a no-op, so the common case of
+ * "a device appeared that we do not care about" costs one enumeration.
+ */
+async function refreshVoiceDevices({ apply = true } = {}) {
+  // Re-read rather than trusting the copy in memory. A devicechange is the
+  // one moment the preference genuinely matters, and settings can have been
+  // written by another window or by a previous run of this one.
+  state.settings = await harmony.settings.get();
+
+  let devices;
+  try {
+    devices = await navigator.mediaDevices.enumerateDevices();
+  } catch (err) {
+    deviceNote(`Could not list audio devices: ${err.message}`);
+    return;
+  }
+
+  // 'communications' is a Windows alias for the default, and listing it beside
+  // the real device makes it look as though there are two of everything.
+  const inputs = devices.filter((d) => d.kind === 'audioinput' && d.deviceId !== 'communications');
+  const outputs = devices.filter((d) => d.kind === 'audiooutput' && d.deviceId !== 'communications');
+  lastDevices = { inputs, outputs };
+
+  const wantedIn = state.settings.voiceInputId ?? '';
+  const wantedOut = state.settings.voiceOutputId ?? '';
+  const chosenIn = fillDevicePicker(el.voiceInput, inputs, wantedIn, 'System default');
+  const chosenOut = fillDevicePicker(el.voiceOutput, outputs, wantedOut, 'System default');
+
+  // Chromium only exposes audiooutput once microphone permission has been
+  // granted, and never on some Linux setups. An empty list is not a fault.
+  el.voiceOutput.disabled = outputs.length === 0;
+
+  const missing = [];
+  if (wantedIn && chosenIn !== wantedIn) missing.push('microphone');
+  if (wantedOut && chosenOut !== wantedOut) missing.push('output');
+  deviceNote(missing.length
+    ? `Your chosen ${missing.join(' and ')} ${missing.length > 1 ? 'are' : 'is'} unplugged. `
+      + 'Using the system default until it is back.'
+    : '');
+
+  if (!apply) return;
+  await applyVoiceInput(chosenIn);
+  await applyVoiceOutput(chosenOut);
+}
+
+/** Point the microphone at a device, if we are publishing one. */
+async function applyVoiceInput(deviceId) {
+  if (!state.voice.micLive) return;
+  // Already there: switching would cost a getUserMedia and a track swap for
+  // nothing, and devicechange fires several times for one physical plug.
+  if (state.voice.micDeviceId === deviceId) return;
+  if (!deviceId && !state.settings.voiceInputId) return;
+
+  const ok = await state.voice.switchMic(deviceId);
+  if (!ok) deviceNote('That microphone could not be opened. Still using the previous one.');
+}
+
+async function applyVoiceOutput(deviceId) {
+  const ok = await setOutputDevice(deviceId);
+  if (!ok && deviceId) {
+    deviceNote('This build cannot choose an output device; using the system default.');
+  }
+}
+
+/**
+ * React to hardware being plugged in or pulled out.
+ *
+ * Registered once at startup rather than per channel, because the event is
+ * about the machine and not about the call -- and because removing and
+ * re-adding a listener on every join is how one ends up with six of them.
+ */
+navigator.mediaDevices?.addEventListener?.('devicechange', () => {
+  if (!state.voice.channelId) return;
+  refreshVoiceDevices().catch((err) => console.warn('[devices]', err.message));
+});
 
 // ---------------------------------------------------------------------------
 // The channel mosaic
@@ -1791,13 +2167,16 @@ function onRealtimeEvent(msg) {
       break;
 
     case 'voice:roster':
+      // Kept for EVERY channel, not just ours: this is what the sidebar
+      // draws, and it is the only way to see who is in a channel before
+      // deciding whether to join it.
+      state.channels.rosters[msg.channelId] = msg.roster;
+      state.channels.occupancy[msg.channelId] = msg.roster.length;
       if (msg.channelId !== state.voice.channelId) {
-        state.channels.occupancy[msg.channelId] = msg.roster.length;
         renderChannels();
         break;
       }
       renderVoiceRoster(msg.roster);
-      state.channels.occupancy[msg.channelId] = msg.roster.length;
       renderChannels();
       state.voice.syncPeers(msg.roster).catch(() => { /* retried next push */ });
       state.voice.syncVideo(msg.roster)
@@ -2997,7 +3376,22 @@ const MOSAIC_RECONCILE_MS = 15_000;
  * Short, because the gap it covers is a peer being silently inaudible, and
  * cheap, because it does nothing at all unless something is actually missing.
  */
+/**
+ * The saved microphone, or undefined for the system default.
+ *
+ * Returns undefined rather than '' because getUserMedia treats an explicit
+ * empty deviceId as a constraint that nothing satisfies.
+ */
+function deviceForVoiceInput() {
+  const wanted = state.settings.voiceInputId;
+  if (!wanted) return undefined;
+  // Only if it is actually there; otherwise the exact-device constraint
+  // throws and the join fails rather than falling back.
+  return lastDevices.inputs.some((d) => d.deviceId === wanted) ? wanted : undefined;
+}
+
 const VOICE_RECONCILE_MS = 4000;
+const SPEAKING_POLL_MS = 100;
 
 async function syncMosaic({ streams: pushed } = {}) {
   let streams = pushed;
@@ -3594,6 +3988,20 @@ el.avatarFile.addEventListener('change', () => {
   // Reset first, so picking the same file twice in a row still fires 'change'.
   el.avatarFile.value = '';
   if (file) setOwnAvatar(file);
+});
+
+el.voiceInput.addEventListener('change', async () => {
+  await harmony.settings.set({ voiceInputId: el.voiceInput.value });
+  state.settings = await harmony.settings.get();
+  deviceNote('');
+  await applyVoiceInput(el.voiceInput.value);
+});
+
+el.voiceOutput.addEventListener('change', async () => {
+  await harmony.settings.set({ voiceOutputId: el.voiceOutput.value });
+  state.settings = await harmony.settings.get();
+  deviceNote('');
+  await applyVoiceOutput(el.voiceOutput.value);
 });
 
 el.voiceScreen.addEventListener('click', () => shareScreenHere());

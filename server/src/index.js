@@ -555,6 +555,9 @@ app.get('/api/channels', requireLogin, (req, res) => {
       unlocked: !c.password_hash || channels.hasGrant(c.id, req.user.id),
     })),
     occupancy: voice.occupancy(),
+    // Same payload the WebSocket hello carries, so the read-only fallback
+    // path the client uses when the socket is down shows the same sidebar.
+    rosters: voice.allRosters(),
   });
 });
 

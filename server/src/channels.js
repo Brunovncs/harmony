@@ -389,6 +389,24 @@ export class VoiceRooms {
     return out;
   }
 
+  /**
+   * Every channel's full roster, keyed by channel id.
+   *
+   * The counts in occupancy() are enough to put a number beside a channel;
+   * they are not enough to show WHO is in it, which is what a sidebar wants.
+   * A client learns about changes from the voice:roster broadcast, but a
+   * client that has just connected has missed every one of those, so it needs
+   * the whole picture once.
+   *
+   * Still derived, never stored: this is read out of the live sockets each
+   * time it is asked for, so there is nothing to reconcile after a restart.
+   */
+  allRosters() {
+    const out = {};
+    for (const channelId of this.#rooms.keys()) out[channelId] = this.roster(channelId);
+    return out;
+  }
+
   setMuted(channelId, userId, muted) {
     const found = this.find(channelId, userId);
     if (!found) return false;

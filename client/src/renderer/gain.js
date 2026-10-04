@@ -11,6 +11,85 @@
 /** Loudest we will go. Past this, most sources are more distortion than signal. */
 export const MAX_GAIN = 3.5;
 
+/**
+ * Speaking detection, in two thresholds rather than one.
+ *
+ * A single threshold makes the ring strobe: speech crosses any given level
+ * dozens of times a second, because the gaps between syllables really are
+ * silence. So it takes a louder sound to start than to keep going, and a
+ * short hold carries it across those gaps.
+ */
+const SPEAK_ON = 0.02;
+const SPEAK_OFF = 0.01;
+const SPEAK_HOLD_MS = 280;
+
+/**
+ * Root-mean-square of what an analyser is hearing right now, 0..1.
+ *
+ * RMS rather than the peak: a single loud sample is a click, and peak makes
+ * a keyboard sound like talking.
+ */
+function rms(analyser, buffer) {
+  analyser.getFloatTimeDomainData(buffer);
+  let sum = 0;
+  for (let i = 0; i < buffer.length; i += 1) sum += buffer[i] * buffer[i];
+  return Math.sqrt(sum / buffer.length);
+}
+
+/** Wrap an analyser in the hysteresis above. */
+function speechGate(analyser) {
+  const buffer = new Float32Array(analyser.fftSize);
+  let speaking = false;
+  let until = 0;
+  return () => {
+    const level = rms(analyser, buffer);
+    const now = performance.now();
+    if (level > SPEAK_ON) {
+      speaking = true;
+      until = now + SPEAK_HOLD_MS;
+    } else if (speaking && level < SPEAK_OFF && now > until) {
+      speaking = false;
+    }
+    return { speaking, level };
+  };
+}
+
+/**
+ * Meter a stream WITHOUT playing it.
+ *
+ * For your own microphone: it is already going out over WebRTC, and routing
+ * it to the destination as well is how you end up listening to yourself with
+ * a few hundred milliseconds of delay. An AnalyserNode with nothing connected
+ * downstream still runs, because it is a pull-free node that taps whatever
+ * reaches it.
+ */
+export function createMeter(stream) {
+  const analyser = context().createAnalyser();
+  analyser.fftSize = 1024;
+  analyser.smoothingTimeConstant = 0.2;
+
+  let source = null;
+  try {
+    source = context().createMediaStreamSource(stream);
+    source.connect(analyser);
+  } catch (err) {
+    console.warn('[gain] could not meter stream:', err.message);
+  }
+
+  const read = speechGate(analyser);
+  return {
+    read,
+    get speaking() {
+      return read().speaking;
+    },
+    close() {
+      try { source?.disconnect(); } catch { /* already gone */ }
+      try { analyser.disconnect(); } catch { /* already gone */ }
+      source = null;
+    },
+  };
+}
+
 let ctx = null;
 
 /**
@@ -32,12 +111,25 @@ function context() {
  * Route a received stream's audio through a gain node.
  *
  * @param {MediaStream} stream
- * @returns {{ set: (value: number) => void, value: number, close: () => void }}
+ * @returns {{set: (v: number) => void, value: number, speaking: boolean, close: () => void}}
  */
 export function createSink(stream) {
   const node = context().createGain();
   node.gain.value = 1;
   node.connect(context().destination);
+
+  /*
+   * The analyser sits BEFORE the gain node, so what it reports is what the
+   * speaker is sending rather than how loudly we have chosen to play them.
+   * After the gain node, muting somebody locally would also stop their
+   * speaking ring -- and "is this person talking" is exactly what you want to
+   * know about somebody you have muted.
+   */
+  const analyser = context().createAnalyser();
+  analyser.fftSize = 1024;
+  analyser.smoothingTimeConstant = 0.2;
+  analyser.connect(node);
+  const read = speechGate(analyser);
 
   // The audio track often arrives after the video one -- WHEP delivers them as
   // separate `track` events -- and createMediaStreamSource captures whatever
@@ -48,7 +140,7 @@ export function createSink(stream) {
     if (source || stream.getAudioTracks().length === 0) return;
     try {
       source = context().createMediaStreamSource(stream);
-      source.connect(node);
+      source.connect(analyser);
     } catch (err) {
       console.warn('[gain] could not route stream audio:', err.message);
     }
@@ -58,6 +150,10 @@ export function createSink(stream) {
 
   const sink = {
     value: 1,
+    /** True while this stream is carrying speech. See speechGate. */
+    get speaking() {
+      return source ? read().speaking : false;
+    },
     set(value) {
       const clamped = Math.max(0, Math.min(MAX_GAIN, value));
       sink.value = clamped;
@@ -69,6 +165,11 @@ export function createSink(stream) {
       stream.removeEventListener('addtrack', connect);
       try {
         source?.disconnect();
+      } catch {
+        /* already gone */
+      }
+      try {
+        analyser.disconnect();
       } catch {
         /* already gone */
       }
@@ -127,6 +228,31 @@ export async function playSample(url, { gain = 1 } = {}) {
     } catch { /* already torn down */ }
   });
   return source;
+}
+
+/**
+ * Send everything we play to a particular output device.
+ *
+ * One call covers every voice subscription, every screen share's audio and
+ * the soundpad, because they all share the one AudioContext -- which is the
+ * reason that context exists rather than a node graph per stream.
+ *
+ * Returns false rather than throwing when the device is gone: unplugging
+ * headphones mid-call is an ordinary event, not an error, and the caller's
+ * job is then to fall back rather than to report a failure.
+ */
+export async function setOutputDevice(deviceId) {
+  const ctx = context();
+  if (typeof ctx.setSinkId !== 'function') return false;
+  try {
+    // '' is the system default. setSinkId takes the empty string for that,
+    // the same as an <audio> element does.
+    await ctx.setSinkId(deviceId || '');
+    return true;
+  } catch (err) {
+    console.warn('[gain] could not switch output:', err.message);
+    return false;
+  }
 }
 
 /** Percent for the UI, from the 0..MAX_GAIN scale. */

@@ -150,6 +150,10 @@ export class Realtime {
         user: publicUser(user),
         channels: this.#deps.channels.list().map(publicChannel),
         occupancy: this.#deps.voice.occupancy(),
+        // Who is in each channel right now. Without this a client that just
+        // connected shows empty voice channels until somebody happens to
+        // join or leave one.
+        rosters: this.#deps.voice.allRosters(),
         voiceCap: VOICE_HARD_CAP,
       });
     }

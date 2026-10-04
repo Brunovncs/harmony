@@ -185,7 +185,29 @@ one stream per tile you open.
 - **Voice channels** with a microphone that stays published while muted — muting
   disables the track rather than tearing the path down, so push-to-talk costs
   nothing and unmuting is instant. **Deafen** silences everyone, including
-  screen-share audio, without hanging up.
+  screen-share audio, without hanging up, and mutes you too.
+- **The sidebar shows who is in each voice channel**, with their pictures — so
+  you can see who is where before deciding to join, the same way you would in
+  Discord.
+- **A green ring while somebody is talking**, from an AnalyserNode on each
+  incoming stream with two thresholds rather than one. A single threshold
+  makes the ring strobe, because the gaps between syllables really are
+  silence.
+- **Per-person indicators**: muted, muted by an admin, camera on, sharing a
+  screen — the same glyphs in the sidebar and in the voice pane, from one
+  helper, so the two can never disagree.
+- **Turn one person up or down, or mute them just for you**, from 0 to 350%.
+  Past 100% the audio is being amplified rather than attenuated, so the slider
+  and the reading both turn amber: it is the first thing to suspect when
+  somebody sounds distorted. It is local — nothing is sent, and the person you
+  muted is never told. The setting follows the person rather than their slot,
+  so it survives their reconnect.
+- **Pick your microphone and your output**, remembered between runs and
+  hot-pluggable. A saved device is a preference, not a requirement: unplug a
+  headset mid-call and it falls back to the system default while keeping the
+  choice, so plugging it back in picks it up again on its own. Switching
+  microphone swaps the track on the live session rather than republishing, so
+  nobody else's subscription is disturbed.
 - **A mosaic of the channel.** Joining a voice channel opens a tile for every
   camera and screen share in it, automatically, from the roster. Click one to
   blow it up. These are channel-scoped paths (`vc-<channel>-<slot>-c`), so a
@@ -557,6 +579,7 @@ npm --prefix client run test:ui   # clicks through the channels view
 
 MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:e2e
 MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:channel-video
+MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:voice
 ```
 
 `test:ui` is the one that would have caught 2.0.0's mistake. It signs a real

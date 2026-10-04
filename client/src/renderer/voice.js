@@ -12,7 +12,7 @@
 // bandwidth, not this file.
 
 import { publish, watch } from './webrtc.js';
-import { createSink } from './gain.js';
+import { createSink, createMeter, MAX_GAIN } from './gain.js';
 
 /**
  * Microphone constraints.
@@ -86,6 +86,25 @@ export class VoiceSession {
   /** Output mute, applied to every incoming sink. */
   deafened = false;
 
+  /** Meters our own microphone, so the speaking ring works on ourselves too. */
+  #micMeter = null;
+
+  /**
+   * Per-person volume and local mute, keyed by USER id, not by slot.
+   *
+   * A slot is reused: the lowest free number is handed to the next person who
+   * joins, so turning Bob down and watching him leave would turn the next
+   * arrival down instead. Keyed by user, a preference follows the person
+   * across a reconnect and across channels, which is what anybody setting one
+   * expects.
+   *
+   * @type {Map<number, {gain: number, muted: boolean}>}
+   */
+  #peerPrefs = new Map();
+
+  /** mid -> userId, so a sink can be matched to a preference. */
+  #owners = new Map();
+
   get micLive() {
     return Boolean(this.#mic);
   }
@@ -120,6 +139,68 @@ export class VoiceSession {
     if (publish) this.publishUrls = publish;
   }
 
+  // ------------------------------------------------------- per-person audio
+
+  /** The volume somebody is played at, 0..MAX_GAIN. 1 is untouched. */
+  peerGain(userId) {
+    return this.#peerPrefs.get(userId)?.gain ?? 1;
+  }
+
+  peerMuted(userId) {
+    return this.#peerPrefs.get(userId)?.muted ?? false;
+  }
+
+  #prefFor(userId) {
+    let pref = this.#peerPrefs.get(userId);
+    if (!pref) {
+      pref = { gain: 1, muted: false };
+      this.#peerPrefs.set(userId, pref);
+    }
+    return pref;
+  }
+
+  /** Apply one person's preference to whichever slot they currently hold. */
+  #applyPref(userId) {
+    const pref = this.#prefFor(userId);
+    for (const [mid, owner] of this.#owners) {
+      if (owner !== userId) continue;
+      const sub = this.#subs.get(mid);
+      if (sub) sub.sink.set(this.deafened || pref.muted ? 0 : pref.gain);
+    }
+  }
+
+  setPeerGain(userId, gain) {
+    const pref = this.#prefFor(userId);
+    pref.gain = Math.max(0, Math.min(MAX_GAIN, Number(gain) || 0));
+    // Turning somebody up from zero is unambiguous: you want to hear them.
+    if (pref.gain > 0) pref.muted = false;
+    this.#applyPref(userId);
+    return pref.gain;
+  }
+
+  setPeerMuted(userId, muted) {
+    const pref = this.#prefFor(userId);
+    pref.muted = Boolean(muted);
+    this.#applyPref(userId);
+    return pref.muted;
+  }
+
+  /**
+   * Who is talking right now, as a Set of slot numbers.
+   *
+   * Read rather than pushed: this changes several times a second, and an
+   * event per change would be a storm. The UI polls it on a short timer and
+   * toggles one attribute.
+   */
+  speakingMids() {
+    const out = new Set();
+    if (this.#micMeter && !this.muted && this.#micMeter.speaking) out.add(this.mid);
+    for (const [mid, sub] of this.#subs) {
+      if (sub.sink.speaking) out.add(mid);
+    }
+    return out;
+  }
+
   /**
    * The WHEP URL for one of another member's paths in this channel.
    *
@@ -149,6 +230,9 @@ export class VoiceSession {
       iceServers: this.iceServers,
     });
 
+    // Metered, not played: see createMeter.
+    this.#micMeter = createMeter(this.#micStream);
+
     const sender = this.#mic.pc.getSenders().find((s) => s.track?.kind === 'audio');
     if (sender) {
       const params = sender.getParameters();
@@ -158,9 +242,63 @@ export class VoiceSession {
     }
   }
 
+  /**
+   * Switch microphone mid-call.
+   *
+   * replaceTrack on the existing sender, NOT a new publish: the WHIP session
+   * stays up, so nobody else has to tear down and rebuild their subscription
+   * and there is no gap in the path. Swapping a track of the same kind needs
+   * no renegotiation, which is the one thing MediaMTX's WHIP cannot do.
+   *
+   * @returns {Promise<boolean>} false if the device could not be opened, in
+   *   which case the old microphone is still running and still published.
+   */
+  async switchMic(deviceId) {
+    if (!this.#mic) return false;
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { ...MIC_CONSTRAINTS, ...(deviceId ? { deviceId: { exact: deviceId } } : {}) },
+      });
+    } catch {
+      // Unplugged between listing it and asking for it, or in use elsewhere.
+      return false;
+    }
+
+    const track = stream.getAudioTracks()[0];
+    if (!track) {
+      stream.getTracks().forEach((t) => t.stop());
+      return false;
+    }
+    // Carry the mute across, or switching device would quietly unmute you.
+    track.enabled = !this.muted;
+
+    const sender = this.#mic.pc.getSenders().find((s) => s.track?.kind === 'audio');
+    if (!sender) {
+      stream.getTracks().forEach((t) => t.stop());
+      return false;
+    }
+    await sender.replaceTrack(track);
+
+    this.#micStream?.getTracks().forEach((t) => t.stop());
+    this.#micStream = stream;
+
+    this.#micMeter?.close();
+    this.#micMeter = createMeter(stream);
+    return true;
+  }
+
+  /** The device the microphone is actually on, as the browser reports it. */
+  get micDeviceId() {
+    return this.#micStream?.getAudioTracks()[0]?.getSettings?.().deviceId ?? '';
+  }
+
   async stopMic() {
     const mic = this.#mic;
     this.#mic = null;
+    this.#micMeter?.close();
+    this.#micMeter = null;
     this.#micStream?.getTracks().forEach((t) => t.stop());
     this.#micStream = null;
     if (!mic) return;
@@ -208,6 +346,10 @@ export class VoiceSession {
   async syncPeers(roster) {
     if (roster) this.lastRoster = roster;
     const current = this.lastRoster ?? [];
+
+    // Keep the slot-to-person map current before anything reads it: a
+    // preference is stored against the person, and the sink is found by slot.
+    for (const member of current) this.#owners.set(member.mid, member.userId);
 
     const wanted = new Set(
       current
@@ -361,8 +503,13 @@ export class VoiceSession {
       media: 'audio',
     });
     const sink = createSink(stream);
-    sink.set(this.deafened ? 0 : 1);
     this.#subs.set(mid, { pc, sink, stream });
+    // Straight to whatever this person was last set to, rather than to 1 and
+    // then corrected: a peer who reconnects should not blast back at full
+    // volume for the moment before the next render.
+    const userId = this.#owners.get(mid);
+    if (userId != null) this.#applyPref(userId);
+    else sink.set(this.deafened ? 0 : 1);
     return sink;
   }
 
@@ -382,19 +529,25 @@ export class VoiceSession {
    */
   setDeafened(deafened) {
     this.deafened = Boolean(deafened);
-    for (const sub of this.#subs.values()) sub.sink.set(this.deafened ? 0 : 1);
+    for (const [mid, sub] of this.#subs) {
+      const userId = this.#owners.get(mid);
+      const pref = userId != null ? this.#peerPrefs.get(userId) : null;
+      // Un-deafening restores each person to THEIR level, not to 1 -- it must
+      // not quietly undo somebody you turned down or muted.
+      sub.sink.set(this.deafened || pref?.muted ? 0 : (pref?.gain ?? 1));
+    }
     // Screen shares too: a deafen that leaves one person's game audio playing
     // is not a deafen.
     for (const sub of this.#video.values()) sub.sink?.set(this.deafened ? 0 : 1);
     return this.deafened;
   }
 
-  setPeerGain(mid, gain) {
-    this.#subs.get(mid)?.sink.set(gain);
-  }
-
   async leave() {
     this.lastRoster = [];
+    this.#owners.clear();
+    // #peerPrefs deliberately survives: turning somebody down is about that
+    // person, not about this channel, and re-muting them on every rejoin is
+    // the kind of thing that makes a mute feel broken.
     await this.stopMic();
     await this.stopCam();
     for (const mid of [...this.#subs.keys()]) await this.unsubscribe(mid);

@@ -32,6 +32,21 @@ const DEFAULTS = {
   priority: 'sharp',
   // Last audio input used with a camera or capture card.
   audioInputId: '',
+  /*
+   * Voice-channel devices, kept apart from audioInputId on purpose.
+   *
+   * That one is the input paired with a capture card -- console audio, line
+   * level, no echo cancellation. A microphone is the opposite of it in every
+   * respect, and sharing one setting means picking a sensible microphone
+   * silently breaks the capture card you set up last week.
+   *
+   * Empty means "whatever the system calls default". A specific id is a
+   * PREFERENCE, not a requirement: if that device is unplugged the voice
+   * falls back to the default and the preference is kept, so plugging the
+   * headset back in restores it without anyone touching a menu.
+   */
+  voiceInputId: '',
+  voiceOutputId: '',
   // Rolling clip buffer. Off by default: it is memory the user did not ask for.
   clipsEnabled: false,
   // GPU video encoding (NVENC / AMF / Quick Sync). 'auto' leaves Chromium to

@@ -496,6 +496,7 @@ npm --prefix client run test:ui   # clicks through the channels view
 
 MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:e2e
 MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:channel-video
+MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:voice
 ```
 
 Counts are deliberately not written down here — they went stale every release.

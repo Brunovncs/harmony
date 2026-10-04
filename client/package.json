@@ -10,6 +10,7 @@
     "test:e2e": "node test/e2e.mjs",
     "test:channel-video": "node test/channel-video.mjs",
     "test:ui": "node test/channels-ui.mjs",
+    "test:voice": "node test/voice-ui.mjs",
     "build": "electron-builder --win portable",
     "build:all": "electron-builder --win portable --linux AppImage --mac dmg"
   },

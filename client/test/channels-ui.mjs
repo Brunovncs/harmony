@@ -101,7 +101,7 @@ function startHarmonyServer() {
  * the looser selector returns the admin buttons alongside the name.
  */
 const CHANNEL_NAMES =
-  "return [...document.querySelectorAll('#channel-items li')]"
+  "return [...document.querySelectorAll('#channel-items li.channel-row')]"
   + ".map((li) => li.querySelector('.kind + span')?.textContent);";
 
 /** Type into an input and fire the events the app listens for. */
@@ -190,7 +190,7 @@ async function run() {
 
   // --- the sidebar ------------------------------------------------------
   const sidebar = await cdp.evaluate(`
-    const rows = [...document.querySelectorAll('#channel-items li')];
+    const rows = [...document.querySelectorAll('#channel-items li.channel-row')];
     return rows.map((li) => ({
       // The span right after .kind: .row-tools is a span as well, so
       // span:not(.kind) would pick the admin buttons up with the name.
@@ -214,7 +214,7 @@ async function run() {
   await cdp.evaluate(stubDialogs(['Game Night', '']));
   await cdp.evaluate("document.getElementById('channel-add').click(); return true;");
   // confirm() answers true, which the handler reads as "voice".
-  await waitFor(cdp, "document.querySelectorAll('#channel-items li').length === 3", {
+  await waitFor(cdp, "document.querySelectorAll('#channel-items li.channel-row').length === 3", {
     label: 'the new channel',
   });
   const names = await cdp.evaluate(
@@ -230,7 +230,7 @@ async function run() {
   //
   // The button that had no caller at all until 2.1.0.
   await cdp.evaluate(`
-    const rows = [...document.querySelectorAll('#channel-items li')];
+    const rows = [...document.querySelectorAll('#channel-items li.channel-row')];
     rows[2].querySelector('.row-tools button').click();   // move up
     return true;
   `);
@@ -293,7 +293,7 @@ async function run() {
 
   // --- the chat pane ----------------------------------------------------
   await cdp.evaluate(`
-    const rows = [...document.querySelectorAll('#channel-items li')];
+    const rows = [...document.querySelectorAll('#channel-items li.channel-row')];
     rows.find((li) => li.textContent.includes('general')).click();
     return true;
   `);
