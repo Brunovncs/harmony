@@ -84,7 +84,7 @@ docker run -d --name harmony --restart unless-stopped \
   -p 8080:8080 -p 8889:8889 -p 8189:8189/udp -p 8189:8189/tcp \
   -e MTX_WEBRTCADDITIONALHOSTS=stream.example.com \
   -e HARMONY_SIGNALING_URL=https://stream.example.com:8444 \
-  pedrolucasmiguel/harmony-server:2.0.0
+  pedrolucasmiguel/harmony-server:2.1.0
 ```
 
 Published for `linux/amd64` and `linux/arm64`. Compose and shell examples, plus
@@ -490,11 +490,15 @@ only types a name.
 ## Tests
 
 ```bash
-npm --prefix server test    # reservation, password gate, lockout  (38 checks)
-npm --prefix client test    # launches the app, drives it over CDP  (16 checks)
+npm --prefix server test    # reservation, accounts, channels, chat, soundpad
+npm --prefix client test    # launches the app, drives it over CDP
 
-MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:e2e   # (93 checks)
+MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:e2e
+MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:channel-video
 ```
+
+Counts are deliberately not written down here — they went stale every release.
+Each suite prints its own total.
 
 The e2e suite is the real thing: it starts MediaMTX and the control server, then
 drives two Electron clients over the DevTools Protocol — one publishes its screen

@@ -50,11 +50,29 @@ export class VoiceSession {
   #subs = new Map();
   #opening = new Set();
 
+  /**
+   * Incoming video, keyed `<mid>:<kind>` -- the channel mosaic.
+   *
+   * Separate from #subs rather than one map of everything, because the two are
+   * driven by different parts of the roster and fail independently: losing a
+   * camera must not take anybody's voice with it, and a member can publish a
+   * camera and a screen at once.
+   */
+  /** @type {Map<string, {pc: RTCPeerConnection, stream: MediaStream, mid: number, kind: string}>} */
+  #video = new Map();
+  #openingVideo = new Set();
+
+  /** @type {{pc: RTCPeerConnection, resourceUrl: string|null}|null} */
+  #cam = null;
+  #camStream = null;
+
   channelId = null;
   mid = null;
   token = '';
   whepBase = '';
   iceServers = [];
+  /** The WHIP URLs the server minted for this membership: voice, cam, screen. */
+  publishUrls = { voice: '', cam: '', screen: '' };
   /**
    * The last roster the server sent.
    *
@@ -80,17 +98,37 @@ export class VoiceSession {
     return [...this.#subs.keys()];
   }
 
-  configure({ channelId, mid, token, whepBase, iceServers }) {
+  configure({ channelId, mid, token, whepBase, iceServers, publish }) {
     this.channelId = channelId;
     this.mid = mid;
     this.token = token;
     this.whepBase = whepBase;
+    if (publish) this.publishUrls = publish;
     if (iceServers) this.iceServers = iceServers;
   }
 
-  /** The WHEP URL for another member's voice path in this channel. */
-  peerUrl(mid) {
-    const path = `vc-${this.channelId.toString(36)}-${mid.toString(36)}-v`;
+  /**
+   * Re-key an existing membership after the server re-issues its tokens.
+   *
+   * The slot does not change, so nothing has to be torn down: only the URLs
+   * handed to the NEXT subscription or publish need to be current. Sessions
+   * already open keep running, because MediaMTX consults the auth hook at
+   * setup and never again.
+   */
+  retoken({ token, publish }) {
+    if (token) this.token = token;
+    if (publish) this.publishUrls = publish;
+  }
+
+  /**
+   * The WHEP URL for one of another member's paths in this channel.
+   *
+   * `kind` is the single letter MediaMTX sees in the path: v voice, c camera,
+   * s screen. One read token covers all three -- the auth hook only compares
+   * the channel for a read, so any member may watch any other member.
+   */
+  peerUrl(mid, kind = 'v') {
+    const path = `vc-${this.channelId.toString(36)}-${mid.toString(36)}-${kind}`;
     return `${this.whepBase}/${path}/whep?token=${encodeURIComponent(this.token)}`;
   }
 
@@ -204,6 +242,118 @@ export class VoiceSession {
     );
   }
 
+  // ---------------------------------------------------------- channel video
+
+  /**
+   * Publish a camera into this channel.
+   *
+   * A path of its own (`vc-<cid>-<mid>-c`), never a second track on the voice
+   * path. MediaMTX's WHIP cannot renegotiate an added track -- measured in the
+   * Phase 0 spike, where PATCH accepted only ICE trickle fragments -- so
+   * adding video to the live audio session would mean tearing it down and
+   * cutting everyone's audio to turn a camera on.
+   */
+  async startCam(stream, { bitrate = 400_000, framerate = 24 } = {}) {
+    if (this.#cam) return;
+    this.#camStream = stream;
+    this.#cam = await publish({
+      url: this.publishUrls.cam,
+      stream,
+      iceServers: this.iceServers,
+      codec: 'H264',
+      maxBitrate: bitrate,
+      maxFramerate: framerate,
+      contentHint: 'motion',
+    });
+  }
+
+  async stopCam() {
+    const cam = this.#cam;
+    this.#cam = null;
+    this.#camStream?.getTracks().forEach((t) => t.stop());
+    this.#camStream = null;
+    if (!cam) return;
+    cam.pc.close();
+    if (cam.resourceUrl) await harmony.api.hangup(cam.resourceUrl).catch(() => {});
+  }
+
+  get camLive() {
+    return Boolean(this.#cam);
+  }
+
+  /** Tiles to draw, in a stable order so the grid does not reshuffle itself. */
+  get videoTiles() {
+    return [...this.#video.values()]
+      .map(({ mid, kind, stream }) => ({ mid, kind, stream }))
+      .sort((a, b) => a.mid - b.mid || a.kind.localeCompare(b.kind));
+  }
+
+  /**
+   * Bring the video subscriptions in line with the roster.
+   *
+   * The same shape as syncPeers, and for the same reason: a publisher's path
+   * is not readable until the first RTP packet arrives, so an early subscribe
+   * 404s and has to be retried on a timer rather than on the next push, which
+   * in a settled channel never comes.
+   */
+  async syncVideo(roster) {
+    const current = roster ?? this.lastRoster ?? [];
+
+    const wanted = new Map();
+    for (const member of current) {
+      if (member.mid === this.mid) continue;
+      for (const kind of ['c', 's']) {
+        if (member.publishing?.includes(kind)) {
+          wanted.set(`${member.mid}:${kind}`, { mid: member.mid, kind });
+        }
+      }
+    }
+
+    for (const key of [...this.#video.keys()]) {
+      if (!wanted.has(key)) this.unsubscribeVideo(key);
+    }
+
+    let changed = false;
+    for (const [key, { mid, kind }] of wanted) {
+      if (this.#video.has(key) || this.#openingVideo.has(key)) continue;
+      this.#openingVideo.add(key);
+      try {
+        const { pc, stream } = await watch({
+          url: this.peerUrl(mid, kind),
+          iceServers: this.iceServers,
+        });
+        // A screen share carries the sharer's audio. It goes through gain.js
+        // like every other incoming stream rather than through the <video>
+        // element, so the tile stays muted and deafen covers it -- otherwise
+        // deafening would silence everybody except the person sharing.
+        const sink = createSink(stream);
+        sink.set(this.deafened ? 0 : 1);
+        this.#video.set(key, { pc, stream, sink, mid, kind });
+        changed = true;
+      } catch {
+        // 404 while the path warms up. The caller's timer comes back.
+      } finally {
+        this.#openingVideo.delete(key);
+      }
+      await new Promise((r) => setTimeout(r, SUBSCRIBE_STAGGER_MS));
+    }
+    return { tiles: this.#video.size, changed };
+  }
+
+  /** True while somebody is publishing video we have not managed to open. */
+  get hasMissingVideo() {
+    return (this.lastRoster ?? []).some((m) => m.mid !== this.mid
+      && ['c', 's'].some((k) => m.publishing?.includes(k) && !this.#video.has(`${m.mid}:${k}`)));
+  }
+
+  unsubscribeVideo(key) {
+    const sub = this.#video.get(key);
+    if (!sub) return;
+    this.#video.delete(key);
+    sub.sink?.close?.();
+    sub.pc.close();
+  }
+
   async subscribe(mid) {
     const { pc, stream } = await watch({
       url: this.peerUrl(mid),
@@ -233,6 +383,9 @@ export class VoiceSession {
   setDeafened(deafened) {
     this.deafened = Boolean(deafened);
     for (const sub of this.#subs.values()) sub.sink.set(this.deafened ? 0 : 1);
+    // Screen shares too: a deafen that leaves one person's game audio playing
+    // is not a deafen.
+    for (const sub of this.#video.values()) sub.sink?.set(this.deafened ? 0 : 1);
     return this.deafened;
   }
 
@@ -243,9 +396,12 @@ export class VoiceSession {
   async leave() {
     this.lastRoster = [];
     await this.stopMic();
+    await this.stopCam();
     for (const mid of [...this.#subs.keys()]) await this.unsubscribe(mid);
+    for (const key of [...this.#video.keys()]) this.unsubscribeVideo(key);
     this.channelId = null;
     this.mid = null;
     this.token = '';
+    this.publishUrls = { voice: '', cam: '', screen: '' };
   }
 }

@@ -75,6 +75,7 @@ export const harmony = {
     login: lift(raw.api.login),
     logout: lift(raw.api.logout),
     me: lift(raw.api.me),
+    setAvatar: lift(raw.api.setAvatar),
     roster: lift(raw.api.roster),
     setRole: lift(raw.api.setRole),
 
@@ -92,6 +93,7 @@ export const harmony = {
     soundpad: lift(raw.api.soundpad),
     addClip: lift(raw.api.addClip),
     deleteClip: lift(raw.api.deleteClip),
+    reorderClips: lift(raw.api.reorderClips),
   },
 
   media: {

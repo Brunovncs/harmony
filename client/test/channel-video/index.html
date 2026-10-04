@@ -1,0 +1,162 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>channel video</title>
+<body>
+<script>
+// WebRTC half of the channel-mosaic test, driven over CDP by
+// ../channel-video.mjs. That script does all the Harmony HTTP and WebSocket
+// work and hands this page only URLs, so everything here is peer connections.
+//
+// The real renderer cannot be used for this: its CSP forbids direct network
+// access by design, which is the whole reason the app routes fetch through the
+// main process. A spike page with no CSP is the only way to drive WHIP and
+// WHEP from a renderer directly.
+
+const pubs = new Map();   // key -> RTCPeerConnection
+const subs = new Map();   // key -> { pc, video }
+
+/** Non-trickle ICE: MediaMTX takes one complete offer. */
+function gathered(pc) {
+  if (pc.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(t);
+      pc.removeEventListener('icegatheringstatechange', h);
+      resolve();
+    };
+    const h = () => { if (pc.iceGatheringState === 'complete') done(); };
+    pc.addEventListener('icegatheringstatechange', h);
+    const t = setTimeout(done, 5000);
+  });
+}
+
+async function exchange(url, sdp) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/sdp' },
+    body: sdp,
+  });
+  return { status: res.status, body: await res.text() };
+}
+
+/**
+ * A moving picture, so the encoder has something to send.
+ *
+ * A static canvas encodes to almost nothing after the first keyframe, and a
+ * receiver waiting on framesDecoded would sit there watching zero. The sweep
+ * guarantees a changing frame every tick.
+ */
+function movingCanvas(label) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 320;
+  canvas.height = 180;
+  const ctx = canvas.getContext('2d');
+  let x = 0;
+  setInterval(() => {
+    x = (x + 7) % canvas.width;
+    ctx.fillStyle = '#102030';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#6ea8fe';
+    ctx.fillRect(x, 40, 60, 100);
+    ctx.fillStyle = '#fff';
+    ctx.font = '16px sans-serif';
+    ctx.fillText(label, 10, 24);
+  }, 40);
+  return canvas.captureStream(15);
+}
+
+/** Publish a moving picture to a channel path's WHIP URL. */
+window.publishVideo = async (key, url, label) => {
+  try {
+    const stream = movingCanvas(label);
+    const pc = new RTCPeerConnection();
+    for (const track of stream.getVideoTracks()) {
+      pc.addTransceiver(track, { direction: 'sendonly', streams: [stream] });
+    }
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await gathered(pc);
+
+    const r = await exchange(url, pc.localDescription.sdp);
+    if (r.status !== 201) {
+      pc.close();
+      return { ok: false, status: r.status, body: r.body.slice(0, 200) };
+    }
+    await pc.setRemoteDescription({ type: 'answer', sdp: r.body });
+    pubs.set(key, pc);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+};
+
+/** Subscribe to a channel path's WHEP URL and attach it to a video element. */
+window.subscribeVideo = async (key, url) => {
+  try {
+    const pc = new RTCPeerConnection();
+    const stream = new MediaStream();
+    pc.addTransceiver('video', { direction: 'recvonly' });
+    pc.addTransceiver('audio', { direction: 'recvonly' });
+    pc.addEventListener('track', (e) => stream.addTrack(e.track));
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await gathered(pc);
+
+    const r = await exchange(url, pc.localDescription.sdp);
+    if (r.status !== 201) {
+      pc.close();
+      return { ok: false, status: r.status, body: r.body.slice(0, 200) };
+    }
+    await pc.setRemoteDescription({ type: 'answer', sdp: r.body });
+
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = stream;
+    document.body.append(video);
+
+    subs.set(key, { pc, video });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+};
+
+/** Is this subscription actually decoding pictures? */
+window.videoStats = async (key) => {
+  const sub = subs.get(key);
+  if (!sub) return { exists: false };
+  let framesDecoded = 0;
+  let bytes = 0;
+  let width = 0;
+  const stats = await sub.pc.getStats();
+  stats.forEach((r) => {
+    if (r.type === 'inbound-rtp' && r.kind === 'video') {
+      framesDecoded += r.framesDecoded || 0;
+      bytes += r.bytesReceived || 0;
+      width = Math.max(width, r.frameWidth || 0);
+    }
+  });
+  return {
+    exists: true,
+    state: sub.pc.connectionState,
+    framesDecoded,
+    bytes,
+    width,
+    elementWidth: sub.video.videoWidth,
+  };
+};
+
+window.teardownAll = () => {
+  for (const pc of pubs.values()) pc.close();
+  for (const { pc, video } of subs.values()) { pc.close(); video.remove(); }
+  pubs.clear();
+  subs.clear();
+  return true;
+};
+
+window.channelVideoReady = true;
+</script>
+</body>

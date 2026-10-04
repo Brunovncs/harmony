@@ -27,7 +27,8 @@ import {
 } from './channels.js';
 import { Realtime } from './realtime.js';
 import {
-  Chat, Soundpad, publicMessage, publicClip, allowedTypes, MAX_UPLOAD_BYTES,
+  Chat, Soundpad, publicMessage, publicClip, allowedTypes, mediaTypeOf,
+  MAX_UPLOAD_BYTES, MAX_AVATAR_BYTES, MAX_CLIP_BYTES,
 } from './chat.js';
 
 const app = express();
@@ -356,6 +357,55 @@ app.post('/api/accounts/password', requireLogin, async (req, res) => {
   return res.json({ ok: true, token: accounts.startSession(req.user.id) });
 });
 
+/**
+ * Set or clear your profile picture.
+ *
+ * Two steps on purpose: the picture is uploaded through /api/uploads like any
+ * other file, and this only points the account at it. That means avatars
+ * inherit the content-type allowlist, the disk quota and the content-addressed
+ * storage for free, and two people who pick the same picture cost one copy.
+ *
+ * The reference juggling is the part that matters. An avatar nobody references
+ * is an orphan the moment the next upload needs room, so the new file is
+ * retained BEFORE the old one is released -- re-setting the same picture must
+ * not momentarily drop it to zero.
+ */
+app.post('/api/accounts/avatar', requireLogin, (req, res) => {
+  const hash = req.body?.hash == null ? null : String(req.body.hash);
+
+  if (hash !== null) {
+    if (!/^[0-9a-f]{64}$/.test(hash)) {
+      return res.status(400).json({ error: 'bad_hash', message: 'That is not an uploaded file.' });
+    }
+    const upload = chat.fileInfo(hash);
+    if (!upload) {
+      return res.status(400).json({ error: 'no_such_upload', message: 'Upload the picture first.' });
+    }
+    if (mediaTypeOf(upload.content_type) !== 'image') {
+      return res.status(400).json({
+        error: 'not_an_image',
+        message: 'A profile picture has to be an image.',
+      });
+    }
+    if (upload.bytes > MAX_AVATAR_BYTES) {
+      return res.status(400).json({
+        error: 'avatar_too_large',
+        message: `Profile pictures are limited to ${Math.round(MAX_AVATAR_BYTES / 1024)} KB.`,
+      });
+    }
+    chat.retain(hash);
+  }
+
+  const result = accounts.setAvatar(req.user.id, hash);
+  if (!result.ok) return res.status(404).json({ error: result.error });
+  if (result.previous && result.previous !== hash) chat.release(result.previous);
+
+  const user = publicUser(result.user);
+  // Everyone draws everyone else's picture, so everyone needs to know.
+  realtime?.broadcast({ type: 'user:updated', user });
+  return res.json({ user });
+});
+
 /** Anyone logged in may see the roster; it is a friends' server, not a forum. */
 app.get('/api/accounts', requireLogin, (_req, res) => {
   res.json({ users: accounts.list().map((u) => publicUser(u)) });
@@ -372,7 +422,9 @@ app.post('/api/accounts/:id/role', requireRole('owner'), (req, res) => {
     };
     return res.status(400).json({ error: result.error, message: messages[result.error] });
   }
-  return res.json({ user: publicUser(result.user) });
+  const user = publicUser(result.user);
+  realtime?.broadcast({ type: 'user:updated', user });
+  return res.json({ user });
 });
 
 /**
@@ -727,11 +779,30 @@ app.post('/api/soundpad', requireAdmin, (req, res) => {
       invalid_name: 'Give the clip a name.',
       no_such_upload: 'Upload the audio first.',
       not_audio: 'Soundpad clips have to be audio.',
+      clip_too_large:
+        `Soundpad clips are limited to ${Math.round(MAX_CLIP_BYTES / 1024 / 1024)} MB -- `
+        + 'every client downloads every clip.',
     };
     return res.status(400).json({ error: result.error, message: messages[result.error] });
   }
   realtime?.broadcast({ type: 'soundpad', clips: soundpad.list().map(publicClip) });
   return res.status(201).json({ clip: publicClip(result.clip) });
+});
+
+// Before /api/soundpad/:id/delete only by habit -- they cannot collide, since
+// that one has a second path segment. The ordering rule still applies to the
+// next person who adds /api/soundpad/:id, so it stays up here.
+app.post('/api/soundpad/reorder', requireAdmin, (req, res) => {
+  const result = soundpad.reorder(Array.isArray(req.body?.ids) ? req.body.ids : []);
+  if (!result.ok) {
+    return res.status(400).json({
+      error: result.error,
+      message: 'Send every clip id exactly once, in the order you want.',
+    });
+  }
+  const clips = result.clips.map(publicClip);
+  realtime?.broadcast({ type: 'soundpad', clips });
+  return res.json({ clips });
 });
 
 app.post('/api/soundpad/:id/delete', requireAdmin, (req, res) => {

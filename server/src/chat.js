@@ -40,6 +40,26 @@ export const allowedTypes = () => [...ALLOWED_TYPES.keys()];
 /** Hard ceiling per file, regardless of the total quota. */
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
+/**
+ * Per-clip ceiling for the soundpad, far below the generic upload cap.
+ *
+ * Clips are prefetched by every client on sign-in so the first press of a
+ * button is not a download, which makes their size a cost paid N times on
+ * every join rather than once. Two megabytes is about a minute of 128 kbps
+ * audio -- longer than anything anyone actually puts on a soundpad.
+ */
+export const MAX_CLIP_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Per-avatar ceiling.
+ *
+ * Refused rather than resized: resizing means an image library, and a library
+ * is a dependency. The client downscales on a canvas before uploading, which
+ * costs nothing and keeps the decision about quality on the machine that can
+ * see the picture.
+ */
+export const MAX_AVATAR_BYTES = 256 * 1024;
+
 /** Messages returned by one history request. */
 const PAGE_SIZE = 50;
 
@@ -183,6 +203,23 @@ export class Chat {
       this.#q.deleteUpload.run(hash);
       if (this.usedBytes + needed <= this.#maxBytes) return;
     }
+  }
+
+  /**
+   * Take a reference on a stored file, so eviction leaves it alone.
+   *
+   * Public because messages are not the only thing that points at an upload:
+   * avatars and soundpad clips do too, and each of those lives in its own
+   * module. Reference counting in one place and the owners in another is how a
+   * file somebody is still using gets swept.
+   */
+  retain(hash) {
+    this.#q.addRef.run(hash);
+  }
+
+  /** Give one back. Dropping to zero makes the file eligible for eviction. */
+  release(hash) {
+    if (hash) this.#q.dropRef.run(hash);
   }
 
   fileInfo(hash) {
@@ -335,6 +372,7 @@ export class Soundpad {
         + 'VALUES (?, ?, ?, ?, ?)',
       ),
       nextPosition: db.prepare('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM soundpad_clips'),
+      setPosition: db.prepare('UPDATE soundpad_clips SET position = ? WHERE id = ?'),
       remove: db.prepare('DELETE FROM soundpad_clips WHERE id = ?'),
       addRef: db.prepare('UPDATE uploads SET refs = refs + 1 WHERE hash = ?'),
       dropRef: db.prepare('UPDATE uploads SET refs = MAX(0, refs - 1) WHERE hash = ?'),
@@ -355,6 +393,10 @@ export class Soundpad {
     if (mediaTypeOf(upload.content_type) !== 'audio') {
       return { ok: false, error: 'not_audio' };
     }
+    // Checked against the stored row rather than the request: the upload may
+    // have been made by somebody else, or reused from an old message, and the
+    // cap has to hold either way.
+    if (upload.bytes > MAX_CLIP_BYTES) return { ok: false, error: 'clip_too_large' };
 
     this.#db.exec('BEGIN');
     try {
@@ -384,6 +426,30 @@ export class Soundpad {
       throw err;
     }
     return { ok: true, clip };
+  }
+
+  /**
+   * Put the clips in exactly this order.
+   *
+   * The whole list, for the same reason Channels.reorder takes the whole list:
+   * two admins dragging at once cannot interleave into an order neither of
+   * them chose.
+   */
+  reorder(ids) {
+    const existing = this.list().map((c) => c.id);
+    const wanted = [...new Set(ids.map((n) => Number(n)))];
+    if (wanted.length !== existing.length || wanted.some((id) => !existing.includes(id))) {
+      return { ok: false, error: 'bad_order' };
+    }
+    this.#db.exec('BEGIN');
+    try {
+      wanted.forEach((id, index) => this.#q.setPosition.run(index, id));
+      this.#db.exec('COMMIT');
+    } catch (err) {
+      this.#db.exec('ROLLBACK');
+      throw err;
+    }
+    return { ok: true, clips: this.list() };
   }
 
   get(id) {

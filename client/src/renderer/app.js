@@ -102,6 +102,9 @@ const el = {
   liveItems: $('live-items'),
 
   channelsWho: $('channels-who'),
+  channelsAvatar: $('channels-avatar'),
+  avatarButton: $('avatar-button'),
+  avatarFile: $('avatar-file'),
   channelsRole: $('channels-role'),
   channelsShare: $('channels-share'),
   channelsWatch: $('channels-watch'),
@@ -129,7 +132,9 @@ const el = {
   soundpadAdd: $('soundpad-add'),
   soundpadFile: $('soundpad-file'),
   soundpadGrid: $('soundpad-grid'),
+  channelVideo: $('channel-video'),
   voiceCam: $('voice-cam'),
+  voiceScreen: $('voice-screen'),
   voiceMute: $('voice-mute'),
   voiceDeafen: $('voice-deafen'),
   voiceLeave: $('voice-leave'),
@@ -251,6 +256,22 @@ const state = {
    * locally, so there is nothing to reconcile when a push arrives.
    */
   channels: { list: [], occupancy: {}, roster: [], joining: false },
+
+  /**
+   * Everyone with an account, by id.
+   *
+   * Kept because the voice roster and chat messages carry a user id and a
+   * nickname but not a picture -- the picture can change mid-session, and
+   * denormalising it into every roster push would mean a stale avatar on every
+   * screen until the next one. One map, updated by `user:updated`.
+   */
+  users: new Map(),
+
+  /**
+   * Where a screen share goes: null for the flat `<nickname>` namespace, or a
+   * channel's own `vc-<cid>-<mid>-s` path.
+   */
+  share: { target: null },
   chat: { channelId: null, messages: [], pinned: [], searching: false, pendingFile: null },
   soundpad: { clips: [] },
   /** The webcam publish, which is a SECOND stream under `<nickname>-cam`. */
@@ -784,6 +805,116 @@ function showChannelsError(message) {
 
 const isAdmin = () => state.auth.user?.role === 'owner' || state.auth.user?.role === 'admin';
 
+/** Profile pictures ------------------------------------------------------ */
+
+/** Square side we store an avatar at, and the ceiling the server enforces. */
+const AVATAR_PX = 256;
+const AVATAR_MAX_BYTES = 256 * 1024;
+
+const knownUser = (id) => state.users.get(id) ?? null;
+
+/**
+ * One avatar: the picture if there is one, initials if there is not.
+ *
+ * `harmony://app/media/<hash>` is same-origin, so the CSP's `img-src 'self'`
+ * covers it with no change, and the main process downloads and verifies the
+ * file the first time the element asks for it.
+ */
+function avatarEl(user, extraClass = '') {
+  const span = document.createElement('span');
+  span.className = `avatar ${extraClass}`.trim();
+  if (user?.avatarHash) {
+    const img = document.createElement('img');
+    img.src = harmony.mediaUrl(user.avatarHash);
+    img.alt = '';
+    span.append(img);
+  } else {
+    span.textContent = String(user?.nickname ?? '?').slice(0, 2).toUpperCase();
+  }
+  return span;
+}
+
+/**
+ * Repaint our own picture in the bar.
+ *
+ * Moves the children out of a throwaway avatarEl rather than building the
+ * markup a second way, so the bar can never drift from the rows.
+ */
+function renderOwnAvatar() {
+  el.channelsAvatar.replaceChildren(...avatarEl(state.auth.user).childNodes);
+}
+
+/**
+ * Everything the media cache must not evict, recomputed from scratch.
+ *
+ * media.keep REPLACES the set rather than adding to it, so each caller
+ * working out its own half is a bug waiting to happen: whoever ran last wins
+ * and the other half starts being evicted. Avatars made that concrete --
+ * they are drawn on every screen constantly, so losing one means downloading
+ * it again immediately. Hence one function, called from all three places that
+ * change any part of it.
+ */
+function refreshKeepSet() {
+  return harmony.media.keep([
+    ...[...state.users.values()].map((u) => u.avatarHash).filter(Boolean),
+    ...state.soundpad.clips.map((c) => c.hash),
+    ...state.chat.pinned.map((m) => m.attachmentHash).filter(Boolean),
+  ]).catch(() => { /* the cache is a cache */ });
+}
+
+/** Pull the roster so every id in a message or a roster row has a picture. */
+async function refreshUsers() {
+  try {
+    const { users } = await harmony.api.roster(state.server);
+    state.users = new Map(users.map((u) => [u.id, u]));
+    await refreshKeepSet();
+  } catch {
+    // Not fatal: without it everyone simply shows initials.
+  }
+}
+
+/**
+ * Downscale a picked image and upload it.
+ *
+ * Resized here rather than on the server, which is what keeps the server free
+ * of an image library. A 256-pixel square JPEG is a few kilobytes, so the
+ * server's cap is a backstop against somebody posting a raw photo through the
+ * API rather than something this path ever hits.
+ */
+async function setOwnAvatar(file) {
+  try {
+    showChannelsError('');
+    const bitmap = await createImageBitmap(file);
+    const canvas = document.createElement('canvas');
+    canvas.width = AVATAR_PX;
+    canvas.height = AVATAR_PX;
+    const ctx = canvas.getContext('2d');
+    // Cover rather than fit: a letterboxed avatar in a circle looks broken.
+    const scale = Math.max(AVATAR_PX / bitmap.width, AVATAR_PX / bitmap.height);
+    const w = bitmap.width * scale;
+    const h = bitmap.height * scale;
+    ctx.drawImage(bitmap, (AVATAR_PX - w) / 2, (AVATAR_PX - h) / 2, w, h);
+    bitmap.close();
+
+    const encode = (quality) =>
+      new Promise((done) => canvas.toBlob(done, 'image/jpeg', quality));
+    let blob = await encode(0.85);
+    if (blob && blob.size > AVATAR_MAX_BYTES) blob = await encode(0.6);
+    if (!blob) throw new Error('Could not read that image.');
+    if (blob.size > AVATAR_MAX_BYTES) throw new Error('That picture is too detailed to shrink.');
+
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const upload = await harmony.media.upload(state.server, bytes, 'image/jpeg');
+    const { user } = await harmony.api.setAvatar(state.server, upload.hash);
+    state.auth.user = user;
+    state.users.set(user.id, user);
+    renderOwnAvatar();
+    refreshKeepSet();
+  } catch (err) {
+    showChannelsError(err.message);
+  }
+}
+
 /**
  * Open the realtime socket and show the lobby.
  *
@@ -800,6 +931,8 @@ async function enterChannels() {
   // to be told separately where to download from.
   await harmony.media.setServer(state.server);
   showChannelsError('');
+  renderOwnAvatar();
+  await refreshUsers();
   loadSoundpad();
   showView('view-channels');
 
@@ -819,8 +952,59 @@ async function enterChannels() {
   renderChannels();
 }
 
+/**
+ * Move one channel one place and send the whole resulting order.
+ *
+ * The server takes a complete permutation rather than "move X to N", so two
+ * admins reordering at once cannot interleave into an order neither of them
+ * chose. That makes this the client's job: work out the list we want, send it.
+ */
+async function nudgeChannel(id, delta) {
+  const ids = state.channels.list.map((c) => c.id);
+  const from = ids.indexOf(id);
+  const to = from + delta;
+  if (from < 0 || to < 0 || to >= ids.length) return;
+  ids.splice(to, 0, ...ids.splice(from, 1));
+  try {
+    await harmony.api.reorderChannels(state.server, ids);
+    // The server broadcasts the new list; nothing is applied locally.
+  } catch (err) {
+    showChannelsError(err.message);
+  }
+}
+
+async function editChannel(channel) {
+  const name = window.prompt(`Rename "${channel.name}" to:`, channel.name);
+  if (name === null) return;
+  const password = window.prompt(
+    'Password (empty removes it, Cancel leaves it alone):',
+    '',
+  );
+  try {
+    await harmony.api.updateChannel(state.server, channel.id, {
+      ...(name.trim() ? { name } : {}),
+      ...(password === null ? {} : { password }),
+    });
+  } catch (err) {
+    showChannelsError(err.message);
+  }
+}
+
+/** A small admin button that must not also trigger the row's own click. */
+function rowButton(label, title, onClick) {
+  const button = document.createElement('button');
+  button.className = 'ghost tiny';
+  button.textContent = label;
+  button.title = title;
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    onClick();
+  });
+  return button;
+}
+
 function renderChannels() {
-  const items = state.channels.list.map((channel) => {
+  const items = state.channels.list.map((channel, index) => {
     const li = document.createElement('li');
     li.dataset.id = String(channel.id);
     if (channel.id === state.voice.channelId) li.setAttribute('data-active', '');
@@ -847,6 +1031,29 @@ function renderChannels() {
       count.className = 'count';
       count.textContent = String(occupants);
       li.append(count);
+    }
+
+    if (isAdmin()) {
+      const tools = document.createElement('span');
+      tools.className = 'row-tools';
+      const up = rowButton('\u25B2', 'Move up', () => nudgeChannel(channel.id, -1));
+      const down = rowButton('\u25BC', 'Move down', () => nudgeChannel(channel.id, 1));
+      up.disabled = index === 0;
+      down.disabled = index === state.channels.list.length - 1;
+      tools.append(
+        up,
+        down,
+        rowButton('\u270E', 'Rename or set a password', () => editChannel(channel)),
+        rowButton('\u2715', 'Delete this channel', async () => {
+          if (!window.confirm(`Delete "${channel.name}" and everything in it?`)) return;
+          try {
+            await harmony.api.deleteChannel(state.server, channel.id);
+          } catch (err) {
+            showChannelsError(err.message);
+          }
+        }),
+      );
+      li.append(tools);
     }
 
     li.addEventListener('click', () => onChannelClick(channel));
@@ -897,7 +1104,11 @@ async function joinVoice(channel, password) {
       mid: reply.mid,
       token: reply.token,
       whepBase: reply.whepBase,
-      iceServers: state.mosaic?.iceServers ?? [],
+      // The WHIP URLs for this membership's own camera and screen paths. The
+      // client never builds them: they are minted with the slot baked in, and
+      // the auth hook refuses a publish whose slot does not match.
+      publish: reply.publish,
+      iceServers: state.session?.iceServers ?? state.mosaic?.iceServers ?? [],
     });
 
     el.voiceName.textContent = channel.name;
@@ -912,6 +1123,7 @@ async function joinVoice(channel, password) {
 
     applyVoiceButtons();
     renderVoiceRoster(reply.roster ?? []);
+    renderChannelVideo();
     renderChannels();
 
     // Reconcile subscriptions on a slow timer as well as on roster pushes.
@@ -922,8 +1134,18 @@ async function joinVoice(channel, password) {
     // comes, so without this that peer is inaudible until somebody happens to
     // join or mute. Measured on a real 16-member channel.
     addTimer(setInterval(() => {
-      if (!state.voice.channelId || !state.voice.hasMissingPeers) return;
-      state.voice.syncPeers().catch(() => { /* retried on the next tick */ });
+      if (!state.voice.channelId) return;
+      if (state.voice.hasMissingPeers) {
+        state.voice.syncPeers().catch(() => { /* retried on the next tick */ });
+      }
+      // Video has exactly the same warm-up window, and a camera turned on in
+      // a settled channel produces one roster push -- which arrives before
+      // the path is readable.
+      if (state.voice.hasMissingVideo) {
+        state.voice.syncVideo()
+          .then((r) => { if (r.changed) renderChannelVideo(); })
+          .catch(() => { /* retried on the next tick */ });
+      }
     }, VOICE_RECONCILE_MS), 'voice');
   } catch (err) {
     showChannelsError(err.message);
@@ -936,6 +1158,10 @@ async function joinVoice(channel, password) {
 async function leaveVoice({ silent = false } = {}) {
   clearTimers('voice');
   const channelId = state.voice.channelId;
+  // A screen share published into this channel has nowhere to go once we are
+  // out of it, and its path stops being authorised the moment the slot is
+  // released.
+  if (state.share.target?.channelId === channelId) await teardown();
   await state.voice.leave();
   if (channelId && !silent) {
     await harmony.realtime.request('voice:leave', { channelId }).catch(() => {});
@@ -943,6 +1169,8 @@ async function leaveVoice({ silent = false } = {}) {
   state.channels.roster = [];
   el.voiceActive.hidden = true;
   el.voiceIdle.hidden = false;
+  renderChannelVideo();
+  applyVoiceButtons();
   renderChannels();
 }
 
@@ -951,6 +1179,13 @@ function applyVoiceButtons() {
   el.voiceMute.toggleAttribute('data-on', state.voice.muted);
   el.voiceDeafen.textContent = state.voice.deafened ? 'Undeafen' : 'Deafen';
   el.voiceDeafen.toggleAttribute('data-on', state.voice.deafened);
+  el.voiceCam.textContent = state.voice.camLive ? 'Stop camera' : 'Start camera';
+  el.voiceCam.toggleAttribute('data-on', state.voice.camLive);
+
+  const sharing = state.share.target?.channelId === state.voice.channelId
+    && Boolean(state.voice.channelId);
+  el.voiceScreen.textContent = sharing ? 'Stop sharing' : 'Share screen here';
+  el.voiceScreen.toggleAttribute('data-on', sharing);
 }
 
 function renderVoiceRoster(roster) {
@@ -960,9 +1195,21 @@ function renderVoiceRoster(roster) {
   el.voiceRoster.replaceChildren(...roster.map((member) => {
     const li = document.createElement('li');
 
+    li.append(avatarEl(knownUser(member.userId) ?? { nickname: member.nickname }));
+
     const name = document.createElement('span');
     name.textContent = member.nickname + (member.mid === state.voice.mid ? ' (you)' : '');
     li.append(name);
+
+    // What they are sending, so a silent tile is distinguishable from a
+    // camera nobody has turned on.
+    for (const [kind, label] of [['c', 'camera'], ['s', 'screen']]) {
+      if (!member.publishing?.includes(kind)) continue;
+      const tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = label;
+      li.append(tag);
+    }
 
     if (member.forceMuted) {
       const tag = document.createElement('span');
@@ -989,20 +1236,107 @@ function renderVoiceRoster(roster) {
         }).catch((err) => showChannelsError(err.message));
       });
 
-      const kick = document.createElement('button');
-      kick.className = 'ghost small danger';
-      kick.textContent = 'Disconnect';
-      kick.addEventListener('click', () => {
+      /**
+       * Move somebody into another channel.
+       *
+       * A select rather than a button per channel: the server already accepts
+       * any voice channel as a destination, and the list is as long as the
+       * server's. Disconnecting is the same request with a null destination,
+       * which is why it sits in the same control.
+       */
+      const move = document.createElement('select');
+      move.className = 'move-select';
+      move.title = 'Move this person';
+      move.append(new Option('Move\u2026', ''));
+      for (const channel of state.channels.list) {
+        if (channel.kind !== 'voice' || channel.id === state.voice.channelId) continue;
+        move.append(new Option(channel.name, String(channel.id)));
+      }
+      move.append(new Option('Disconnect', 'none'));
+      move.addEventListener('change', () => {
+        const choice = move.value;
+        move.value = '';
+        if (!choice) return;
         harmony.realtime.request('admin:move', {
           userId: member.userId,
-          toChannelId: null,
+          toChannelId: choice === 'none' ? null : Number(choice),
         }).catch((err) => showChannelsError(err.message));
       });
 
-      li.append(mute, kick);
+      li.append(mute, move);
     }
 
     return li;
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// The channel mosaic
+//
+// Every camera and screen share inside the voice channel you are in, opened
+// automatically from the roster. It is the same WHEP subscription the flat
+// mosaic uses, with two differences: the paths are channel-scoped
+// (`vc-<cid>-<mid>-c` / `-s`) and the read token is the per-channel one, so a
+// stream shared into a locked channel is not watchable by someone who never
+// got in.
+// ---------------------------------------------------------------------------
+
+const KIND_LABEL = { c: 'camera', s: 'screen' };
+
+const nameOfMid = (mid) =>
+  state.channels.roster.find((m) => m.mid === mid)?.nickname ?? `slot ${mid}`;
+
+/**
+ * Draw the tiles.
+ *
+ * Nodes for tiles that are still wanted are REUSED rather than rebuilt:
+ * reassigning a <video>'s srcObject restarts playback, so rebuilding the grid
+ * on every roster push would make every tile stutter whenever anybody muted.
+ */
+function renderChannelVideo() {
+  const tiles = state.voice.channelId ? state.voice.videoTiles : [];
+  el.channelVideo.hidden = tiles.length === 0;
+
+  const existing = new Map(
+    [...el.channelVideo.children].map((node) => [node.dataset.key, node]),
+  );
+
+  el.channelVideo.replaceChildren(...tiles.map(({ mid, kind, stream }) => {
+    const key = `${mid}:${kind}`;
+    const caption = `${nameOfMid(mid)} \u00B7 ${KIND_LABEL[kind] ?? kind}`;
+
+    const kept = existing.get(key);
+    if (kept) {
+      kept.querySelector('figcaption').textContent = caption;
+      return kept;
+    }
+
+    const figure = document.createElement('figure');
+    figure.className = 'channel-tile';
+    figure.dataset.key = key;
+
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.playsInline = true;
+    // Muted on purpose: a screen share's audio goes through gain.js like
+    // every other incoming stream, so that deafen reaches it. Letting the
+    // element play it too would double it.
+    video.muted = true;
+    video.srcObject = stream;
+
+    const label = document.createElement('figcaption');
+    label.textContent = caption;
+
+    // Click to blow one tile up, click again to put it back. Cheaper than a
+    // layout engine and it is what people reach for.
+    figure.addEventListener('click', () => {
+      const wasBig = figure.hasAttribute('data-big');
+      for (const node of el.channelVideo.children) node.removeAttribute('data-big');
+      if (!wasBig) figure.setAttribute('data-big', '');
+    });
+
+    figure.append(video, label);
+    return figure;
   }));
 }
 
@@ -1027,9 +1361,9 @@ async function openTextChannel(channel) {
     state.chat.messages = messages;
     state.chat.pinned = pinned;
     renderChat({ scrollToBottom: true });
-    // Pinned attachments are the keep-set: they are the things somebody
-    // decided were worth coming back to, so they survive cache eviction.
-    await harmony.media.keep(pinned.map((m) => m.attachmentHash).filter(Boolean));
+    // Pinned attachments are part of the keep-set: they are the things
+    // somebody decided were worth coming back to, so they survive eviction.
+    await refreshKeepSet();
   } catch (err) {
     showChannelsError(err.message);
   }
@@ -1050,7 +1384,10 @@ function messageRow(message) {
 
   const who = document.createElement('span');
   who.className = 'who';
-  who.textContent = message.nickname;
+  who.append(
+    avatarEl(knownUser(message.userId) ?? { nickname: message.nickname }, 'tiny'),
+    document.createTextNode(message.nickname),
+  );
 
   const text = document.createElement('span');
   text.className = 'text';
@@ -1104,6 +1441,25 @@ function messageRow(message) {
   });
 
   row.append(who, text, when, pin);
+
+  // Your own, or anybody's if you are an admin -- the same rule the server
+  // enforces, so a button that appears always works.
+  if (message.userId === state.auth.user?.id || isAdmin()) {
+    const remove = document.createElement('button');
+    remove.className = 'ghost small danger';
+    remove.textContent = 'Delete';
+    remove.addEventListener('click', async () => {
+      if (!window.confirm('Delete this message?')) return;
+      try {
+        await harmony.api.deleteMessage(state.server, message.id);
+        // The server pushes message:deleted to everyone, including us.
+      } catch (err) {
+        showChannelsError(err.message);
+      }
+    });
+    row.append(remove);
+  }
+
   return row;
 }
 
@@ -1200,10 +1556,7 @@ async function loadSoundpad() {
     renderSoundpad();
     // Clips must survive cache eviction: the first press of a button should
     // never be a 300 ms download, and they are small.
-    await harmony.media.keep([
-      ...clips.map((c) => c.hash),
-      ...state.chat.pinned.map((m) => m.attachmentHash).filter(Boolean),
-    ]);
+    await refreshKeepSet();
     // Warm the cache now rather than on the first click. The protocol handler
     // downloads on demand, so simply asking for each URL is enough.
     for (const clip of clips) {
@@ -1218,7 +1571,7 @@ function renderSoundpad() {
   el.soundpadAdd.hidden = !isAdmin();
   el.soundpad.hidden = !state.soundpad.clips.length && !isAdmin();
 
-  el.soundpadGrid.replaceChildren(...state.soundpad.clips.map((clip) => {
+  el.soundpadGrid.replaceChildren(...state.soundpad.clips.map((clip, index) => {
     const button = document.createElement('button');
     button.className = 'ghost small';
     button.textContent = clip.name;
@@ -1231,24 +1584,65 @@ function renderSoundpad() {
         .catch((err) => showChannelsError(err.message));
     });
 
-    if (isAdmin()) {
-      button.addEventListener('contextmenu', async (event) => {
-        event.preventDefault();
-        if (!window.confirm(`Delete the clip "${clip.name}"?`)) return;
-        try {
-          await harmony.api.deleteClip(state.server, clip.id);
-        } catch (err) {
-          showChannelsError(err.message);
-        }
-      });
-    }
-    return button;
+    if (!isAdmin()) return button;
+
+    button.addEventListener('contextmenu', async (event) => {
+      event.preventDefault();
+      if (!window.confirm(`Delete the clip "${clip.name}"?`)) return;
+      try {
+        await harmony.api.deleteClip(state.server, clip.id);
+      } catch (err) {
+        showChannelsError(err.message);
+      }
+    });
+
+    // Wrapped only for admins, so everyone else gets a plain grid of buttons
+    // and the arrows do not take up room they do not earn.
+    const cell = document.createElement('span');
+    cell.className = 'clip-cell';
+    cell.append(
+      rowButton('\u25C0', 'Move left', () => nudgeClip(clip.id, -1)),
+      button,
+      rowButton('\u25B6', 'Move right', () => nudgeClip(clip.id, 1)),
+    );
+    cell.firstChild.disabled = index === 0;
+    cell.lastChild.disabled = index === state.soundpad.clips.length - 1;
+    return cell;
   }));
 }
+
+/** Same whole-list contract as the channels. See nudgeChannel. */
+async function nudgeClip(id, delta) {
+  const ids = state.soundpad.clips.map((c) => c.id);
+  const from = ids.indexOf(id);
+  const to = from + delta;
+  if (from < 0 || to < 0 || to >= ids.length) return;
+  ids.splice(to, 0, ...ids.splice(from, 1));
+  try {
+    await harmony.api.reorderClips(state.server, ids);
+  } catch (err) {
+    showChannelsError(err.message);
+  }
+}
+
+/**
+ * The server's ceiling, mirrored here.
+ *
+ * Checked before the upload rather than after, because the upload is what
+ * costs: a 20 MB file would be sent in full, stored, and only then refused by
+ * the soundpad -- leaving an orphan behind for the next eviction to find.
+ */
+const MAX_CLIP_BYTES = 2 * 1024 * 1024;
 
 async function addSoundpadClip(file) {
   try {
     el.channelsError.hidden = true;
+    if (file.size > MAX_CLIP_BYTES) {
+      throw new Error(
+        `"${file.name}" is ${(file.size / 1024 / 1024).toFixed(1)} MB. Clips are limited to `
+        + `${MAX_CLIP_BYTES / 1024 / 1024} MB -- every client downloads every clip.`,
+      );
+    }
     const bytes = new Uint8Array(await file.arrayBuffer());
     const upload = await harmony.media.upload(state.server, bytes, file.type);
     const name = window.prompt('Name for this clip:', file.name.replace(/\.[^.]+$/, ''));
@@ -1275,18 +1669,46 @@ async function addSoundpadClip(file) {
 const CAMERA = { width: 640, height: 360, frameRate: 24, bitrate: 400_000 };
 
 async function startCamera() {
-  if (state.camera.publication) return;
+  if (state.camera.publication || state.voice.camLive) return;
   const nickname = state.auth.user?.nickname;
   if (!nickname) return showChannelsError('Sign in first.');
 
   try {
-    state.camera.stream = await navigator.mediaDevices.getUserMedia({
+    const stream = await navigator.mediaDevices.getUserMedia({
       video: {
         width: { ideal: CAMERA.width },
         height: { ideal: CAMERA.height },
         frameRate: { ideal: CAMERA.frameRate },
       },
     });
+
+    /*
+     * Inside a voice channel the camera goes to the CHANNEL path.
+     *
+     * That is what makes it part of the channel mosaic: the other members
+     * already hold a read token for this channel, and they learn there is
+     * something to watch from the roster rather than from the flat stream
+     * list. It also means a camera shared into a locked channel is not
+     * visible to someone who never got in, which the flat `<nickname>-cam`
+     * namespace cannot express.
+     *
+     * Outside one it falls back to the flat path, which is how a camera is
+     * watchable from the ordinary mosaic by a client that knows nothing about
+     * channels.
+     */
+    if (state.voice.channelId) {
+      await state.voice.startCam(stream, {
+        bitrate: CAMERA.bitrate,
+        framerate: CAMERA.frameRate,
+      });
+      await harmony.realtime.request('voice:publishing', {
+        channelId: state.voice.channelId, kind: 'c', on: true,
+      });
+      applyVoiceButtons();
+      return undefined;
+    }
+
+    state.camera.stream = stream;
 
     // The server appends `-cam` to our authenticated nickname itself; we
     // cannot and must not name the path. `-cam` is refused as a registerable
@@ -1324,6 +1746,18 @@ async function startCamera() {
 }
 
 async function stopCamera() {
+  if (state.voice.camLive) {
+    const channelId = state.voice.channelId;
+    await state.voice.stopCam();
+    if (channelId) {
+      await harmony.realtime.request('voice:publishing', {
+        channelId, kind: 'c', on: false,
+      }).catch(() => { /* leaving the channel says the same thing */ });
+    }
+    applyVoiceButtons();
+    return;
+  }
+
   clearTimers('camera');
   const publication = state.camera.publication;
   state.camera.publication = null;
@@ -1366,6 +1800,11 @@ function onRealtimeEvent(msg) {
       state.channels.occupancy[msg.channelId] = msg.roster.length;
       renderChannels();
       state.voice.syncPeers(msg.roster).catch(() => { /* retried next push */ });
+      state.voice.syncVideo(msg.roster)
+        .then(() => renderChannelVideo())
+        .catch(() => { /* the reconcile timer comes back */ });
+      // Captions carry nicknames from the roster we just replaced.
+      renderChannelVideo();
 
       // A force-mute arrives here and nowhere else. The Phase 0 spike measured
       // the victim's peer connection still reporting `connected` for about
@@ -1404,6 +1843,19 @@ function onRealtimeEvent(msg) {
     case 'soundpad':
       state.soundpad.clips = msg.clips;
       renderSoundpad();
+      break;
+
+    case 'user:updated':
+      state.users.set(msg.user.id, msg.user);
+      refreshKeepSet();
+      if (msg.user.id === state.auth.user?.id) {
+        state.auth.user = msg.user;
+        renderOwnAvatar();
+      }
+      // Pictures are drawn from this map in three places, and the cheapest
+      // way to be sure none of them is stale is to draw them all again.
+      renderVoiceRoster(state.channels.roster);
+      renderChat();
       break;
 
     case 'soundpad:play':
@@ -1467,7 +1919,8 @@ function onRealtimeEvent(msg) {
 // ---------------------------------------------------------------------------
 
 async function enterPicker() {
-  el.pickerUsername.textContent = state.session.username;
+  const target = state.share.target;
+  el.pickerUsername.textContent = target ? `#${target.name}` : state.session.username;
   state.selectedSource = null;
   state.changingSource = false;
   el.startStream.disabled = true;
@@ -1477,6 +1930,12 @@ async function enterPicker() {
   await loadSources();
   updateAudioNote();
 
+  // A channel share holds a SLOT, not a username: the slot is held by the
+  // WebSocket being open, so there is nothing here to keep alive. Starting
+  // the flat heartbeat anyway would renew a claim on the flat namespace that
+  // this share is never going to use.
+  if (target) return;
+
   // Hold the username while the user browses windows and picks a quality.
   addTimer(
     setInterval(() => {
@@ -1485,6 +1944,33 @@ async function enterPicker() {
         .catch(() => {});
     }, state.session.heartbeatMs ?? 10_000),
   );
+}
+
+/**
+ * Share a screen into the voice channel you are in.
+ *
+ * The whole picker, encoder and stats path is reused unchanged -- only the
+ * WHIP URL differs, which is the point of keeping the publish target in
+ * state.share rather than reading it off state.session.
+ */
+async function shareScreenHere() {
+  if (state.share.target) return stopBroadcast();
+  if (!state.voice.channelId) {
+    showChannelsError('Join a voice channel first.');
+    return undefined;
+  }
+  if (!state.voice.publishUrls.screen) {
+    showChannelsError('This channel did not give out a screen path. Rejoin it.');
+    return undefined;
+  }
+  const channel = state.channels.list.find((c) => c.id === state.voice.channelId);
+  state.share.target = {
+    channelId: state.voice.channelId,
+    url: state.voice.publishUrls.screen,
+    name: channel?.name ?? 'this channel',
+  };
+  await enterPicker();
+  return undefined;
 }
 
 async function loadSources() {
@@ -1892,7 +2378,7 @@ async function startBroadcast() {
     videoTrack.addEventListener('ended', () => stopBroadcast());
 
     const { pc, resourceUrl } = await publish({
-      url: state.session.whipUrl,
+      url: state.share.target ? state.share.target.url : state.session.whipUrl,
       stream,
       iceServers: state.session.iceServers,
       codec: 'H264',
@@ -1914,12 +2400,24 @@ async function startBroadcast() {
     state.resourceUrl = resourceUrl;
     state.statsReader = createStatsReader(pc, 'outbound');
 
-    // A successful WHIP handshake is not proof of being on air. MediaMTX
-    // answers the offer before it decides whether this publisher may have the
-    // path, so if the name is already taken at the media-server level the
-    // connection comes up and the stream then goes nowhere. Confirm the server
-    // actually sees us live rather than trusting the 201.
-    await confirmLive();
+    /*
+     * A successful WHIP handshake is not proof of being on air. MediaMTX
+     * answers the offer before it decides whether this publisher may have the
+     * path, so if the name is already taken at the media-server level the
+     * connection comes up and the stream then goes nowhere. Confirm the server
+     * actually sees us live rather than trusting the 201.
+     *
+     * Not for a channel share: /api/streams deliberately filters `vc-*` out,
+     * so the check could only ever fail. The equivalent there is telling the
+     * channel we are publishing, which is what makes everyone else subscribe.
+     */
+    if (state.share.target) {
+      await harmony.realtime.request('voice:publishing', {
+        channelId: state.share.target.channelId, kind: 's', on: true,
+      });
+    } else {
+      await confirmLive();
+    }
 
     // Re-read rather than trusting what boot() saw: the GPU process reports
     // roughly 300ms after the window loads, and boot() runs before that. Main
@@ -1927,13 +2425,29 @@ async function startBroadcast() {
     refreshGpuStatus();
 
     applyPreviewVisibility();
-    el.broadcastTitle.textContent = `Live as ${state.session.username}`;
+    el.broadcastTitle.textContent = state.share.target
+      ? `Sharing in ${state.share.target.name}`
+      : `Live as ${state.session.username}`;
+    if (state.share.target) el.viewerCount.textContent = '';
+    applyVoiceButtons();
     el.broadcastAudioNote.textContent = audioNote;
     el.broadcastStats.textContent = 'Connecting…';
     el.liveQuality.value = el.quality.value;
     el.livePriority.value = el.priority.value;
     updateMonitorButton();
-    showView('view-broadcast');
+    /*
+     * A channel share goes BACK TO THE CHANNEL rather than to the broadcast
+     * screen.
+     *
+     * The broadcast screen is the right place for a flat share, where there
+     * is nothing else going on. Here there is: the roster, the chat and
+     * everyone else's video. Parking the sharer on a preview of their own
+     * screen would take all of that away from them the moment they started
+     * sharing, which is the opposite of what a voice channel is for. The
+     * preview is also the expensive thing to paint, and Chromium stops
+     * compositing it as soon as the view is inactive.
+     */
+    showView(state.share.target ? 'view-channels' : 'view-broadcast');
 
     pc.addEventListener('connectionstatechange', () => {
       if (['failed', 'closed'].includes(pc.connectionState)) {
@@ -1943,11 +2457,16 @@ async function startBroadcast() {
 
     addTimer(setInterval(updateBroadcastStats, 1000));
   } catch (err) {
+    const wasChannel = Boolean(state.share.target);
     await teardown();
-    showError(
-      err.name === 'NotAllowedError' ? 'Screen capture was blocked.' : err.message,
-    );
-    showView('view-connect');
+    const text = err.name === 'NotAllowedError' ? 'Screen capture was blocked.' : err.message;
+    if (wasChannel) {
+      showChannelsError(text);
+      showView('view-channels');
+    } else {
+      showError(text);
+      showView('view-connect');
+    }
   } finally {
     el.startStream.disabled = false;
     el.startStream.textContent = 'Start streaming';
@@ -2037,6 +2556,15 @@ async function updateBroadcastStats() {
   const limit = s.limitedBy && s.limitedBy !== 'none' ? LIMIT_TEXT[s.limitedBy] ?? s.limitedBy : null;
   el.broadcastLimit.textContent = limit ? `⚠ ${limit}` : '';
   el.broadcastLimit.hidden = !limit;
+
+  // A channel share is not in /api/streams at all -- `vc-*` is filtered out
+  // so a 1.0.0 client does not list thirty paths it cannot name. The channel
+  // roster is the count that means anything there.
+  if (state.share.target) {
+    const n = state.channels.roster.length;
+    el.viewerCount.textContent = `${Math.max(0, n - 1)} in the channel`;
+    return;
+  }
 
   try {
     const { streams } = await harmony.api.streams(state.session.server);
@@ -2240,7 +2768,14 @@ function updateMonitorButton() {
 }
 
 async function stopBroadcast(reason) {
+  const wasChannel = Boolean(state.share.target);
   await teardown();
+  if (wasChannel) {
+    if (reason) showChannelsError(reason);
+    showView('view-channels');
+    applyVoiceButtons();
+    return;
+  }
   if (reason) showError(reason);
   showView('view-connect');
   refreshLiveList();
@@ -2950,6 +3485,24 @@ function closeAddStream() {
 async function teardown() {
   clearTimers();
 
+  /*
+   * A channel share is torn down differently from a flat one, in two ways
+   * that both matter.
+   *
+   * It has to tell the channel it stopped, or every other member keeps a
+   * subscription open to a path with nothing coming out of it. And it must
+   * NOT release the flat username claim below: that claim belongs to this
+   * sign-in, not to this share, and giving it back here would quietly drop
+   * the name while the person is still signed in under it.
+   */
+  const channelShare = state.share.target;
+  state.share.target = null;
+  if (channelShare) {
+    await harmony.realtime
+      .request('voice:publishing', { channelId: channelShare.channelId, kind: 's', on: false })
+      .catch(() => { /* leaving the channel says the same thing */ });
+  }
+
   if (state.pc) await hangup(state.pc, state.resourceUrl);
   state.pc = null;
   state.resourceUrl = null;
@@ -2979,13 +3532,13 @@ async function teardown() {
   state.watch.sink = null;
 
   // Give the username back at once rather than waiting for the claim to lapse.
-  if (state.session?.token) {
+  if (state.session?.token && !channelShare) {
     await harmony.api
       .release(state.session.server, state.session.username, state.session.token)
       .catch(() => {});
     state.lastClaim = null;
   }
-  state.session = null;
+  if (!channelShare) state.session = null;
   state.selectedSource = null;
 }
 
@@ -3035,8 +3588,18 @@ el.voiceDeafen.addEventListener('click', () => {
 
 el.voiceLeave.addEventListener('click', () => leaveVoice());
 
+el.avatarButton.addEventListener('click', () => el.avatarFile.click());
+el.avatarFile.addEventListener('change', () => {
+  const file = el.avatarFile.files?.[0];
+  // Reset first, so picking the same file twice in a row still fires 'change'.
+  el.avatarFile.value = '';
+  if (file) setOwnAvatar(file);
+});
+
+el.voiceScreen.addEventListener('click', () => shareScreenHere());
+
 el.voiceCam.addEventListener('click', () =>
-  (state.camera.publication ? stopCamera() : startCamera()));
+  (state.camera.publication || state.voice.camLive ? stopCamera() : startCamera()));
 
 el.soundpadAdd.addEventListener('click', () => el.soundpadFile.click());
 el.soundpadFile.addEventListener('change', () => {
@@ -3239,7 +3802,16 @@ el.pickerBack.addEventListener('click', async () => {
   // While live, the picker is a detour rather than a way out.
   if (state.changingSource) {
     state.changingSource = false;
-    showView('view-broadcast');
+    showView(state.share.target ? 'view-channels' : 'view-broadcast');
+    return;
+  }
+  // Backing out of a channel share: drop the target and go back to the
+  // channel, which is where they came from. Nothing was published, so there
+  // is nothing to tear down but the intent.
+  if (state.share.target) {
+    state.share.target = null;
+    applyVoiceButtons();
+    showView('view-channels');
     return;
   }
   await teardown();

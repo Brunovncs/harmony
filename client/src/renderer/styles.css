@@ -489,6 +489,141 @@ button.danger {
 .soundpad-grid button {
   min-width: 5rem;
 }
+/* An admin's clip carries its two reorder arrows; everyone else's is bare. */
+.clip-cell {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 0.15rem;
+}
+
+/* ---------- profile pictures ---------- */
+
+/*
+ * One element, two appearances: a picture if the account has one, the first
+ * two letters of the nickname if it does not. Sized in em so the same class
+ * works in the bar, the roster and a chat line without a modifier for each.
+ */
+.avatar {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.9em;
+  height: 1.9em;
+  border-radius: 50%;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.12);
+  font-size: 0.72em;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  user-select: none;
+}
+.avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.avatar.tiny {
+  width: 1.5em;
+  height: 1.5em;
+  font-size: 0.6em;
+  margin-right: 0.35em;
+  vertical-align: -0.25em;
+}
+.avatar-button {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin-right: 0.5rem;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  line-height: 0;
+}
+.avatar-button:hover .avatar {
+  outline: 2px solid var(--accent, #6ea8fe);
+  outline-offset: 1px;
+}
+.chat-msg .who {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* ---------- the channel mosaic ---------- */
+
+/*
+ * Everyone's camera and screen inside the voice channel. auto-fill rather
+ * than a fixed column count so the grid reflows with the window instead of
+ * squeezing eight tiles into a strip; max-height keeps it from pushing the
+ * soundpad and the controls off the bottom of the pane.
+ */
+.channel-video {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.channel-tile {
+  margin: 0;
+  position: relative;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #000;
+  cursor: pointer;
+}
+.channel-tile video {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+  display: block;
+  background: #000;
+}
+.channel-tile figcaption {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 0.15rem 0.4rem;
+  font-size: 0.75rem;
+  background: rgba(0, 0, 0, 0.55);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Click one to fill the row; click again to put it back. */
+.channel-tile[data-big] {
+  grid-column: 1 / -1;
+}
+.channel-tile[data-big] video {
+  max-height: 42vh;
+}
+
+/* ---------- small admin controls ---------- */
+
+.row-tools {
+  margin-left: auto;
+  display: flex;
+  gap: 0.15rem;
+}
+button.tiny {
+  padding: 0 0.3rem;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  min-width: 0;
+}
+button.tiny:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+.move-select {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.2rem;
+  max-width: 8rem;
+}
 
 /* ---------- connect view ---------- */
 

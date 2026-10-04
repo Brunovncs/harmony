@@ -654,6 +654,64 @@ async function run() {
     `mute ${voice.muted}/${voice.unmuted}, deafen ${voice.deafened}`,
   );
 
+  // Channel video: the camera and screen paths a member publishes into, and
+  // the subscriptions that make them other people's tiles. Nothing here needs
+  // a server -- it is URL construction and bookkeeping, which is exactly the
+  // part that was missing rather than broken.
+  const channelVideo = await cdp.evaluate(`
+    const { VoiceSession } = await import('./voice.js');
+    const session = new VoiceSession();
+    session.configure({
+      channelId: 1, mid: 7, token: 'tok', whepBase: 'http://s:8889',
+      publish: { voice: 'w/v', cam: 'w/c', screen: 'w/s' },
+    });
+    session.lastRoster = [
+      { mid: 7, nickname: 'me', publishing: ['v', 'c'] },
+      { mid: 3, nickname: 'them', publishing: ['v', 'c', 's'] },
+      { mid: 4, nickname: 'quiet', publishing: ['v'] },
+    ];
+    return {
+      cam: session.peerUrl(3, 'c'),
+      screen: session.peerUrl(3, 's'),
+      publishCam: session.publishUrls.cam,
+      missing: session.hasMissingVideo,
+      tiles: session.videoTiles.length,
+      camLive: session.camLive,
+    };
+  `);
+  check(
+    'channel camera and screen have their own WHEP paths',
+    channelVideo.cam === 'http://s:8889/vc-1-3-c/whep?token=tok'
+      && channelVideo.screen === 'http://s:8889/vc-1-3-s/whep?token=tok',
+    `${channelVideo.cam} / ${channelVideo.screen}`,
+  );
+  check(
+    'the publish URLs the server minted are kept, never rebuilt',
+    channelVideo.publishCam === 'w/c',
+    channelVideo.publishCam,
+  );
+  check(
+    'a roster with video to watch is reported as having tiles missing',
+    channelVideo.missing === true && channelVideo.tiles === 0 && channelVideo.camLive === false,
+    `missing=${channelVideo.missing}, open=${channelVideo.tiles}`,
+  );
+
+  // The channels view has to carry a control for everything the server grew a
+  // route for, or the route is unreachable -- which is precisely how avatars,
+  // reordering and message deletion shipped as dead code in 2.0.0.
+  const controls = await cdp.evaluate(`
+    const ids = [
+      'avatar-button', 'avatar-file', 'channels-avatar',
+      'channel-video', 'voice-screen', 'voice-cam',
+    ];
+    return ids.filter((id) => !document.getElementById(id));
+  `);
+  check(
+    'the channels view has an avatar control, a video grid and a screen button',
+    controls.length === 0,
+    controls.length ? `missing: ${controls.join(', ')}` : 'all present',
+  );
+
   // ---------------------------------------------------------------------
   // Soundpad and media
   //

@@ -322,6 +322,7 @@ handle('api:register', (_e, s, n, p, k) => api.register(s, n, p, k));
 handle('api:login', (_e, s, n, p, k) => api.login(s, n, p, k));
 handle('api:logout', (_e, s) => api.logout(s));
 handle('api:me', (_e, s) => api.me(s));
+handle('api:set-avatar', (_e, s, hash) => api.setAvatar(s, hash));
 handle('api:roster', (_e, s) => api.roster(s));
 handle('api:set-role', (_e, s, id, role) => api.setRole(s, id, role));
 handle('api:channels', (_e, s) => api.channels(s));
@@ -373,6 +374,7 @@ handle('api:search', (_e, s, id, q) => api.search(s, id, q));
 handle('api:soundpad', (_e, s) => api.soundpad(s));
 handle('api:add-clip', (_e, s, body) => api.addClip(s, body));
 handle('api:delete-clip', (_e, s, id) => api.deleteClip(s, id));
+handle('api:reorder-clips', (_e, s, ids) => api.reorderClips(s, ids));
 
 handle('realtime:disconnect', () => {
   realtime.disconnect();

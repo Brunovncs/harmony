@@ -247,6 +247,10 @@ module.exports = {
   reorderChannels: (s, ids) =>
     requestJson(s, '/api/channels/reorder', { method: 'POST', body: { ids } }),
   me: (s) => requestJson(s, '/api/accounts/me'),
+  // `hash` is an already-uploaded image, or null to go back to initials. The
+  // picture itself travels through uploadFile like any other attachment.
+  setAvatar: (s, hash) =>
+    requestJson(s, '/api/accounts/avatar', { method: 'POST', body: { hash } }),
   roster: (s) => requestJson(s, '/api/accounts'),
   setRole: (s, id, role) =>
     requestJson(s, `/api/accounts/${id}/role`, { method: 'POST', body: { role } }),
@@ -280,6 +284,8 @@ module.exports = {
   soundpad: (s) => requestJson(s, '/api/soundpad'),
   addClip: (s, body) => requestJson(s, '/api/soundpad', { method: 'POST', body }),
   deleteClip: (s, id) => requestJson(s, `/api/soundpad/${id}/delete`, { method: 'POST' }),
+  reorderClips: (s, ids) =>
+    requestJson(s, '/api/soundpad/reorder', { method: 'POST', body: { ids } }),
   search: (s, id, q) =>
     requestJson(s, `/api/channels/${id}/search?q=${encodeURIComponent(q)}`),
 };

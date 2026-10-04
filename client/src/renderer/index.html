@@ -177,6 +177,10 @@
     <section class="view" id="view-channels">
       <header class="bar">
         <div class="bar-left">
+          <button class="avatar-button" id="avatar-button" title="Change your picture">
+            <span class="avatar" id="channels-avatar"></span>
+          </button>
+          <input id="avatar-file" type="file" accept="image/*" hidden />
           <strong id="channels-who">Signed in</strong>
           <span class="muted" id="channels-role"></span>
         </div>
@@ -239,6 +243,14 @@
               <span class="muted" id="voice-count"></span>
             </header>
             <ul id="voice-roster"></ul>
+
+            <!--
+              The channel mosaic. Every member's camera and screen share in
+              this channel, subscribed with the same per-channel read token as
+              the audio and torn down with it.
+            -->
+            <div class="channel-video" id="channel-video" hidden></div>
+
             <div class="soundpad" id="soundpad" hidden>
               <div class="soundpad-head">
                 <h3>Soundpad</h3>
@@ -250,6 +262,7 @@
 
             <div class="voice-controls">
               <button class="ghost" id="voice-cam">Start camera</button>
+              <button class="ghost" id="voice-screen">Share screen here</button>
               <button class="ghost" id="voice-mute">Mute mic</button>
               <button class="ghost" id="voice-deafen">Deafen</button>
               <button class="ghost danger" id="voice-leave">Disconnect</button>

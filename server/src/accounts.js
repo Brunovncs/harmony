@@ -250,8 +250,18 @@ export class Accounts {
     return { ok: true, user: this.#q.byId.get(userId) };
   }
 
+  /**
+   * Point this account at a stored file, or at nothing.
+   *
+   * Returns the hash it was pointing at before, because the caller owns the
+   * reference counting: setting a new picture has to give the old file's
+   * reference back or the uploads directory only ever grows.
+   */
   setAvatar(userId, hash) {
-    this.#q.setAvatar.run(hash, userId);
+    const user = this.#q.byId.get(userId);
+    if (!user) return { ok: false, error: 'no_such_user' };
+    this.#q.setAvatar.run(hash ?? null, userId);
+    return { ok: true, previous: user.avatar_hash ?? null, user: this.#q.byId.get(userId) };
   }
 }
 

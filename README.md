@@ -53,10 +53,10 @@ first person to present the owner key printed in the server log becomes the
 owner, and can make other people admins.
 
 **Once you are signed in there are channels.** Voice channels where everyone
-hears everyone, text channels with attachments, pinning and substring search,
-an admin-managed soundpad that plays for the whole channel, and a webcam you can
-publish alongside your screen. Names are typed however you like — "Game Night"
-is stored as `gamenight`, because a name becomes part of a URL.
+hears everyone and sees everyone's camera and screen, text channels with
+attachments, pinning and substring search, an admin-managed soundpad that plays
+for the whole channel, and a profile picture. Names are typed however you like
+— "Game Night" is stored as `gamenight`, because a name becomes part of a URL.
 
 ## Demo
 
@@ -180,6 +180,40 @@ one stream per tile you open.
 - **Add a stream from inside a stream**: watching one person, pick another, and
   they appear beside them.
 
+### Channels
+
+- **Voice channels** with a microphone that stays published while muted — muting
+  disables the track rather than tearing the path down, so push-to-talk costs
+  nothing and unmuting is instant. **Deafen** silences everyone, including
+  screen-share audio, without hanging up.
+- **A mosaic of the channel.** Joining a voice channel opens a tile for every
+  camera and screen share in it, automatically, from the roster. Click one to
+  blow it up. These are channel-scoped paths (`vc-<channel>-<slot>-c`), so a
+  stream shared into a password-protected channel is unreachable by somebody
+  who was never admitted — unlike the flat namespace, which has no way to say
+  that.
+- **A camera and a screen share at once**, on separate paths. MediaMTX's WHIP
+  cannot renegotiate an added track, so a combined path would mean tearing the
+  session down and cutting everyone's audio to turn a camera on.
+- **Text channels** with attachments, pinning and search across message text,
+  author and media type. Search is a trigram index, so it matches substrings;
+  queries under three characters fall back to a plain scan and the UI says
+  which ran.
+- **An admin soundpad.** The server broadcasts "play clip X" and every client
+  plays its own cached copy — never mixed into anyone's microphone, which
+  would re-encode music through a 32 kbps speech codec, duck it against the
+  clicker's echo cancellation, and go silent for a force-muted user.
+- **Profile pictures**, downscaled to a 256-pixel square by the client before
+  upload and served from the local cache over `harmony://app/media/<hash>`.
+- **Admin controls**: create, rename, password, reorder and delete channels;
+  reorder soundpad clips; force-mute a microphone; move someone to another
+  channel or disconnect them; delete any message. A force-mute is enforced by
+  the auth hook refusing the publish, not by the kick — a kicked path is
+  immediately re-publishable.
+- **Passwords per channel**, asked once. A correct one is remembered as a
+  grant; removing the channel's password drops every grant, so re-adding one
+  later does not silently readmit everybody.
+
 ### Clips
 
 - **Save the last 30 seconds** of any feed you are sending *or* watching, as an
@@ -213,7 +247,7 @@ docker run -d --name harmony \
   -p 8080:8080 -p 8889:8889 -p 8189:8189/udp -p 8189:8189/tcp \
   -e MTX_WEBRTCADDITIONALHOSTS=stream.example.com \
   -e HARMONY_SIGNALING_URL=https://stream.example.com:8444 \
-  pedrolucasmiguel/harmony-server:2.0.0
+  pedrolucasmiguel/harmony-server:2.1.0
 ```
 
 `linux/amd64` and `linux/arm64`, so the same tag runs on a mini-PC or a
@@ -227,7 +261,7 @@ perfectly and then play nothing.
 architecture.
 
 **Client:** `cd client && npm install && npm run build` gives you
-`dist/Harmony-2.0.0-portable.exe`.
+`dist/Harmony-2.1.0-portable.exe`.
 
 The full procedure — TLS on a line whose ISP blocks 80 and 443, dynamic IPs,
 packaging, tests and a troubleshooting table — is in
@@ -517,20 +551,35 @@ client/
 ## Tests
 
 ```bash
-npm --prefix server test          # reservation logic + auth hook
+npm --prefix server test          # reservation, accounts, channels, chat, soundpad
 npm --prefix client test          # launches the app, drives it over CDP
 
 MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:e2e
+MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:channel-video
 ```
 
 The e2e suite starts MediaMTX and the control server, then drives two Electron
 clients — one publishes its screen over WHIP, the other enters the same username
 and must end up decoding that video over WHEP. Nothing is mocked.
 
+`test:channel-video` does the same for the channel mosaic: two accounts join a
+voice channel, one publishes a camera to its channel path and the other
+subscribes with its own token and must decode frames. It also checks the thing
+channel-scoped paths exist for — that a token for the wrong channel cannot read
+them, and that none of it leaks into `/api/streams`.
+
 ## Known limits
 
 - **One stream per username.** That is the design, not a bug. A webcam counts
-  separately, as `<nickname>-cam`.
+  separately, as `<nickname>-cam` — unless you are in a voice channel, where it
+  goes to that channel's own path instead and is only visible to the people in
+  it.
+- **Profile pictures are refused, not resized.** The client downscales to a
+  256-pixel square before uploading; the server's 256 KB cap is a backstop.
+  Resizing server-side would mean an image library, and that is a dependency.
+- **Soundpad clips cap at 2 MB.** Every client prefetches every clip so the
+  first press is not a download, which makes a clip's size a cost paid once per
+  person rather than once.
 - **Voice channels cap at 16 people.** The relay cannot mix audio — mixing is
   decode + sum + re-encode, which is the transcoding that keeps this server
   cheap to run and which a Pi cannot do at all. So every member subscribes to
