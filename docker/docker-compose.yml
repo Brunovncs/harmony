@@ -11,7 +11,7 @@
 
 services:
   harmony:
-    image: pedrolucasmiguel/harmony-server:2.2.2
+    image: pedrolucasmiguel/harmony-server:2.2.3
     # To build from a checkout instead of pulling:
     # build:
     #   context: ../server

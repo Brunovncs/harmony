@@ -757,6 +757,19 @@ button.danger {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Your own tiles read as a preview, not as somebody else's camera. */
+.channel-tile[data-own] {
+  outline: 1px solid var(--accent, #6ea8fe);
+  outline-offset: -1px;
+}
+.channel-tile[data-own] video {
+  transform: scaleX(-1);
+}
+.channel-tile[data-own][data-key$=':s'] video {
+  /* A screen is not a mirror. */
+  transform: none;
+}
+
 /* Click one to fill the row; click again to put it back. */
 .channel-tile[data-big] {
   grid-column: 1 / -1;

@@ -6,7 +6,7 @@ docker run -d --name harmony \
   -p 8189:8189/udp -p 8189:8189/tcp \
   -e MTX_WEBRTCADDITIONALHOSTS=stream.example.com \
   -e HARMONY_SIGNALING_URL=https://stream.example.com:8444 \
-  pedrolucasmiguel/harmony-server:2.2.2
+  pedrolucasmiguel/harmony-server:2.2.3
 ```
 
 | File | What |
@@ -68,7 +68,7 @@ real interfaces so LAN clients connect directly:
 docker run -d --name harmony --network host \
   -e MTX_WEBRTCADDITIONALHOSTS=stream.example.com \
   -e HARMONY_SIGNALING_URL=https://stream.example.com:8444 \
-  pedrolucasmiguel/harmony-server:2.2.2
+  pedrolucasmiguel/harmony-server:2.2.3
 ```
 
 Note this also exposes MediaMTX's control API on port 9997 to the host's
@@ -203,7 +203,7 @@ docker build -t harmony-server ./server
 
 # Multi-arch, straight to a registry:
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t you/harmony-server:2.2.2 --push ./server
+  -t you/harmony-server:2.2.3 --push ./server
 ```
 
 `MEDIAMTX_VERSION` is a build arg, pinned to the release `mediamtx.yml` is

@@ -38,6 +38,11 @@ const SPEAK_HOLD_MS = 400;
 /** How fast the envelope falls when the sound stops. Per read, at ~100 ms. */
 const ENVELOPE_RELEASE = 0.65;
 
+/** How often to look for an audio track that has not arrived yet. */
+const RETRY_MS = 200;
+/** And how long to keep looking before accepting the stream has no audio. */
+const RETRY_GIVE_UP_MS = 30_000;
+
 /**
  * Root-mean-square of what an analyser is hearing right now, 0..1.
  *
@@ -152,28 +157,78 @@ export function createSink(stream) {
   analyser.connect(node);
   const read = speechGate(analyser);
 
-  // The audio track often arrives after the video one -- WHEP delivers them as
-  // separate `track` events -- and createMediaStreamSource captures whatever
-  // audio track exists at the moment it is called. So connect when there is
-  // something to connect, and again if a track turns up later.
+  /*
+   * Hook the audio up when it exists, which is not necessarily now.
+   *
+   * createMediaStreamSource captures whatever audio track the stream holds
+   * at the moment it is called, and WHEP delivers audio and video as
+   * separate `track` events -- so the audio often is not there yet.
+   *
+   * The first version waited for the stream's `addtrack` event. That event
+   * NEVER FIRES HERE: `MediaStream.addTrack()` called from script does not
+   * raise it, by specification, and the streams being played are built by
+   * webrtc.js doing exactly that. So whenever the audio track happened to
+   * arrive after this ran, the source was never connected -- no analyser,
+   * and more to the point no sound, permanently and silently.
+   *
+   * That is what "I still cannot hear a thing" was. It was intermittent and
+   * asymmetric because it is a race: whichever side's track lost it went
+   * quiet while every roster, indicator and connection state looked perfect.
+   *
+   * So: keep the event (harmless, and correct for streams the user agent
+   * builds), and poll as well, because the event cannot be relied on.
+   */
   let source = null;
+  let retry = null;
+
+  const stopRetrying = () => {
+    if (retry) clearInterval(retry);
+    retry = null;
+  };
+
   const connect = () => {
-    if (source || stream.getAudioTracks().length === 0) return;
+    if (source) return stopRetrying();
+    if (stream.getAudioTracks().length === 0) return undefined;
     try {
       source = context().createMediaStreamSource(stream);
       source.connect(analyser);
+      stopRetrying();
     } catch (err) {
       console.warn('[gain] could not route stream audio:', err.message);
     }
+    return undefined;
   };
+
   connect();
   stream.addEventListener('addtrack', connect);
+  if (!source) {
+    retry = setInterval(connect, RETRY_MS);
+    retry.unref?.();
+    // A stream that never carries audio is ordinary -- a camera, a silent
+    // screen share -- so stop looking rather than polling for the life of
+    // the call.
+    setTimeout(stopRetrying, RETRY_GIVE_UP_MS);
+  }
 
   const sink = {
     value: 1,
     /** True while this stream is carrying speech. See speechGate. */
     get speaking() {
       return source ? read().speaking : false;
+    },
+    /**
+     * Whether the stream's audio is actually routed yet.
+     *
+     * Worth exposing rather than inferring: `connected === false` is the
+     * difference between "nobody is talking" and "this person cannot be
+     * heard at all", and from the outside those look identical.
+     */
+    get connected() {
+      return source !== null;
+    },
+    /** The current envelope, for diagnosing a silent-but-connected stream. */
+    get level() {
+      return source ? read().level : 0;
     },
     set(value) {
       const clamped = Math.max(0, Math.min(MAX_GAIN, value));
@@ -183,6 +238,7 @@ export function createSink(stream) {
       node.gain.setTargetAtTime(clamped, context().currentTime, 0.015);
     },
     close() {
+      stopRetrying();
       stream.removeEventListener('addtrack', connect);
       try {
         source?.disconnect();

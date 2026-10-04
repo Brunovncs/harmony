@@ -419,10 +419,38 @@ async function run() {
       saved.voiceInputId === realInput.value,
       `voiceInputId=${saved.voiceInputId.slice(0, 12)}…`,
     );
+
+    /*
+     * The switched-to microphone has to actually produce sound.
+     *
+     * This is the check that distinguishes "switching device is broken" from
+     * "that device is silent", and the two look identical from every other
+     * angle: the publish succeeds, the path goes live, the subscriber
+     * connects, and nobody hears anything.
+     */
+    await sleep(1200);
+    const micAfter = await a.evaluate("return window.__harmony().voice;");
+    check(
+      'the switched-to microphone is producing audio, not silence',
+      micAfter.micLive === true && micAfter.micLevel > 0,
+      `level=${micAfter.micLevel} on ${String(micAfter.micDeviceId).slice(0, 12)}…`,
+    );
+
+    // Back to the system default for the rest of the run: Chromium's extra
+    // fake inputs are not all tone generators, and the audio checks further
+    // down are about Harmony, not about which fake device makes a noise.
+    await a.evaluate(`
+      const sel = document.getElementById('voice-input');
+      sel.value = '';
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    `);
+    await sleep(1500);
   } else {
     check('choosing a microphone selects it and reports no problem', true, 'no real device listed');
     check('switching microphone does not drop you out of the channel', true, 'skipped');
     check('the choice is written to settings, so it survives a restart', true, 'skipped');
+    check('the switched-to microphone is producing audio, not silence', true, 'skipped');
   }
 
   await joinVoice(b);
@@ -614,7 +642,7 @@ async function run() {
     `${decoding.w}x${decoding.h}, muted=${decoding.muted}`,
   );
 
-  // --- the speaking ring ------------------------------------------------
+  // --- the speaking ring, and the audio behind it ------------------------
   //
   // Chromium's fake microphone is a continuous tone, so an unmuted fake mic
   // registers as talking. That is what makes this testable at all; a real
@@ -628,6 +656,90 @@ async function run() {
     'somebody talking gets a ring round their picture',
     Boolean(ringAppeared),
     ringAppeared ? 'data-speaking set from the analyser' : 'never lit',
+  );
+
+  /*
+   * THE ONE THAT MATTERS: the ring on somebody ELSE.
+   *
+   * Your own row lights from the local microphone meter, with no remote
+   * audio involved anywhere -- so "a ring appeared" was never evidence that
+   * anybody could hear anybody. This waits for the OTHER person's row to
+   * light, and that can only happen if their audio has travelled the whole
+   * way: published, relayed, subscribed, decoded, and arrived at an
+   * AnalyserNode that sits in the path to the speakers.
+   *
+   * If this fails, nobody can hear anybody, however healthy the roster looks.
+   */
+  const remoteRing = await waitFor(
+    a,
+    "(() => { const li = [...document.querySelectorAll('#voice-roster li')]"
+    + ".find((x) => x.querySelector('.member-name').textContent.startsWith('bob'));"
+    + " return Boolean(li && li.hasAttribute('data-speaking')); })()",
+    { label: "the other member's audio arriving", timeoutMs: 30_000 },
+  ).catch(() => false);
+  check(
+    'the other member can actually be HEARD, not just seen in the roster',
+    Boolean(remoteRing),
+    remoteRing ? 'remote audio reached the playback graph' : 'no remote audio ever arrived',
+  );
+
+  const bothWays = await waitFor(
+    b,
+    "(() => { const li = [...document.querySelectorAll('#voice-roster li')]"
+    + ".find((x) => x.querySelector('.member-name').textContent.startsWith('alice'));"
+    + " return Boolean(li && li.hasAttribute('data-speaking')); })()",
+    { label: 'audio arriving the other way too', timeoutMs: 30_000 },
+  ).catch(() => false);
+  /*
+   * Printed only when something failed, and kept for when it does.
+   *
+   * Finding the one-way-audio bug meant answering, in order: is the roster
+   * right, is the microphone capturing, is the sender sending, is the
+   * subscriber receiving, and is the audio routed into the graph. All five
+   * look identical from the UI, and every round of guessing cost a
+   * two-minute run.
+   */
+  const dumpState = async () => {
+    const paths = await (await fetch(`http://127.0.0.1:${MTX_API_PORT}/v3/paths/list`)).json();
+    console.log('  MTX PATHS:   ' + JSON.stringify((paths.items ?? []).map((x) => ({
+      name: x.name, ready: x.ready, tracks: x.tracks, readers: (x.readers ?? []).length,
+    }))));
+    for (const [who, cdp] of [['ALICE', a], ['BOB', b]]) {
+      console.log(`  ${who} SENDS: ` + await cdp.evaluate(
+        "return JSON.stringify(await window.__harmonyPublish());"));
+      console.log(`  ${who} RECVS: ` + await cdp.evaluate(
+        "return JSON.stringify(await window.__harmonySubs());"));
+      console.log(`  ${who} STATE: ` + await cdp.evaluate(
+        "return JSON.stringify(window.__harmony());"));
+    }
+  };
+  if (!bothWays || !remoteRing) await dumpState();
+
+  const whyNot = await b.evaluate(`
+    const li = [...document.querySelectorAll('#voice-roster li')]
+      .find((x) => x.querySelector('.member-name').textContent.startsWith('alice'));
+    return {
+      rows: document.querySelectorAll('#voice-roster li').length,
+      aliceStatus: li ? [...li.querySelectorAll('.status-dot')].map((d) => d.dataset.kind) : null,
+      aliceVolume: li?.querySelector('.peer-volume')?.value ?? null,
+      aliceLocalMuted: li?.hasAttribute('data-local-muted') ?? null,
+      myMute: document.getElementById('voice-mute').textContent,
+      myDeafen: document.getElementById('voice-deafen').textContent,
+    };
+  `);
+  const aliceSide = await a.evaluate(
+    "return { mute: document.getElementById('voice-mute').textContent,"
+    + " deafen: document.getElementById('voice-deafen').textContent };",
+  );
+  check(
+    'and it works in both directions',
+    Boolean(bothWays),
+    bothWays
+      ? 'both subscriptions are carrying audio'
+      : `alice is ${aliceSide.mute}/${aliceSide.deafen}; bob sees `
+        + `${whyNot.rows} rows, alice status=[${whyNot.aliceStatus}], `
+        + `vol=${whyNot.aliceVolume}, localMuted=${whyNot.aliceLocalMuted}, `
+        + `bob is ${whyNot.myMute}/${whyNot.myDeafen}`,
   );
 
   const ringStyle = await a.evaluate(`
@@ -755,6 +867,51 @@ async function run() {
   await a.evaluate("document.getElementById('voice-cam').click(); return true;");
   await sleep(800);
 
+  // --- your own camera, as a tile you can see ---------------------------
+  //
+  // Nobody else can tell you your camera is working, because the one person
+  // who cannot see your tile is you. Sharing and seeing nothing appear reads
+  // as "it did not work".
+  // Only if it is off: Bob's camera may already be running from the mosaic
+  // section above, and clicking blindly would turn it OFF and test nothing.
+  await b.evaluate(`
+    const button = document.getElementById('voice-cam');
+    if (button.textContent === 'Start camera') button.click();
+    return true;
+  `);
+  await waitFor(
+    b,
+    "document.getElementById('voice-cam').textContent === 'Stop camera'",
+    { label: "Bob's camera being on", timeoutMs: 25_000 },
+  ).catch(() => false);
+  await sleep(1500);
+
+  const ownTile = await b.evaluate(`
+    const own = document.querySelector('#channel-video .channel-tile[data-own]');
+    if (!own) return { present: false };
+    const v = own.querySelector('video');
+    for (let i = 0; i < 20; i += 1) {
+      if (v.videoWidth > 0) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    return {
+      present: true,
+      caption: own.querySelector('figcaption').textContent,
+      width: v.videoWidth,
+      key: own.dataset.key,
+    };
+  `);
+  check(
+    'your own camera shows up in the channel as your own tile',
+    ownTile.present === true && ownTile.width > 0,
+    ownTile.present ? `"${ownTile.caption}" at ${ownTile.width}px` : 'no tile of your own',
+  );
+  check(
+    'it is labelled as yours rather than by slot',
+    ownTile.caption?.startsWith('you'),
+    ownTile.caption ?? '(none)',
+  );
+
   // --- force-mute -------------------------------------------------------
   //
   // The victim's peer connection stays `connected` for about nine seconds
@@ -857,6 +1014,35 @@ async function run() {
     'an unplugged device falls back to the default and says so',
     unplugged.inputValue === '' && unplugged.note.includes('unplugged'),
     `value="${unplugged.inputValue}", note="${unplugged.note}"`,
+  );
+
+  // --- the mosaic is not a one-way door ---------------------------------
+  //
+  // "Watch everyone" from the channels used to leave you on the connect
+  // screen with no way back to the channel you were in.
+  await a.evaluate("document.getElementById('channels-watch').click(); return true;");
+  await waitFor(a, "document.querySelector('.view[data-active]')?.id === 'view-mosaic'", {
+    label: 'the mosaic opening',
+  });
+  const leaveLabel = await a.evaluate(
+    "return document.getElementById('mosaic-leave').textContent;",
+  );
+  check(
+    'the way out of the mosaic says where it goes',
+    leaveLabel === 'Back to channels',
+    `button reads "${leaveLabel}"`,
+  );
+
+  await a.evaluate("document.getElementById('mosaic-leave').click(); return true;");
+  const backToChannels = await waitFor(
+    a,
+    "document.querySelector('.view[data-active]')?.id === 'view-channels'",
+    { label: 'getting back to the channels' },
+  ).catch(() => false);
+  check(
+    'leaving the mosaic returns a signed-in person to their channels',
+    Boolean(backToChannels),
+    backToChannels ? 'back in the channels view' : 'stranded outside the channels',
   );
 
   // --- leaving ----------------------------------------------------------

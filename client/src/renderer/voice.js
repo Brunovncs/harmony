@@ -34,6 +34,16 @@ const MIC_CONSTRAINTS = {
 const VOICE_BITRATE = 32_000;
 
 /**
+ * How long a subscription may deliver nothing before it is presumed dead.
+ *
+ * A quiet person is NOT quiet on the wire: Opus keeps sending, and a muted
+ * track in Chromium still produces silence packets, so a subscription that
+ * has received no packet at all for this long is not listening to somebody
+ * who is not talking -- it is broken.
+ */
+const STALL_MS = 8000;
+
+/**
  * Stagger between opening subscriptions.
  *
  * The N-th person to join opens N-1 WHEP sessions at once, each with its own
@@ -48,6 +58,8 @@ export class VoiceSession {
   #micStream = null;
   /** @type {Map<number, {pc: RTCPeerConnection, sink: object, stream: MediaStream}>} */
   #subs = new Map();
+  /** mid -> {packets, since}: how we notice a subscription has gone quiet. */
+  #flow = new Map();
   #opening = new Set();
 
   /**
@@ -199,6 +211,159 @@ export class VoiceSession {
       if (sub.sink.speaking) out.add(mid);
     }
     return out;
+  }
+
+  /**
+   * What the microphone publish is actually putting on the wire.
+   *
+   * Separate from diagnostics() because getStats is async. It answers the
+   * one question a local level meter cannot: the capture can be perfect and
+   * the sender still be sending nothing, and from the UI those are the same
+   * thing -- a person nobody can hear.
+   */
+  /**
+   * Drop subscriptions that have stopped delivering, so they get rebuilt.
+   *
+   * This is the half that was missing, and it is the one that matters most.
+   * syncPeers only ever OPENS subscriptions for members it has none for, so
+   * a subscription that connected, carried audio and then died stayed in the
+   * map for ever and was never retried. The peer connection does not go to
+   * `failed` when this happens -- MediaMTX drops the reader while the ICE
+   * transport sits there reading `connected` -- so nothing in the UI, the
+   * roster or the connection state showed anything wrong. One person simply
+   * became permanently inaudible.
+   *
+   * It is not rare either: it happens every time the other side's path is
+   * rebuilt, which is every reconnect and every rejoin.
+   *
+   * Dropping the entry is the whole fix -- the next syncPeers tick sees a
+   * publisher with no subscription and opens a fresh one.
+   *
+   * @returns {Promise<number[]>} the slots that were reaped
+   */
+  async reapStalled() {
+    const now = Date.now();
+    const dead = [];
+
+    for (const [mid, sub] of this.#subs) {
+      let packets = 0;
+      try {
+        const stats = await sub.pc.getStats();
+        stats.forEach((r) => {
+          if (r.type === 'inbound-rtp' && r.kind === 'audio') packets += r.packetsReceived || 0;
+        });
+      } catch {
+        continue; // a connection being torn down; the next tick will see it
+      }
+
+      const seen = this.#flow.get(mid);
+      if (!seen || packets > seen.packets) {
+        this.#flow.set(mid, { packets, since: now });
+        continue;
+      }
+      // Nothing new since `since`. Give it a window before calling it.
+      if (now - seen.since >= STALL_MS) dead.push(mid);
+    }
+
+    for (const mid of dead) {
+      await this.unsubscribe(mid);
+      this.#flow.delete(mid);
+    }
+    return dead;
+  }
+
+  /**
+   * What each voice subscription is actually receiving.
+   *
+   * The pair to publishStats. Between them they place a silent peer on one
+   * side or the other of the relay, which is the only question worth asking
+   * first when somebody cannot be heard.
+   */
+  async subscribeStats() {
+    const out = [];
+    for (const [mid, sub] of this.#subs) {
+      const row = {
+        mid,
+        pc: sub.pc.connectionState,
+        routed: sub.sink.connected,
+        level: Number(sub.sink.level.toFixed(4)),
+        tracks: sub.stream.getAudioTracks().length,
+        trackMuted: sub.stream.getAudioTracks()[0]?.muted ?? null,
+        trackState: sub.stream.getAudioTracks()[0]?.readyState ?? null,
+        bytesReceived: 0,
+        packetsReceived: 0,
+      };
+      const stats = await sub.pc.getStats();
+      stats.forEach((r) => {
+        if (r.type === 'inbound-rtp' && r.kind === 'audio') {
+          row.bytesReceived += r.bytesReceived || 0;
+          row.packetsReceived += r.packetsReceived || 0;
+        }
+      });
+      out.push(row);
+    }
+    return out;
+  }
+
+  async publishStats() {
+    if (!this.#mic) return null;
+    const sender = this.#mic.pc.getSenders().find((x) => x.track?.kind === 'audio');
+    if (!sender) return { sender: null };
+    const out = {
+      sender: 'present',
+      trackId: sender.track?.id ?? null,
+      trackEnabled: sender.track?.enabled ?? null,
+      trackMuted: sender.track?.muted ?? null,
+      trackState: sender.track?.readyState ?? null,
+      pc: this.#mic.pc.connectionState,
+      bytesSent: 0,
+      packetsSent: 0,
+    };
+    const stats = await sender.getStats();
+    stats.forEach((r) => {
+      if (r.type === 'outbound-rtp' && r.kind === 'audio') {
+        out.bytesSent += r.bytesSent || 0;
+        out.packetsSent += r.packetsSent || 0;
+      }
+    });
+    return out;
+  }
+
+  /**
+   * What this session currently believes about itself.
+   *
+   * Exists because the failure that matters here -- somebody inaudible --
+   * looks exactly like silence from the outside. Whether a subscription was
+   * opened at all, and whether its audio was ever routed, are the two facts
+   * that tell those apart, and neither is visible in the UI.
+   */
+  diagnostics() {
+    return {
+      mid: this.mid,
+      channelId: this.channelId,
+      muted: this.muted,
+      deafened: this.deafened,
+      micLive: this.micLive,
+      // What our own microphone is producing. A live, unmuted microphone
+      // reading zero is a dead input -- which is indistinguishable from a
+      // broken publish from anywhere else in the system.
+      micLevel: Number((this.#micMeter?.read().level ?? 0).toFixed(4)),
+      micDeviceId: this.micDeviceId,
+      wanted: (this.lastRoster ?? [])
+        .filter((m) => m.mid !== this.mid && m.publishing?.includes('v'))
+        .map((m) => m.mid),
+      subs: [...this.#subs.entries()].map(([mid, sub]) => ({
+        mid,
+        connected: sub.sink.connected,
+        speaking: sub.sink.speaking,
+        level: Number(sub.sink.level.toFixed(4)),
+        pc: sub.pc.connectionState,
+        tracks: sub.stream.getAudioTracks().length,
+      })),
+      roster: (this.lastRoster ?? []).map((m) => ({
+        mid: m.mid, nickname: m.nickname, publishing: m.publishing, muted: m.muted,
+      })),
+    };
   }
 
   /**
@@ -423,6 +588,11 @@ export class VoiceSession {
     return Boolean(this.#cam);
   }
 
+  /** The local camera capture, for showing yourself without a round trip. */
+  get camStream() {
+    return this.#cam ? this.#camStream : null;
+  }
+
   /** Tiles to draw, in a stable order so the grid does not reshuffle itself. */
   get videoTiles() {
     return [...this.#video.values()]
@@ -468,6 +638,9 @@ export class VoiceSession {
         // like every other incoming stream rather than through the <video>
         // element, so the tile stays muted and deafen covers it -- otherwise
         // deafening would silence everybody except the person sharing.
+        //
+        // No keep-alive element is needed here: the tile IS one. See
+        // #keepAlive for why voice subscriptions have to make their own.
         const sink = createSink(stream);
         sink.set(this.deafened ? 0 : 1);
         this.#video.set(key, { pc, stream, sink, mid, kind });
@@ -496,14 +669,47 @@ export class VoiceSession {
     sub.pc.close();
   }
 
+  /**
+   * Attach a remote stream to a muted audio element, and keep it attached.
+   *
+   * Chromium will not run the remote audio render path for a WebRTC stream
+   * that no media element is consuming. createMediaStreamSource succeeds, the
+   * graph looks right, RTP arrives and is decoded -- and the AudioContext
+   * gets silence. Measured directly: a subscription with 1601 packets
+   * received, `routed: true`, and an analyser reading exactly 0.
+   *
+   * It is also why the fault came and went. The mosaic has always worked,
+   * because every tile is a <video> consuming its stream; voice had no
+   * element at all, so whether you could hear somebody depended on whether
+   * you happened to have a video tile open from the same peer connection.
+   *
+   * The element is MUTED on purpose: gain.js does the actual playing, via
+   * the gain node that gives volume past 100% and the analyser that drives
+   * the speaking ring. This element exists only to make Chromium start the
+   * pipeline, and unmuting it would play everybody twice.
+   */
+  #keepAlive(stream) {
+    const el = document.createElement('audio');
+    el.srcObject = stream;
+    el.muted = true;
+    el.autoplay = true;
+    el.playsInline = true;
+    el.setAttribute('aria-hidden', 'true');
+    el.style.display = 'none';
+    document.body.append(el);
+    el.play().catch(() => { /* muted autoplay is always allowed */ });
+    return el;
+  }
+
   async subscribe(mid) {
     const { pc, stream } = await watch({
       url: this.peerUrl(mid),
       iceServers: this.iceServers,
       media: 'audio',
     });
+    const anchor = this.#keepAlive(stream);
     const sink = createSink(stream);
-    this.#subs.set(mid, { pc, sink, stream });
+    this.#subs.set(mid, { pc, sink, stream, anchor });
     // Straight to whatever this person was last set to, rather than to 1 and
     // then corrected: a peer who reconnects should not blast back at full
     // volume for the moment before the next render.
@@ -517,7 +723,12 @@ export class VoiceSession {
     const sub = this.#subs.get(mid);
     if (!sub) return;
     this.#subs.delete(mid);
+    this.#flow.delete(mid);
     sub.sink.close?.();
+    if (sub.anchor) {
+      sub.anchor.srcObject = null;
+      sub.anchor.remove();
+    }
     sub.pc.close();
   }
 
@@ -545,6 +756,7 @@ export class VoiceSession {
   async leave() {
     this.lastRoster = [];
     this.#owners.clear();
+    this.#flow.clear();
     // #peerPrefs deliberately survives: turning somebody down is about that
     // person, not about this channel, and re-muting them on every rejoin is
     // the kind of thing that makes a mute feel broken.

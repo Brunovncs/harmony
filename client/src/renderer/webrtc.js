@@ -239,6 +239,19 @@ export async function watch({
 
     pc.addEventListener('track', (event) => {
       stream.addTrack(event.track);
+      /*
+       * addTrack() from script does NOT raise `addtrack` -- the event is
+       * only fired for tracks the user agent adds itself. Anything waiting
+       * on it to notice late-arriving audio (gain.js did) would wait for
+       * ever, which is how a subscription came up perfectly and carried no
+       * sound. Raise it by hand so the stream behaves the way the rest of
+       * the app reasonably assumes it does.
+       */
+      try {
+        stream.dispatchEvent(new MediaStreamTrackEvent('addtrack', { track: event.track }));
+      } catch {
+        // Older engines without the constructor: the pollers cope.
+      }
     });
 
     const offer = await pc.createOffer();

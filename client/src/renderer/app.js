@@ -1260,6 +1260,17 @@ async function joinVoice(channel, password) {
     // join or mute. Measured on a real 16-member channel.
     addTimer(setInterval(() => {
       if (!state.voice.channelId) return;
+
+      // First drop anything that has quietly stopped delivering, so the
+      // subscribe pass below sees it as missing and rebuilds it. Without
+      // this, a peer whose path was rebuilt stays silent for ever.
+      state.voice.reapStalled()
+        .then((dead) => {
+          if (dead.length) return state.voice.syncPeers();
+          return undefined;
+        })
+        .catch(() => { /* the next tick tries again */ });
+
       if (state.voice.hasMissingPeers) {
         state.voice.syncPeers()
           .then((result) => {
@@ -1760,17 +1771,41 @@ const nameOfMid = (mid) =>
  * reassigning a <video>'s srcObject restarts playback, so rebuilding the grid
  * on every roster push would make every tile stutter whenever anybody muted.
  */
+/**
+ * Your own camera and screen, as tiles alongside everybody else's.
+ *
+ * From the LOCAL stream, never by subscribing to our own path: that would
+ * pay for a whole extra relay round trip to show something already in
+ * memory, and add a second of delay to it.
+ *
+ * Worth having rather than clever to omit. Sharing a screen and seeing
+ * nothing appear reads as "it did not work" -- there is no other feedback
+ * that it did, because the one person who cannot see your tile is you.
+ */
+function ownChannelTiles() {
+  const mine = [];
+  if (state.voice.camStream) {
+    mine.push({ mid: state.voice.mid, kind: 'c', stream: state.voice.camStream, own: true });
+  }
+  if (state.share.target?.channelId === state.voice.channelId && state.preview.stream) {
+    mine.push({ mid: state.voice.mid, kind: 's', stream: state.preview.stream, own: true });
+  }
+  return mine;
+}
+
 function renderChannelVideo() {
-  const tiles = state.voice.channelId ? state.voice.videoTiles : [];
+  const tiles = state.voice.channelId
+    ? [...ownChannelTiles(), ...state.voice.videoTiles]
+    : [];
   el.channelVideo.hidden = tiles.length === 0;
 
   const existing = new Map(
     [...el.channelVideo.children].map((node) => [node.dataset.key, node]),
   );
 
-  el.channelVideo.replaceChildren(...tiles.map(({ mid, kind, stream }) => {
-    const key = `${mid}:${kind}`;
-    const caption = `${nameOfMid(mid)} \u00B7 ${KIND_LABEL[kind] ?? kind}`;
+  el.channelVideo.replaceChildren(...tiles.map(({ mid, kind, stream, own }) => {
+    const key = `${own ? 'me' : mid}:${kind}`;
+    const caption = `${own ? 'you' : nameOfMid(mid)} \u00B7 ${KIND_LABEL[kind] ?? kind}`;
 
     const kept = existing.get(key);
     if (kept) {
@@ -1781,6 +1816,7 @@ function renderChannelVideo() {
     const figure = document.createElement('figure');
     figure.className = 'channel-tile';
     figure.dataset.key = key;
+    if (own) figure.setAttribute('data-own', '');
 
     const video = document.createElement('video');
     video.autoplay = true;
@@ -2175,6 +2211,7 @@ async function startCamera() {
         channelId: state.voice.channelId, kind: 'c', on: true,
       });
       applyVoiceButtons();
+      renderChannelVideo();
       return undefined;
     }
 
@@ -2225,6 +2262,7 @@ async function stopCamera() {
       }).catch(() => { /* leaving the channel says the same thing */ });
     }
     applyVoiceButtons();
+    renderChannelVideo();
     return;
   }
 
@@ -2924,6 +2962,7 @@ async function startBroadcast() {
       : `Live as ${state.session.username}`;
     if (state.share.target) el.viewerCount.textContent = '';
     applyVoiceButtons();
+    renderChannelVideo();
     el.broadcastAudioNote.textContent = audioNote;
     el.broadcastStats.textContent = 'Connecting…';
     el.liveQuality.value = el.quality.value;
@@ -3268,6 +3307,7 @@ async function stopBroadcast(reason) {
     if (reason) showChannelsError(reason);
     showView('view-channels');
     applyVoiceButtons();
+    renderChannelVideo();
     return;
   }
   if (reason) showError(reason);
@@ -3460,7 +3500,10 @@ async function enterMosaic(usernames = null) {
   state.server = server;
   state.mosaic = freshMosaic();
   state.mosaic.selection = usernames ? new Set(usernames) : null;
-  el.mosaicLeave.textContent = isBroadcasting() ? 'Back to my stream' : 'Leave';
+  el.mosaicLeave.textContent = (() => {
+    if (isBroadcasting() && !state.share.target) return 'Back to my stream';
+    return state.auth.user ? 'Back to channels' : 'Leave';
+  })();
   el.mosaicGrid.replaceChildren();
   el.mosaicVolume.value = '100';
   el.mosaicVolumeLabel.textContent = '100%';
@@ -3866,8 +3909,17 @@ async function leaveMosaic() {
   for (const username of [...state.mosaic.tiles.keys()]) removeTile(username);
   state.mosaic = freshMosaic();
 
-  if (isBroadcasting()) {
+  if (isBroadcasting() && !state.share.target) {
     showView('view-broadcast');
+    return;
+  }
+  // Somebody signed in came from the channels, and that is where Leave has
+  // to put them back. Sending them to the connect screen -- which is what
+  // this did -- drops a signed-in person at a login form with no obvious way
+  // back into the channel they were in a moment ago.
+  if (state.auth.user) {
+    showView('view-channels');
+    renderChannels();
     return;
   }
   showView('view-connect');
@@ -4050,6 +4102,29 @@ async function teardown() {
   if (!channelShare) state.session = null;
   state.selectedSource = null;
 }
+
+/**
+ * A snapshot of this client's view of the call.
+ *
+ * Deliberately a permanent part of the app rather than a test-only hook.
+ * Every voice bug reported so far -- one-way audio, a stuck reconnect, a
+ * channel nobody could hear -- looked identical from the UI, and answering
+ * "did you subscribe, and is the audio routed" needed a guess each time.
+ * It exposes nothing the person cannot already see on their own screen.
+ */
+window.__harmony = () => ({
+  signedInAs: state.auth.user?.nickname ?? null,
+  view: document.querySelector('.view[data-active]')?.id ?? null,
+  voice: state.voice.diagnostics(),
+  sharing: state.share.target?.channelId ?? null,
+  channels: state.channels.list.map((c) => `${c.kind}:${c.id}:${c.name}`),
+});
+
+/** What our microphone is putting on the wire. Async; see publishStats. */
+window.__harmonyPublish = () => state.voice.publishStats();
+
+/** What each voice subscription is receiving. Async; see subscribeStats. */
+window.__harmonySubs = () => state.voice.subscribeStats();
 
 // ---------------------------------------------------------------------------
 // Wiring
