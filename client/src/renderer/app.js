@@ -158,8 +158,10 @@ const el = {
   devicesDialog: $('devices'),
   voiceLeave: $('voice-leave'),
   voicePanel: $('voice-panel'),
+  voiceSignal: $('voice-signal'),
   voiceState: $('voice-state'),
   voiceWhere: $('voice-where'),
+  selfStatus: $('self-status'),
   peerMenu: $('peer-menu'),
   peerMenuAvatar: $('peer-menu-avatar'),
   peerMenuName: $('peer-menu-name'),
@@ -1417,6 +1419,13 @@ async function joinVoice(channel, password) {
     // for something nobody can perceive.
     addTimer(setInterval(renderSpeaking, SPEAKING_POLL_MS), 'voice');
 
+    // The ping on the signal icon. Started with a reading rather than one
+    // poll interval of blankness, though ICE will not have a round trip
+    // this early -- renderPing says "Measuring..." rather than nothing, so
+    // hovering in the first few seconds answers the question it was asked.
+    addTimer(setInterval(() => { renderPing(); }, PING_POLL_MS), 'voice');
+    renderPing();
+
     // Renew the media tokens at half their life, so a missed tick still
     // leaves a wide margin and neither side has to trust the other's clock.
     const life = Number(reply.expiresInMs) || 10 * 60 * 1000;
@@ -1534,11 +1543,12 @@ function applyVoiceButtons() {
   el.voiceCam.textContent = state.voice.camLive ? 'Stop camera' : 'Start camera';
   el.voiceCam.toggleAttribute('data-on', state.voice.camLive);
 
-  // Mute and deafen light up red rather than blue: they are the two that
-  // mean something is NOT happening, and a lit button that means "off" is
-  // how you end up talking to a room that cannot hear you.
-  el.voiceMute.toggleAttribute('data-off-state', true);
-  el.voiceDeafen.toggleAttribute('data-off-state', true);
+  // Both live on the strip at the bottom now, and both mean something only
+  // while there is a microphone to mute. Outside a call they would set a
+  // flag with nothing to apply it to and send a mute for a null channel.
+  const live = Boolean(state.voice.channelId);
+  el.voiceMute.disabled = !live;
+  el.voiceDeafen.disabled = !live;
 
   const sharing = state.share.target?.channelId === state.voice.channelId
     && Boolean(state.voice.channelId);
@@ -1547,15 +1557,63 @@ function applyVoiceButtons() {
 
   el.voiceSoundboard.toggleAttribute('data-on', !el.soundpad.hidden);
 
+  /*
+   * What the strip at the bottom says about you.
+   *
+   * Deafened first: it is the one that surprises people, because it implies
+   * muted as well and somebody reading "Muted" would not know they also
+   * cannot hear anything.
+   */
+  const inVoice = Boolean(state.voice.channelId);
+  el.selfStatus.textContent = !inVoice ? 'Online'
+    : state.voice.deafened ? 'Deafened'
+      : state.voice.muted ? 'Muted'
+        : 'In voice';
+  el.selfStatus.toggleAttribute('data-in-voice', inVoice);
+
   const channel = state.channels.list.find((c) => c.id === state.voice.channelId);
   el.voiceWhere.textContent = channel ? channel.name : '';
 
+}
+
+/*
+ * The round trip to the relay, on the signal icon.
+ *
+ * Polled slowly. currentRoundTripTime is a smoothed value that ICE updates
+ * on its own consent checks every couple of seconds, so reading it faster
+ * returns the same number and reading it at all costs a getStats() walk.
+ *
+ * The thresholds are about what a conversation feels like rather than about
+ * what a network graph looks like: under 60 ms nobody notices, past 150 ms
+ * people start talking over each other because the gap between "they
+ * stopped" and "I can hear that they stopped" is long enough to step into.
+ */
+const PING_POLL_MS = 4000;
+const PING_OK_MS = 60;
+const PING_BAD_MS = 150;
+
+async function renderPing() {
+  if (!state.voice.channelId) return;
+  const ms = await state.voice.rtt();
+  if (ms === null) {
+    el.voiceSignal.dataset.ping = 'Measuring\u2026';
+    el.voiceSignal.dataset.quality = 'ok';
+    el.voiceSignal.setAttribute('aria-label', 'Connection quality: measuring');
+    return;
+  }
+  el.voiceSignal.dataset.ping = `${ms} ms to the relay`;
+  el.voiceSignal.dataset.quality = ms <= PING_OK_MS ? 'good' : ms <= PING_BAD_MS ? 'ok' : 'bad';
+  el.voiceSignal.setAttribute('aria-label', `Connection quality: ${ms} milliseconds`);
 }
 
 /** Connected, or trying to be. Driven by the socket, never by guesswork. */
 function applyVoiceConnection(up) {
   el.voicePanel.dataset.state = up ? 'connected' : 'connecting';
   el.voiceState.textContent = up ? 'Voice connected' : 'Reconnecting\u2026';
+  if (!up) {
+    el.voiceSignal.dataset.ping = 'Reconnecting\u2026';
+    el.voiceSignal.removeAttribute('data-quality');
+  }
 }
 
 /**

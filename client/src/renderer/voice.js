@@ -305,6 +305,44 @@ export class VoiceSession {
     return out;
   }
 
+  /**
+   * Round trip to the relay, in milliseconds.
+   *
+   * From the NOMINATED candidate pair on the microphone publish. That is a
+   * real measurement -- STUN binding requests over the live path -- rather
+   * than an HTTP ping to the control server, which would travel a different
+   * route to a different process and tell you about neither the media path
+   * nor the thing people mean when they say the call is laggy.
+   *
+   * The publish rather than a subscription on purpose: it exists for the
+   * whole call, while subscriptions come and go with whoever is in the room.
+   *
+   * @returns {Promise<number|null>} null before ICE has settled, or when
+   *   there is no microphone running -- which is not an error, and the
+   *   caller should show nothing rather than a zero.
+   */
+  async rtt() {
+    if (!this.#mic) return null;
+    let stats;
+    try {
+      stats = await this.#mic.pc.getStats();
+    } catch {
+      return null;
+    }
+
+    let pair = null;
+    stats.forEach((r) => {
+      // `selected` is Firefox's spelling; Chromium reports `nominated` plus
+      // a succeeded state. Checking both costs nothing and the alternative
+      // is a number that is silently absent on one of them.
+      if (r.type !== 'candidate-pair') return;
+      const chosen = r.nominated === true || r.selected === true;
+      if (chosen && r.state === 'succeeded') pair = r;
+    });
+    if (!pair || typeof pair.currentRoundTripTime !== 'number') return null;
+    return Math.round(pair.currentRoundTripTime * 1000);
+  }
+
   async publishStats() {
     if (!this.#mic) return null;
     const sender = this.#mic.pc.getSenders().find((x) => x.track?.kind === 'audio');

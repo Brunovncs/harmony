@@ -335,6 +335,10 @@ select:focus {
   justify-content: space-between;
   gap: 0.5rem;
 }
+.brand-small {
+  font-size: 0.95rem;
+  letter-spacing: 0.02em;
+}
 .channel-list h2,
 .voice-head h2 {
   font-size: 0.95rem;
@@ -720,26 +724,77 @@ select:focus {
   color: #e3a008;
 }
 
-/* Three bars, drawn rather than imported: it is three divs' worth of CSS and
-   the alternative is an icon font for one glyph. */
+/*
+ * Three bars, drawn rather than imported: it is three gradients' worth of
+ * CSS and the alternative is an icon font for one glyph.
+ *
+ * How many of them are lit says how the round trip to the relay looks, and
+ * hovering gives the number. A coloured icon that cannot be interrogated is
+ * an icon people learn to ignore.
+ */
 .voice-signal {
+  position: relative;
   flex: 0 0 auto;
   width: 0.95rem;
   height: 0.8rem;
+  cursor: help;
+  --sig: #3fc77a;
+  --sig-off: rgba(255, 255, 255, 0.2);
+  --bar2: var(--sig);
+  --bar3: var(--sig);
   background:
-    linear-gradient(#3fc77a, #3fc77a) 0 100% / 0.22rem 40% no-repeat,
-    linear-gradient(#3fc77a, #3fc77a) 50% 100% / 0.22rem 70% no-repeat,
-    linear-gradient(#3fc77a, #3fc77a) 100% 100% / 0.22rem 100% no-repeat;
+    linear-gradient(var(--sig), var(--sig)) 0 100% / 0.22rem 40% no-repeat,
+    linear-gradient(var(--bar2), var(--bar2)) 50% 100% / 0.22rem 70% no-repeat,
+    linear-gradient(var(--bar3), var(--bar3)) 100% 100% / 0.22rem 100% no-repeat;
+}
+/* Two bars amber: noticeable, still usable. */
+.voice-signal[data-quality='ok'] {
+  --sig: #e3a008;
+  --bar3: var(--sig-off);
+}
+/* One bar red: this is why they sound like that. */
+.voice-signal[data-quality='bad'] {
+  --sig: #ff8c8c;
+  --bar2: var(--sig-off);
+  --bar3: var(--sig-off);
 }
 .voice-panel[data-state='connecting'] .voice-signal {
-  background-image:
-    linear-gradient(#e3a008, #e3a008),
-    linear-gradient(rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.2)),
-    linear-gradient(rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.2));
+  --sig: #e3a008;
+  --bar2: var(--sig-off);
+  --bar3: var(--sig-off);
+}
+
+/*
+ * The ping, on hover.
+ *
+ * Its own tooltip rather than a title attribute: a title waits about a
+ * second before it appears, which for something you are checking because
+ * the call sounds wrong is long enough that you let go and give up.
+ */
+.voice-signal::after {
+  content: attr(data-ping);
+  position: absolute;
+  bottom: calc(100% + 0.35rem);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0.2rem 0.45rem;
+  border-radius: 5px;
+  background: #0f1115;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  font-size: 0.72rem;
+  line-height: 1.2;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 90ms ease-out;
+  z-index: 30;
+}
+.voice-signal:hover::after {
+  opacity: 1;
 }
 
 .icon-btn {
-  margin-left: auto;
   flex: 0 0 auto;
   background: none;
   border: 0;
@@ -747,21 +802,114 @@ select:focus {
   color: inherit;
   font: inherit;
   border-radius: 6px;
-  padding: 0.3rem 0.45rem;
-  /* The label is for screen readers and for tests; the glyph is the button. */
+  padding: 0.3rem 0.4rem;
+  /* The label is for screen readers and for tests; the glyph is the button.
+     font-size: 0 collapses the text without hiding it from either. */
   font-size: 0;
 }
 .icon-btn::before {
-  content: '\260E';
+  content: attr(data-glyph);
   font-size: 1rem;
   line-height: 1;
   font-variant-emoji: text;
 }
 .icon-btn.hangup {
   color: #ff8c8c;
+  margin-left: auto;
 }
-.icon-btn:hover {
+.icon-btn:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.1);
+}
+.icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+/* A struck-through glyph, so "muted" is legible without colour alone --
+   which is the state people most need to read at a glance and the one that
+   costs most to misread. */
+.icon-btn[data-on] {
+  color: #ff8c8c;
+}
+.icon-btn[data-on]::after {
+  content: '';
+  position: absolute;
+  left: 15%;
+  right: 15%;
+  top: 50%;
+  border-top: 2px solid currentColor;
+  transform: rotate(-20deg);
+}
+.icon-btn[data-on] {
+  position: relative;
+}
+
+/* ---------- you, at the bottom of the sidebar ---------- */
+
+.self-strip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.5rem;
+  padding: 0.35rem 0.4rem;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+}
+.self-identity {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex: 1 1 auto;
+  background: none;
+  border: 0;
+  padding: 0.1rem 0.2rem;
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.self-identity:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+.self-identity:hover .avatar {
+  outline: 2px solid var(--accent, #6ea8fe);
+  outline-offset: 1px;
+}
+.self-identity .avatar {
+  width: 2.1em;
+  height: 2.1em;
+  font-size: 0.68em;
+}
+.self-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.2;
+}
+.self-text strong {
+  font-size: 0.88rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.self-status {
+  font-size: 0.72rem;
+  opacity: 0.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* In a call it is the one thing on the strip worth reading. */
+.self-status[data-in-voice] {
+  color: #3fc77a;
+  opacity: 1;
+}
+.self-actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
 }
 
 .voice-panel-actions {
@@ -804,11 +952,6 @@ select:focus {
 .voice-action[data-on] {
   background: rgba(110, 168, 254, 0.22);
   border-color: rgba(110, 168, 254, 0.5);
-}
-.voice-action[data-on][data-off-state] {
-  background: rgba(255, 140, 140, 0.18);
-  border-color: rgba(255, 140, 140, 0.45);
-  color: #ffbcbc;
 }
 .voice-action:disabled {
   opacity: 0.45;
