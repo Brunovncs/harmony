@@ -10,13 +10,29 @@
 // The second form checks a packaged build, where asar can break native module
 // loading and the custom protocol.
 
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { attach, findPage, launchApp, reporter, sleep } from './cdp.mjs';
 
 const PORT = 9333;
 const { check, summary } = reporter();
 
 let stderr = '';
-const child = launchApp({ port: PORT, onStderr: (s) => (stderr += s) });
+/**
+ * A throwaway profile, so the suite never sees the developer's real settings.
+ *
+ * Without this the app boots with whatever server address, password and
+ * session token happen to be saved on this machine, reaches that server, and
+ * the connect screen configures itself from the answer. Several checks here
+ * assert what the screen looks like with NO server -- they passed for as long
+ * as the saved server happened to have no accounts, and started failing the
+ * moment it did. A test that depends on the state of someone's home server is
+ * not testing the thing it claims to.
+ */
+const userDataDir = mkdtempSync(join(tmpdir(), 'harmony-smoke-'));
+const child = launchApp({ port: PORT, userDataDir, onStderr: (s) => (stderr += s) });
 
 async function run() {
   const page = await findPage(PORT);
@@ -104,6 +120,16 @@ async function run() {
   // bar takes ~39px and the page only gets 761. So measure the window the app
   // actually opens, with no viewport override in play.
   const natural = await cdp.evaluate(`
+    // Reveal every optional field to measure the worst case, then put the DOM
+    // back exactly as it was. Leaving it mutated made a later check read a
+    // password field this one had opened -- which looked fine for as long as
+    // the machine happened to have a password-protected server saved, and
+    // failed the moment the suite got its own empty profile.
+    const was = {
+      password: document.getElementById('password-field').hidden,
+      gpu: document.getElementById('gpu-preference-field').hidden,
+      options: document.querySelector('.options').open,
+    };
     document.getElementById('password-field').hidden = false;
     document.getElementById('gpu-preference-field').hidden = false;
     document.querySelector('.options').open = false;
@@ -113,7 +139,7 @@ async function run() {
       const r = document.getElementById(id).getBoundingClientRect();
       return r.top >= 0 && r.bottom <= window.innerHeight;
     };
-    return {
+    const result = {
       size: window.innerWidth + 'x' + window.innerHeight,
       cardScrolls: card.scrollHeight > card.clientHeight + 2,
       formHeight: Math.round(card.scrollHeight),
@@ -121,6 +147,10 @@ async function run() {
       continueVisible: inView('continue'),
       testVisible: inView('test-connection'),
     };
+    document.getElementById('password-field').hidden = was.password;
+    document.getElementById('gpu-preference-field').hidden = was.gpu;
+    document.querySelector('.options').open = was.options;
+    return result;
   `);
   check(
     'the connect form fits the real window without scrolling',
@@ -460,6 +490,274 @@ async function run() {
     focus.panelShown ? `panel appeared saying "${focus.title}"` : 'preview left alone',
   );
 
+  // ---------------------------------------------------------------------
+  // Accounts (Phase 1)
+  //
+  // The account fields must stay invisible against a server that has no
+  // account system -- which is every 0.1.0 deployment, and is also what the
+  // app shows before it has reached any server at all. If this regresses,
+  // every existing user is asked for a password that does not exist.
+  // ---------------------------------------------------------------------
+  const accountsHidden = await cdp.evaluate(`
+    return {
+      hidden: document.getElementById('account-fields').hidden,
+      mode: document.body.dataset.authMode,
+      button: document.getElementById('continue').textContent,
+      hint: document.getElementById('username-hint').textContent,
+    };
+  `);
+  check(
+    'the account fields stay hidden on a server with no accounts',
+    accountsHidden.hidden === true && accountsHidden.mode === 'none',
+    `hidden=${accountsHidden.hidden} mode=${accountsHidden.mode} button="${accountsHidden.button}"`,
+  );
+  check(
+    'the original single-box hint is unchanged without accounts',
+    /Free name/.test(accountsHidden.hint),
+    accountsHidden.hint.slice(0, 60),
+  );
+
+  // Registering and signing in are different forms, because the server
+  // deliberately will not say whether a nickname exists -- so the user has to
+  // choose, and the choice has to be visible.
+  const toggled = await cdp.evaluate(`
+    const before = {
+      confirm: document.getElementById('account-confirm-field').hidden,
+      label: document.getElementById('account-password-label').textContent,
+      button: document.getElementById('continue').textContent,
+    };
+    document.getElementById('auth-mode-toggle').click();
+    const after = {
+      confirm: document.getElementById('account-confirm-field').hidden,
+      label: document.getElementById('account-password-label').textContent,
+      button: document.getElementById('continue').textContent,
+      toggle: document.getElementById('auth-mode-toggle').textContent,
+    };
+    document.getElementById('auth-mode-toggle').click();
+    return { before, after };
+  `);
+  check(
+    'switching to register asks for a confirmation and renames the action',
+    toggled.before.confirm === true
+      && toggled.after.confirm === false
+      && /Create account/.test(toggled.after.button)
+      && /Choose/.test(toggled.after.label),
+    `"${toggled.before.button}"/${toggled.before.label} -> "${toggled.after.button}"/${toggled.after.label}`,
+  );
+
+  // The owner key is only meaningful while registering on a server that has no
+  // owner. Showing it the rest of the time invites people to hunt for a key
+  // that does not exist.
+  const ownerKey = await cdp.evaluate(`
+    const field = document.getElementById('owner-key-field');
+    const toggle = document.getElementById('auth-mode-toggle');
+    toggle.click();                       // -> register, but needsOwner is false
+    const registeringWithoutOwnerNeeded = field.hidden;
+    toggle.click();                       // back to login
+    return { registeringWithoutOwnerNeeded, loginMode: field.hidden };
+  `);
+  check(
+    'the owner key box stays hidden unless the server actually needs an owner',
+    ownerKey.registeringWithoutOwnerNeeded === true && ownerKey.loginMode === true,
+    `register=${ownerKey.registeringWithoutOwnerNeeded} login=${ownerKey.loginMode}`,
+  );
+
+  // "Stay signed in" keeps a session token, never the password. Unticking it
+  // has to forget what is already stored, or the setting only points one way.
+  const remember = await cdp.evaluate(`
+    const { harmony } = await import('./bridge.js');
+    const box = document.getElementById('remember-account');
+    box.checked = true;
+    box.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 150));
+    const on = await harmony.settings.get();
+    box.checked = false;
+    box.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 150));
+    const off = await harmony.settings.get();
+    return {
+      onRemember: on.rememberAccount,
+      offRemember: off.rememberAccount,
+      offToken: off.sessionToken,
+      storesPassword: Object.prototype.hasOwnProperty.call(off, 'accountPassword'),
+    };
+  `);
+  check(
+    'unticking "stay signed in" forgets the stored token',
+    remember.onRemember === true && remember.offRemember === false && !remember.offToken,
+    `on=${remember.onRemember} off=${remember.offRemember} token=${JSON.stringify(remember.offToken)}`,
+  );
+  check(
+    'the account password is never written to settings',
+    remember.storesPassword === false,
+    'only the revocable session token is persisted',
+  );
+
+  // ---------------------------------------------------------------------
+  // The bridge surface
+  //
+  // bridge.js re-declares every preload method by hand so it can wrap each one
+  // in lift(). That means a method added to the preload and forgotten in
+  // bridge.js is simply `undefined` at runtime, with no error until something
+  // calls it -- which is exactly what happened to the whole accounts API: it
+  // shipped, passed every test, and would have thrown the first time a real
+  // user pressed Continue against a server with accounts.
+  // ---------------------------------------------------------------------
+  const surface = await cdp.evaluate(`
+    const { harmony } = await import('./bridge.js');
+    const missing = [];
+    const check = (groupName, rawGroup, liftedGroup) => {
+      for (const key of Object.keys(rawGroup ?? {})) {
+        if (typeof liftedGroup?.[key] !== 'function') missing.push(groupName + '.' + key);
+      }
+    };
+    check('api', window.harmony.api, harmony.api);
+    check('realtime', window.harmony.realtime, harmony.realtime);
+    check('settings', window.harmony.settings, harmony.settings);
+    check('sources', window.harmony.sources, harmony.sources);
+    check('audio', window.harmony.audio, harmony.audio);
+    check('clips', window.harmony.clips, harmony.clips);
+    return {
+      missing,
+      apiCount: Object.keys(window.harmony.api).length,
+    };
+  `);
+  check(
+    'every preload method is exposed through bridge.js',
+    surface.missing.length === 0,
+    surface.missing.length
+      ? `missing from bridge.js: ${surface.missing.join(', ')}`
+      : `${surface.apiCount} api methods, all lifted`,
+  );
+
+  // The voice session is the one piece of Phase 2 that can be exercised with
+  // no server at all: muting is a local track operation by design, so that it
+  // never costs a renegotiation.
+  const voice = await cdp.evaluate(`
+    const { VoiceSession } = await import('./voice.js');
+    const session = new VoiceSession();
+    session.configure({ channelId: 1, mid: 7, token: 'tok en', whepBase: 'http://s:8889' });
+    const url = session.peerUrl(3);
+    const muted = session.setMuted(true);
+    const unmuted = session.setMuted(false);
+    const deafened = session.setDeafened(true);
+    return { url, muted, unmuted, deafened, mid: session.mid };
+  `);
+  check(
+    'a voice peer URL is built from the channel path and token',
+    voice.url === 'http://s:8889/vc-1-3-v/whep?token=tok%20en',
+    voice.url,
+  );
+  check(
+    'mic mute and deafen are local toggles, needing no connection',
+    voice.muted === true && voice.unmuted === false && voice.deafened === true,
+    `mute ${voice.muted}/${voice.unmuted}, deafen ${voice.deafened}`,
+  );
+
+  // ---------------------------------------------------------------------
+  // Soundpad and media
+  //
+  // The single easiest thing to get wrong in the soundpad is routing a clip
+  // into the OUTGOING mix instead of the playback context, which re-broadcasts
+  // it to people who are already playing it locally. playSample() must live on
+  // the same AudioContext as createSink(), and AudioBridge must be untouched.
+  // ---------------------------------------------------------------------
+  const soundpad = await cdp.evaluate(`
+    const gain = await import('./gain.js');
+    const bridge = await import('./audio-bridge.js');
+    return {
+      hasPlaySample: typeof gain.playSample === 'function',
+      // playSample must NOT be reachable through AudioBridge -- if it is,
+      // somebody has wired the clip into the published mix.
+      bridgeHasPlay: typeof bridge.AudioBridge?.prototype?.playSample === 'function',
+    };
+  `);
+  check(
+    'soundpad clips play through the playback context, not the outgoing mix',
+    soundpad.hasPlaySample === true && soundpad.bridgeHasPlay === false,
+    `gain.playSample=${soundpad.hasPlaySample}, AudioBridge.playSample=${soundpad.bridgeHasPlay}`,
+  );
+
+  // The media route has to live under app/ or the CSP blocks every image it
+  // was added to allow: the scheme is {standard: true}, so the host is part of
+  // the origin and harmony://media would be a different one.
+  const media = await cdp.evaluate(`
+    const { harmony } = await import('./bridge.js');
+    const url = harmony.mediaUrl('a'.repeat(64));
+    const sameOrigin = new URL(url).origin === location.origin;
+    // A bad hash must be refused by the protocol handler rather than reaching
+    // the network.
+    const bad = await fetch(harmony.mediaUrl('nope')).then((r) => r.status).catch(() => 'threw');
+    return { url, sameOrigin, bad };
+  `);
+  check(
+    'media URLs are same-origin, so the CSP never has to be loosened',
+    media.sameOrigin === true && media.url.startsWith('harmony://app/media/'),
+    media.url,
+  );
+  check(
+    'the media route refuses anything that is not a content hash',
+    media.bad === 400,
+    `status ${media.bad}`,
+  );
+
+  // ---------------------------------------------------------------------
+  // Voice subscription retry
+  //
+  // MediaMTX answers a WHIP publish with 201 as soon as signalling finishes,
+  // but the path is not readable until the first RTP packet arrives. A peer
+  // subscribing inside that window gets 404. Measured on a real 16-member
+  // channel against the Pi: every other member failed to subscribe to one
+  // slot for exactly that reason.
+  //
+  // Retrying only on the next roster push is not enough -- in a settled
+  // channel there is no next push, so that person stays silently inaudible.
+  // ---------------------------------------------------------------------
+  const retry = await cdp.evaluate(`
+    const { VoiceSession } = await import('./voice.js');
+    const session = new VoiceSession();
+    session.configure({ channelId: 1, mid: 1, token: 't', whepBase: 'http://127.0.0.1:1' });
+
+    const roster = [
+      { mid: 1, nickname: 'me', publishing: ['v'] },
+      { mid: 2, nickname: 'them', publishing: ['v'] },
+    ];
+
+    // Nothing is listening on port 1, so every subscribe fails -- which is
+    // the case this guards.
+    const first = await session.syncPeers(roster);
+    const missingAfterFailure = session.hasMissingPeers;
+
+    // The retry path must work from the REMEMBERED roster, with no argument.
+    const second = await session.syncPeers();
+
+    // A peer who stops publishing must stop being chased.
+    await session.syncPeers([{ mid: 1, nickname: 'me', publishing: ['v'] }]);
+    const missingAfterTheyLeave = session.hasMissingPeers;
+
+    return {
+      firstMissed: first.missed.length,
+      missingAfterFailure,
+      secondRetried: second.missed.length,
+      missingAfterTheyLeave,
+    };
+  `);
+  check(
+    'a failed voice subscription is remembered as missing, not forgotten',
+    retry.firstMissed === 1 && retry.missingAfterFailure === true,
+    `missed=${retry.firstMissed} flagged=${retry.missingAfterFailure}`,
+  );
+  check(
+    'the retry works from the remembered roster, with no new push',
+    retry.secondRetried === 1,
+    'syncPeers() with no argument re-attempted the failed peer',
+  );
+  check(
+    'a peer who stops publishing is no longer chased',
+    retry.missingAfterTheyLeave === false,
+    'the retry timer goes quiet once nothing is missing',
+  );
+
   cdp.close();
 }
 
@@ -468,6 +766,7 @@ run()
   .finally(async () => {
     child.kill();
     await sleep(500);
+    rmSync(userDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     const failed = summary();
     if (failed && stderr.trim()) console.error(`\n--- app stderr ---\n${stderr}`);
     process.exit(failed ? 1 : 0);

@@ -26,6 +26,21 @@ const setPassword = (value) => {
   return { ok: true };
 };
 
+/**
+ * The logged-in account's bearer token, held for the same reason as the
+ * password above: it belongs to the connection, not to any one call.
+ *
+ * Note this is the session token and NOT the account password. The renderer
+ * never holds the password after login, and "remember me" persists this token
+ * instead -- it expires on its own and can be revoked server-side, neither of
+ * which is true of a stored password.
+ */
+let sessionToken = '';
+const setSessionToken = (value) => {
+  sessionToken = String(value ?? '');
+  return { ok: true };
+};
+
 class ApiError extends Error {
   constructor(message, { status = 0, code = 'request_failed' } = {}) {
     super(message);
@@ -48,6 +63,7 @@ async function requestJson(serverUrl, pathname, { method = 'GET', body } = {}) {
     const headers = {};
     if (body) headers['Content-Type'] = 'application/json';
     if (password) headers['X-Harmony-Password'] = password;
+    if (sessionToken) headers.Authorization = `Bearer ${sessionToken}`;
 
     res = await fetch(url, {
       method,
@@ -127,6 +143,69 @@ async function sdpExchange(url, offerSdp) {
   };
 }
 
+/**
+ * Download a stored file as raw bytes.
+ *
+ * Separate from requestJson because the response is binary and because the
+ * media cache verifies the sha256 of what arrives -- it needs the buffer, not
+ * a parsed body.
+ */
+async function fetchUpload(serverUrl, hash) {
+  const url = `${normalizeBase(serverUrl)}/api/uploads/${hash}`;
+  const headers = {};
+  if (password) headers['X-Harmony-Password'] = password;
+  if (sessionToken) headers.Authorization = `Bearer ${sessionToken}`;
+
+  let res;
+  try {
+    res = await fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
+  } catch (err) {
+    throw new ApiError(`Could not download ${hash.slice(0, 8)}: ${err.message}`, {
+      code: 'unreachable',
+    });
+  }
+  if (!res.ok) {
+    throw new ApiError(`The server returned ${res.status} for that file.`, {
+      status: res.status,
+      code: 'media_error',
+    });
+  }
+  return {
+    buffer: Buffer.from(await res.arrayBuffer()),
+    contentType: res.headers.get('content-type') ?? 'application/octet-stream',
+  };
+}
+
+/** Upload raw bytes. Returns { hash, contentType, bytes }. */
+async function uploadFile(serverUrl, bytes, contentType) {
+  const url = `${normalizeBase(serverUrl)}/api/uploads`;
+  const headers = { 'Content-Type': contentType };
+  if (password) headers['X-Harmony-Password'] = password;
+  if (sessionToken) headers.Authorization = `Bearer ${sessionToken}`;
+
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: Buffer.from(bytes),
+      signal: AbortSignal.timeout(60_000),
+    });
+  } catch (err) {
+    throw new ApiError(`Upload failed: ${err.message}`, { code: 'unreachable' });
+  }
+  const text = await res.text();
+  let payload = null;
+  try { payload = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
+  if (!res.ok) {
+    throw new ApiError(payload?.message ?? `Upload refused (${res.status}).`, {
+      status: res.status,
+      code: payload?.error ?? 'upload_failed',
+    });
+  }
+  return payload;
+}
+
 async function deleteResource(resourceUrl) {
   if (!resourceUrl) return;
   try {
@@ -140,15 +219,67 @@ async function deleteResource(resourceUrl) {
 module.exports = {
   ApiError,
   setPassword,
+  setSessionToken,
   health: (s) => requestJson(s, '/api/health'),
+
+  // Accounts. All of these sit behind the shared server password, so they
+  // inherit the X-Harmony-Password header above without doing anything.
+  register: (s, nickname, password_, ownerKey) =>
+    requestJson(s, '/api/accounts/register', {
+      method: 'POST',
+      body: { nickname, password: password_, ...(ownerKey ? { ownerKey } : {}) },
+    }),
+  login: (s, nickname, password_, ownerKey) =>
+    requestJson(s, '/api/accounts/login', {
+      method: 'POST',
+      body: { nickname, password: password_, ...(ownerKey ? { ownerKey } : {}) },
+    }),
+  logout: (s) => requestJson(s, '/api/accounts/logout', { method: 'POST' }),
+
+  // Channels. Reading is any member; everything else is admin-gated server
+  // side, so these just surface whatever it answers.
+  channels: (s) => requestJson(s, '/api/channels'),
+  createChannel: (s, body) => requestJson(s, '/api/channels', { method: 'POST', body }),
+  updateChannel: (s, id, body) =>
+    requestJson(s, `/api/channels/${id}`, { method: 'POST', body }),
+  deleteChannel: (s, id) =>
+    requestJson(s, `/api/channels/${id}/delete`, { method: 'POST' }),
+  reorderChannels: (s, ids) =>
+    requestJson(s, '/api/channels/reorder', { method: 'POST', body: { ids } }),
+  me: (s) => requestJson(s, '/api/accounts/me'),
+  roster: (s) => requestJson(s, '/api/accounts'),
+  setRole: (s, id, role) =>
+    requestJson(s, `/api/accounts/${id}/role`, { method: 'POST', body: { role } }),
   streams: (s) => requestJson(s, '/api/streams'),
   // `token` is sent only when reclaiming a username this client already holds.
-  session: (s, username, token) =>
-    requestJson(s, '/api/session', { method: 'POST', body: { username, token } }),
+  // `kind` is 'camera' to claim the caller's own `<nickname>-cam` path. The
+  // server derives that name itself; it is never sent as a username.
+  session: (s, username, token, kind) =>
+    requestJson(s, '/api/session', {
+      method: 'POST',
+      body: { username, token, ...(kind ? { kind } : {}) },
+    }),
   heartbeat: (s, username, token) =>
     requestJson(s, '/api/session/heartbeat', { method: 'POST', body: { username, token } }),
   release: (s, username, token) =>
     requestJson(s, '/api/session/release', { method: 'POST', body: { username, token } }),
   sdpExchange,
   deleteResource,
+  fetchUpload,
+  uploadFile,
+
+  // Messages
+  messages: (s, id, before) =>
+    requestJson(s, `/api/channels/${id}/messages${before ? `?before=${before}` : ''}`),
+  postMessage: (s, id, body) =>
+    requestJson(s, `/api/channels/${id}/messages`, { method: 'POST', body }),
+  pinMessage: (s, id, pinned) =>
+    requestJson(s, `/api/messages/${id}/pin`, { method: 'POST', body: { pinned } }),
+  deleteMessage: (s, id) =>
+    requestJson(s, `/api/messages/${id}/delete`, { method: 'POST' }),
+  soundpad: (s) => requestJson(s, '/api/soundpad'),
+  addClip: (s, body) => requestJson(s, '/api/soundpad', { method: 'POST', body }),
+  deleteClip: (s, id) => requestJson(s, `/api/soundpad/${id}/delete`, { method: 'POST' }),
+  search: (s, id, q) =>
+    requestJson(s, `/api/channels/${id}/search?q=${encodeURIComponent(q)}`),
 };

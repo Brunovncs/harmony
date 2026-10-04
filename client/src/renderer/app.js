@@ -3,7 +3,8 @@ import { publish, watch, hangup, createStatsReader, applySenderSettings } from '
 import { AudioBridge } from './audio-bridge.js';
 import { runConnectionTest } from './connection-test.js';
 import { ClipBuffer, CLIP_SECONDS } from './clip-buffer.js';
-import { createSink, MAX_GAIN, asPercent } from './gain.js';
+import { VoiceSession } from './voice.js';
+import { createSink, MAX_GAIN, asPercent, playSample } from './gain.js';
 
 // ---------------------------------------------------------------------------
 // Quality presets
@@ -48,7 +49,33 @@ const PRIORITY = {
 
 const WATCH_RETRY_MS = 2500;
 
+/**
+ * Account state for the connect screen.
+ *
+ * `supported` stays false against a pre-accounts server, which is what keeps
+ * the old single-box flow working untouched.
+ */
+const AUTH_DEFAULTS = {
+  supported: false,
+  hasAccounts: false,
+  needsOwner: false,
+  mode: 'login',
+  token: '',
+  user: null,
+};
+
 // ---------------------------------------------------------------------------
+
+/**
+ * Fold what someone typed into the form that is actually stored.
+ *
+ * Mirrors normalizeName() on the server: "Pedro Lucas" is a perfectly
+ * reasonable thing to type and becomes `pedrolucas`. Doing it here as well
+ * means the box shows what will be used instead of quietly rewriting it on
+ * submit -- the server would reach the same answer either way, but only one of
+ * those is honest about it.
+ */
+const normalizeName = (raw) => String(raw ?? '').trim().toLowerCase().replace(/\s+/g, '');
 
 const $ = (id) => document.getElementById(id);
 
@@ -58,10 +85,54 @@ const el = {
   passwordField: $('password-field'),
   password: $('server-password'),
   username: $('username'),
+  usernameHint: $('username-hint'),
+  accountFields: $('account-fields'),
+  accountPassword: $('account-password'),
+  accountPasswordLabel: $('account-password-label'),
+  accountConfirmField: $('account-confirm-field'),
+  accountConfirm: $('account-confirm'),
+  ownerKeyField: $('owner-key-field'),
+  ownerKey: $('owner-key'),
+  rememberAccount: $('remember-account'),
+  authModeText: $('auth-mode-text'),
+  authModeToggle: $('auth-mode-toggle'),
   continue: $('continue'),
   connectError: $('connect-error'),
   liveList: $('live-list'),
   liveItems: $('live-items'),
+
+  channelsWho: $('channels-who'),
+  channelsRole: $('channels-role'),
+  channelsShare: $('channels-share'),
+  channelsWatch: $('channels-watch'),
+  channelsSignout: $('channels-signout'),
+  channelAdd: $('channel-add'),
+  channelItems: $('channel-items'),
+  channelsError: $('channels-error'),
+  voiceIdle: $('voice-idle'),
+  voiceActive: $('voice-active'),
+  voiceName: $('voice-name'),
+  voiceCount: $('voice-count'),
+  voiceRoster: $('voice-roster'),
+  chatActive: $('chat-active'),
+  chatName: $('chat-name'),
+  chatSearch: $('chat-search'),
+  chatSearchClear: $('chat-search-clear'),
+  chatPinned: $('chat-pinned'),
+  chatLog: $('chat-log'),
+  chatForm: $('chat-form'),
+  chatInput: $('chat-input'),
+  chatFile: $('chat-file'),
+  chatAttach: $('chat-attach'),
+  chatNote: $('chat-note'),
+  soundpad: $('soundpad'),
+  soundpadAdd: $('soundpad-add'),
+  soundpadFile: $('soundpad-file'),
+  soundpadGrid: $('soundpad-grid'),
+  voiceCam: $('voice-cam'),
+  voiceMute: $('voice-mute'),
+  voiceDeafen: $('voice-deafen'),
+  voiceLeave: $('voice-leave'),
 
   pickerUsername: $('picker-username'),
   pickerBack: $('picker-back'),
@@ -170,6 +241,21 @@ function freshMosaic() {
 /** Everything mutable about the current session. */
 const state = {
   settings: null,
+  /** Who is signed in, and what this server supports. See AUTH_DEFAULTS. */
+  auth: { ...AUTH_DEFAULTS },
+
+  /**
+   * Channels, and the voice channel we are in (if any).
+   *
+   * `list` and `occupancy` are mirrors of server pushes -- never edited
+   * locally, so there is nothing to reconcile when a push arrives.
+   */
+  channels: { list: [], occupancy: {}, roster: [], joining: false },
+  chat: { channelId: null, messages: [], pinned: [], searching: false, pendingFile: null },
+  soundpad: { clips: [] },
+  /** The webcam publish, which is a SECOND stream under `<nickname>-cam`. */
+  camera: { stream: null, publication: null, session: null },
+  voice: new VoiceSession(),
   audioAvailable: false,
   audioUnavailableReason: null,
 
@@ -280,6 +366,14 @@ async function boot() {
   // Main holds the password for every request it makes; hand back what was
   // saved before anything asks the server for anything.
   await harmony.api.setPassword(el.password.value);
+
+  el.rememberAccount.checked = state.settings.rememberAccount !== false;
+  if (state.settings.sessionToken) {
+    // Restore before probeServer, so /api/health is already authenticated and
+    // a still-valid token skips the login form entirely.
+    state.auth.token = state.settings.sessionToken;
+    await harmony.api.setSessionToken(state.auth.token);
+  }
   el.fallback.value = state.settings.windowAudioFallback;
   state.clips.enabled = Boolean(state.settings.clipsEnabled);
   el.clipsEnabled.checked = state.clips.enabled;
@@ -428,10 +522,104 @@ async function probeServer() {
     const health = await harmony.api.health(server);
     el.passwordField.hidden = !health.passwordRequired;
     state.passwordRequired = Boolean(health.passwordRequired);
+
+    // `hasAccounts` is absent on a pre-accounts server, which is exactly how we
+    // tell the two apart -- undefined means "this server has no account system",
+    // so the whole block stays hidden and the single-box flow is unchanged.
+    // It is also absent while unauthenticated, since /api/health withholds its
+    // details until the shared password is right.
+    state.auth.supported = health.hasAccounts !== undefined;
+    state.auth.hasAccounts = Boolean(health.hasAccounts);
+    state.auth.needsOwner = Boolean(health.needsOwner);
+
+    // An empty server has nobody to log in as, so offer registration first.
+    if (state.auth.supported && !state.auth.hasAccounts) state.auth.mode = 'register';
+    applyAuthMode();
   } catch {
     // Unreachable, or an older server with no passwordRequired field. Either
     // way, do not change what the user can see.
   }
+}
+
+/**
+ * Show the account fields in the mode we are actually in.
+ *
+ * Registering and logging in are deliberately NOT inferred from whether the
+ * nickname exists: the server answers "wrong nickname or password" to both, on
+ * purpose, so that this screen cannot be used to enumerate who has an account.
+ * That means the user has to say which they meant, and auto-creating an account
+ * on a mistyped password would be the worst possible guess.
+ */
+function applyAuthMode() {
+  const on = state.auth.supported;
+  el.accountFields.hidden = !on;
+  document.body.dataset.authMode = on ? state.auth.mode : 'none';
+
+  if (!on) {
+    el.usernameHint.textContent =
+      'Free name \u2192 you start streaming. Name already live \u2192 you join and watch.';
+    // Deliberately no early return: the mode-dependent labels below are kept up
+    // to date even while the block is hidden, so the fields are already correct
+    // the moment a server reveals them.
+  }
+
+  const registering = state.auth.mode === 'register';
+  el.accountPasswordLabel.textContent = registering ? 'Choose a password' : 'Your password';
+  el.accountPassword.placeholder = registering ? 'At least 6 characters' : '';
+  el.accountConfirmField.hidden = !registering;
+  el.ownerKeyField.hidden = !(registering && state.auth.needsOwner);
+  // Guarded, unlike everything else here: this hint sits OUTSIDE
+  // #account-fields and means something different on a server with no
+  // accounts, where the block above has already set it.
+  if (on) {
+    el.usernameHint.textContent = registering
+      ? 'This becomes your permanent name. 2-20 characters, and it is what your stream is called.'
+      : 'The nickname you registered with.';
+  }
+  el.authModeText.textContent = registering ? 'Already registered?' : 'No account yet?';
+  el.authModeToggle.textContent = registering ? 'Sign in' : 'Create one';
+  el.continue.textContent = registering ? 'Create account' : 'Continue';
+}
+
+/** Hand the token to main, and persist it only if they asked us to. */
+async function adoptSession(token) {
+  state.auth.token = token ?? '';
+  await harmony.api.setSessionToken(state.auth.token);
+  await harmony.settings.set({
+    sessionToken: el.rememberAccount.checked ? state.auth.token : '',
+    rememberAccount: el.rememberAccount.checked,
+  });
+}
+
+/**
+ * Log in or register, depending on the mode. Returns the account, or throws
+ * with a message already fit to show.
+ */
+async function authenticate(server, nickname) {
+  const registering = state.auth.mode === 'register';
+  const password = el.accountPassword.value;
+  const ownerKey = el.ownerKey.value.trim();
+
+  if (registering && password !== el.accountConfirm.value) {
+    throw new Error('The two passwords do not match.');
+  }
+
+  const result = registering
+    ? await harmony.api.register(server, nickname, password, ownerKey)
+    : await harmony.api.login(server, nickname, password, ownerKey);
+
+  await adoptSession(result.token);
+  state.auth.user = result.user;
+
+  // Say so rather than silently making them a member -- someone pasting a key
+  // that does not work needs to know before they wonder why they cannot
+  // create channels.
+  if (result.ownerKeyRejected) {
+    showError('That owner key was not accepted, so this account is an ordinary member.');
+  } else if (result.ownerClaimed) {
+    showError('');
+  }
+  return result.user;
 }
 
 // ---------------------------------------------------------------------------
@@ -494,7 +682,7 @@ async function refreshLiveList() {
 
 async function startSession() {
   const server = el.serverUrl.value.trim();
-  const username = el.username.value.trim().toLowerCase();
+  const username = normalizeName(el.username.value);
 
   if (!server) return showError('Enter the address of your Harmony server.');
   if (!username) return showError('Pick a username.');
@@ -508,6 +696,35 @@ async function startSession() {
     // session already carries it.
     await harmony.api.setPassword(el.password.value);
 
+    // A server we have not reached yet has not told us whether it has accounts.
+    if (!state.auth.supported) await probeServer();
+
+    /**
+     * Mirror the server's own rule exactly.
+     *
+     * A server with an account system but no accounts yet still answers
+     * anonymous claims -- that is what keeps a fresh install usable the moment
+     * it starts, before anyone has registered. So signing in is REQUIRED only
+     * once an account exists, and OPTIONAL (but honoured) before that, which is
+     * how the first person registers at all.
+     *
+     * Getting this wrong in either direction is visible: too strict and a brand
+     * new server cannot be used without registering first; too lax and the
+     * impersonation hole /api/session was fixed for stays open on the client
+     * side.
+     */
+    const mustSignIn = state.auth.supported && state.auth.hasAccounts;
+    const wantsSignIn = state.auth.supported && el.accountPassword.value.length > 0;
+
+    if (mustSignIn && !el.accountPassword.value) {
+      el.accountPassword.focus();
+      throw new Error('This server has accounts. Enter your password, or create an account.');
+    }
+
+    if ((mustSignIn || wantsSignIn) && !state.auth.user) {
+      await authenticate(server, username);
+    }
+
     const held = state.lastClaim?.username === username ? state.lastClaim.token : undefined;
     const session = await harmony.api.session(server, username, held);
     state.session = { ...session, server };
@@ -517,7 +734,13 @@ async function startSession() {
     await harmony.settings.set({ serverUrl: server, username, password: el.password.value });
     state.settings = await harmony.settings.get();
 
-    if (session.role === 'broadcaster') {
+    // A signed-in user gets the lobby; everyone else keeps the original
+    // straight-to-your-stream flow, which is what an account-less server and
+    // every 1.0.0 client still do.
+    if (state.auth.user) {
+      state.server = server;
+      await enterChannels();
+    } else if (session.role === 'broadcaster') {
       await enterPicker();
     } else {
       await enterWatch();
@@ -530,9 +753,712 @@ async function startSession() {
       el.password.focus();
       el.password.select();
     }
+    if (err.code === 'bad_credentials' || err.code === 'weak_password') {
+      el.accountPassword.focus();
+      el.accountPassword.select();
+    }
+    if (err.code === 'nickname_taken') {
+      // They meant to sign in. Put them there rather than making them find the
+      // link themselves.
+      state.auth.mode = 'login';
+      applyAuthMode();
+      el.accountPassword.focus();
+    }
+    // A failed login must not leave a half-adopted session behind.
+    if (state.auth.supported && !state.auth.user) await adoptSession('');
   } finally {
     el.continue.disabled = false;
-    el.continue.textContent = 'Continue';
+    el.continue.textContent =
+      state.auth.supported && state.auth.mode === 'register' ? 'Create account' : 'Continue';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Channels and voice
+// ---------------------------------------------------------------------------
+
+function showChannelsError(message) {
+  el.channelsError.textContent = message;
+  el.channelsError.hidden = !message;
+}
+
+const isAdmin = () => state.auth.user?.role === 'owner' || state.auth.user?.role === 'admin';
+
+/**
+ * Open the realtime socket and show the lobby.
+ *
+ * Only ever reached by a signed-in user: an anonymous client on a server with
+ * no accounts keeps the original single-box flow, which is what lets a 1.0.0
+ * deployment and its tests carry on unchanged.
+ */
+async function enterChannels() {
+  el.channelsWho.textContent = state.auth.user.nickname;
+  el.channelsRole.textContent = state.auth.user.role === 'member' ? '' : state.auth.user.role;
+  el.channelAdd.hidden = !isAdmin();
+  // The media route serves `harmony://app/media/<hash>` -- a hash and nothing
+  // else, which is what lets it be used straight in an <img src>. Main needs
+  // to be told separately where to download from.
+  await harmony.media.setServer(state.server);
+  showChannelsError('');
+  loadSoundpad();
+  showView('view-channels');
+
+  try {
+    const hello = await harmony.realtime.connect(state.server, state.auth.token);
+    state.channels.list = hello.channels ?? [];
+    state.channels.occupancy = hello.occupancy ?? {};
+  } catch (err) {
+    showChannelsError(`Live updates unavailable: ${err.message}`);
+    // Fall back to the REST list so the lobby is still usable read-only.
+    try {
+      const { channels, occupancy } = await harmony.api.channels(state.server);
+      state.channels.list = channels;
+      state.channels.occupancy = occupancy ?? {};
+    } catch { /* nothing more to try */ }
+  }
+  renderChannels();
+}
+
+function renderChannels() {
+  const items = state.channels.list.map((channel) => {
+    const li = document.createElement('li');
+    li.dataset.id = String(channel.id);
+    if (channel.id === state.voice.channelId) li.setAttribute('data-active', '');
+
+    const kind = document.createElement('span');
+    kind.className = 'kind';
+    kind.textContent = channel.kind === 'voice' ? '\u{1F50A}' : '#';
+
+    const name = document.createElement('span');
+    name.textContent = channel.name;
+
+    li.append(kind, name);
+
+    if (channel.locked) {
+      const lock = document.createElement('span');
+      lock.className = 'tag';
+      lock.textContent = channel.unlocked ? 'unlocked' : 'locked';
+      li.append(lock);
+    }
+
+    const occupants = state.channels.occupancy[channel.id] ?? 0;
+    if (channel.kind === 'voice' && occupants) {
+      const count = document.createElement('span');
+      count.className = 'count';
+      count.textContent = String(occupants);
+      li.append(count);
+    }
+
+    li.addEventListener('click', () => onChannelClick(channel));
+    return li;
+  });
+
+  el.channelItems.replaceChildren(...items);
+}
+
+async function onChannelClick(channel) {
+  if (channel.kind !== 'voice') return openTextChannel(channel);
+  if (channel.id === state.voice.channelId) return undefined;
+  return joinVoice(channel);
+}
+
+async function joinVoice(channel, password) {
+  if (state.channels.joining) return;
+  state.channels.joining = true;
+  showChannelsError('');
+
+  try {
+    if (state.voice.channelId) await leaveVoice({ silent: true });
+
+    const reply = await harmony.realtime.request('voice:join', {
+      channelId: channel.id,
+      ...(password ? { password } : {}),
+    });
+
+    if (reply.type !== 'voice:joined') {
+      if (reply.error === 'password_required' || reply.error === 'bad_password') {
+        const typed = window.prompt(
+          reply.error === 'bad_password'
+            ? `Wrong password for ${channel.name}. Try again:`
+            : `${channel.name} needs a password:`,
+        );
+        state.channels.joining = false;
+        if (typed) return joinVoice(channel, typed);
+        return;
+      }
+      if (reply.error === 'channel_full') {
+        return showChannelsError(`${channel.name} is full (${reply.cap} people).`);
+      }
+      return showChannelsError(`Could not join: ${reply.error}`);
+    }
+
+    state.voice.configure({
+      channelId: channel.id,
+      mid: reply.mid,
+      token: reply.token,
+      whepBase: reply.whepBase,
+      iceServers: state.mosaic?.iceServers ?? [],
+    });
+
+    el.voiceName.textContent = channel.name;
+    el.voiceIdle.hidden = true;
+    el.voiceActive.hidden = false;
+
+    await state.voice.startMic(reply.publish.voice, state.settings.audioInputId || undefined);
+    // Tell the server the path is live, so other members know to subscribe.
+    await harmony.realtime.request('voice:publishing', {
+      channelId: channel.id, kind: 'v', on: true,
+    });
+
+    applyVoiceButtons();
+    renderVoiceRoster(reply.roster ?? []);
+    renderChannels();
+
+    // Reconcile subscriptions on a slow timer as well as on roster pushes.
+    //
+    // A publisher's path is not readable for a moment after its WHIP returns
+    // 201 -- MediaMTX only marks it online once RTP arrives -- so an early
+    // subscribe gets a 404. In a settled channel no further roster push ever
+    // comes, so without this that peer is inaudible until somebody happens to
+    // join or mute. Measured on a real 16-member channel.
+    addTimer(setInterval(() => {
+      if (!state.voice.channelId || !state.voice.hasMissingPeers) return;
+      state.voice.syncPeers().catch(() => { /* retried on the next tick */ });
+    }, VOICE_RECONCILE_MS), 'voice');
+  } catch (err) {
+    showChannelsError(err.message);
+    await leaveVoice({ silent: true }).catch(() => {});
+  } finally {
+    state.channels.joining = false;
+  }
+}
+
+async function leaveVoice({ silent = false } = {}) {
+  clearTimers('voice');
+  const channelId = state.voice.channelId;
+  await state.voice.leave();
+  if (channelId && !silent) {
+    await harmony.realtime.request('voice:leave', { channelId }).catch(() => {});
+  }
+  state.channels.roster = [];
+  el.voiceActive.hidden = true;
+  el.voiceIdle.hidden = false;
+  renderChannels();
+}
+
+function applyVoiceButtons() {
+  el.voiceMute.textContent = state.voice.muted ? 'Unmute mic' : 'Mute mic';
+  el.voiceMute.toggleAttribute('data-on', state.voice.muted);
+  el.voiceDeafen.textContent = state.voice.deafened ? 'Undeafen' : 'Deafen';
+  el.voiceDeafen.toggleAttribute('data-on', state.voice.deafened);
+}
+
+function renderVoiceRoster(roster) {
+  state.channels.roster = roster;
+  el.voiceCount.textContent = `${roster.length} ${roster.length === 1 ? 'person' : 'people'}`;
+
+  el.voiceRoster.replaceChildren(...roster.map((member) => {
+    const li = document.createElement('li');
+
+    const name = document.createElement('span');
+    name.textContent = member.nickname + (member.mid === state.voice.mid ? ' (you)' : '');
+    li.append(name);
+
+    if (member.forceMuted) {
+      const tag = document.createElement('span');
+      tag.className = 'tag forced';
+      tag.textContent = 'muted by admin';
+      li.append(tag);
+    } else if (member.muted) {
+      const tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = 'muted';
+      li.append(tag);
+    }
+
+    // An admin can silence or remove anyone but themselves.
+    if (isAdmin() && member.mid !== state.voice.mid) {
+      const mute = document.createElement('button');
+      mute.className = 'ghost small';
+      mute.textContent = member.forceMuted ? 'Unmute' : 'Force mute';
+      mute.addEventListener('click', () => {
+        harmony.realtime.request('admin:force-mute', {
+          channelId: state.voice.channelId,
+          mid: member.mid,
+          muted: !member.forceMuted,
+        }).catch((err) => showChannelsError(err.message));
+      });
+
+      const kick = document.createElement('button');
+      kick.className = 'ghost small danger';
+      kick.textContent = 'Disconnect';
+      kick.addEventListener('click', () => {
+        harmony.realtime.request('admin:move', {
+          userId: member.userId,
+          toChannelId: null,
+        }).catch((err) => showChannelsError(err.message));
+      });
+
+      li.append(mute, kick);
+    }
+
+    return li;
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Text channels
+// ---------------------------------------------------------------------------
+
+async function openTextChannel(channel) {
+  state.chat.channelId = channel.id;
+  state.chat.searching = false;
+  state.chat.pendingFile = null;
+  el.chatName.textContent = `#${channel.name}`;
+  el.chatSearch.value = '';
+  el.chatSearchClear.hidden = true;
+  el.chatNote.textContent = '';
+  el.voiceIdle.hidden = true;
+  el.chatActive.hidden = false;
+  renderChannels();
+
+  try {
+    const { messages, pinned } = await harmony.api.messages(state.server, channel.id);
+    state.chat.messages = messages;
+    state.chat.pinned = pinned;
+    renderChat({ scrollToBottom: true });
+    // Pinned attachments are the keep-set: they are the things somebody
+    // decided were worth coming back to, so they survive cache eviction.
+    await harmony.media.keep(pinned.map((m) => m.attachmentHash).filter(Boolean));
+  } catch (err) {
+    showChannelsError(err.message);
+  }
+}
+
+function closeChat() {
+  state.chat.channelId = null;
+  el.chatActive.hidden = true;
+  if (el.voiceActive.hidden) el.voiceIdle.hidden = false;
+}
+
+/** One message row. Attachments are rendered from the local cache. */
+function messageRow(message) {
+  const row = document.createElement('div');
+  row.className = 'chat-msg';
+  row.dataset.id = String(message.id);
+  if (message.pinned) row.setAttribute('data-pinned', '');
+
+  const who = document.createElement('span');
+  who.className = 'who';
+  who.textContent = message.nickname;
+
+  const text = document.createElement('span');
+  text.className = 'text';
+  // textContent, never innerHTML: a chat message is the most obvious place in
+  // the app for someone to try injecting markup.
+  text.textContent = message.body;
+
+  if (message.attachmentHash) {
+    // harmony://app/media/<hash> -- same-origin, so the CSP allows it, and the
+    // main process downloads and verifies it on first use. See media-cache.js.
+    const url = harmony.mediaUrl(message.attachmentHash);
+    if (message.mediaType === 'image') {
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = 'attachment';
+      img.loading = 'lazy';
+      text.append(img);
+    } else if (message.mediaType === 'video') {
+      const video = document.createElement('video');
+      video.src = url;
+      video.controls = true;
+      text.append(video);
+    } else if (message.mediaType === 'audio') {
+      const audio = document.createElement('audio');
+      audio.src = url;
+      audio.controls = true;
+      text.append(audio);
+    } else {
+      const link = document.createElement('a');
+      link.href = url;
+      link.textContent = 'attachment';
+      text.append(document.createElement('br'), link);
+    }
+  }
+
+  const when = document.createElement('span');
+  when.className = 'when';
+  when.textContent = new Date(message.createdAt).toLocaleTimeString([], {
+    hour: '2-digit', minute: '2-digit',
+  });
+
+  const pin = document.createElement('button');
+  pin.className = 'ghost small';
+  pin.textContent = message.pinned ? 'Unpin' : 'Pin';
+  pin.addEventListener('click', async () => {
+    try {
+      await harmony.api.pinMessage(state.server, message.id, !message.pinned);
+    } catch (err) {
+      showChannelsError(err.message);
+    }
+  });
+
+  row.append(who, text, when, pin);
+  return row;
+}
+
+/**
+ * Render the log.
+ *
+ * The only subtle part is four lines: capture whether the pane was already at
+ * the bottom BEFORE appending, and only auto-scroll if it was. Without that,
+ * reading back through history gets yanked to the end by every new message
+ * that arrives.
+ */
+function renderChat({ scrollToBottom = false } = {}) {
+  const log = el.chatLog;
+  const wasAtBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+
+  log.replaceChildren(...state.chat.messages.map(messageRow));
+
+  if (state.chat.pinned.length) {
+    el.chatPinned.hidden = false;
+    el.chatPinned.replaceChildren(
+      ...state.chat.pinned.map((m) => {
+        const line = document.createElement('div');
+        line.textContent = `\u{1F4CC} ${m.nickname}: ${m.body || '(attachment)'}`;
+        return line;
+      }),
+    );
+  } else {
+    el.chatPinned.hidden = true;
+  }
+
+  if (scrollToBottom || wasAtBottom) log.scrollTop = log.scrollHeight;
+}
+
+async function sendMessage() {
+  const body = el.chatInput.value.trim();
+  const file = state.chat.pendingFile;
+  if (!body && !file) return;
+
+  el.chatInput.value = '';
+  state.chat.pendingFile = null;
+  el.chatNote.textContent = '';
+
+  try {
+    let attachmentHash = null;
+    if (file) {
+      el.chatNote.textContent = `Uploading ${file.name}\u2026`;
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const upload = await harmony.media.upload(state.server, bytes, file.type);
+      attachmentHash = upload.hash;
+      el.chatNote.textContent = '';
+    }
+    await harmony.api.postMessage(state.server, state.chat.channelId, { body, attachmentHash });
+    // The server echoes it back over the socket, so nothing is appended here.
+  } catch (err) {
+    el.chatNote.textContent = err.message;
+    el.chatInput.value = body; // give them their text back
+  }
+}
+
+async function runSearch() {
+  const query = el.chatSearch.value.trim();
+  if (!query) {
+    state.chat.searching = false;
+    el.chatSearchClear.hidden = true;
+    return openTextChannel(state.channels.list.find((c) => c.id === state.chat.channelId));
+  }
+
+  try {
+    const { mode, results } = await harmony.api.search(state.server, state.chat.channelId, query);
+    state.chat.searching = true;
+    state.chat.messages = results.slice().reverse();
+    el.chatSearchClear.hidden = false;
+    renderChat({ scrollToBottom: true });
+    el.chatNote.textContent = results.length
+      // Worth saying: a 1-2 character query silently cannot use the trigram
+      // index, so it falls back to a plain substring scan. Showing which ran
+      // makes "why did that find nothing" answerable.
+      ? `${results.length} result${results.length === 1 ? '' : 's'} (${mode})`
+      : `No matches (${mode}).`;
+  } catch (err) {
+    el.chatNote.textContent = err.message;
+  }
+  return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Soundpad
+// ---------------------------------------------------------------------------
+
+async function loadSoundpad() {
+  try {
+    const { clips } = await harmony.api.soundpad(state.server);
+    state.soundpad.clips = clips;
+    renderSoundpad();
+    // Clips must survive cache eviction: the first press of a button should
+    // never be a 300 ms download, and they are small.
+    await harmony.media.keep([
+      ...clips.map((c) => c.hash),
+      ...state.chat.pinned.map((m) => m.attachmentHash).filter(Boolean),
+    ]);
+    // Warm the cache now rather than on the first click. The protocol handler
+    // downloads on demand, so simply asking for each URL is enough.
+    for (const clip of clips) {
+      fetch(harmony.mediaUrl(clip.hash)).catch(() => { /* will retry on click */ });
+    }
+  } catch (err) {
+    showChannelsError(err.message);
+  }
+}
+
+function renderSoundpad() {
+  el.soundpadAdd.hidden = !isAdmin();
+  el.soundpad.hidden = !state.soundpad.clips.length && !isAdmin();
+
+  el.soundpadGrid.replaceChildren(...state.soundpad.clips.map((clip) => {
+    const button = document.createElement('button');
+    button.className = 'ghost small';
+    button.textContent = clip.name;
+    button.addEventListener('click', () => {
+      if (!state.voice.channelId) return showChannelsError('Join a voice channel first.');
+      // Only the event is sent. Every client plays its own cached copy -- see
+      // the Soundpad comment in the server's chat.js for why.
+      return harmony.realtime
+        .request('soundpad:play', { channelId: state.voice.channelId, clipId: clip.id })
+        .catch((err) => showChannelsError(err.message));
+    });
+
+    if (isAdmin()) {
+      button.addEventListener('contextmenu', async (event) => {
+        event.preventDefault();
+        if (!window.confirm(`Delete the clip "${clip.name}"?`)) return;
+        try {
+          await harmony.api.deleteClip(state.server, clip.id);
+        } catch (err) {
+          showChannelsError(err.message);
+        }
+      });
+    }
+    return button;
+  }));
+}
+
+async function addSoundpadClip(file) {
+  try {
+    el.channelsError.hidden = true;
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const upload = await harmony.media.upload(state.server, bytes, file.type);
+    const name = window.prompt('Name for this clip:', file.name.replace(/\.[^.]+$/, ''));
+    if (!name) return;
+    await harmony.api.addClip(state.server, { name, hash: upload.hash });
+  } catch (err) {
+    showChannelsError(err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Webcam
+//
+// A SECOND publish under `<nickname>-cam`, not a second track on the existing
+// one: MediaMTX's WHIP cannot renegotiate an added track (measured in the
+// Phase 0 spike -- PATCH accepts only ICE trickle fragments), so adding a
+// camera to a live path would mean tearing it down and cutting the audio
+// everyone is listening to.
+//
+// This reuses publish() untouched, which is also how the H.264 High-profile
+// ordering is preserved here by construction rather than by copying it.
+// ---------------------------------------------------------------------------
+
+const CAMERA = { width: 640, height: 360, frameRate: 24, bitrate: 400_000 };
+
+async function startCamera() {
+  if (state.camera.publication) return;
+  const nickname = state.auth.user?.nickname;
+  if (!nickname) return showChannelsError('Sign in first.');
+
+  try {
+    state.camera.stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        width: { ideal: CAMERA.width },
+        height: { ideal: CAMERA.height },
+        frameRate: { ideal: CAMERA.frameRate },
+      },
+    });
+
+    // The server appends `-cam` to our authenticated nickname itself; we
+    // cannot and must not name the path. `-cam` is refused as a registerable
+    // nickname, so nobody else can ever hold this one.
+    const session = await harmony.api.session(state.server, null, undefined, 'camera');
+    if (session.role !== 'broadcaster') {
+      throw new Error('Your camera path is already in use.');
+    }
+
+    state.camera.publication = await publish({
+      url: session.whipUrl,
+      stream: state.camera.stream,
+      iceServers: session.iceServers,
+      maxBitrate: CAMERA.bitrate,
+      maxFramerate: CAMERA.frameRate,
+      contentHint: 'motion',
+    });
+
+    // Its own heartbeat group, so stopping the camera does not disturb the
+    // screen share's claim and vice versa.
+    addTimer(
+      setInterval(
+        () => harmony.api.heartbeat(state.server, session.username, session.token).catch(() => {}),
+        Math.max(5000, session.heartbeatMs ?? 10_000),
+      ),
+      'camera',
+    );
+    state.camera.session = session;
+    el.voiceCam.textContent = 'Stop camera';
+  } catch (err) {
+    showChannelsError(err.message);
+    await stopCamera();
+  }
+  return undefined;
+}
+
+async function stopCamera() {
+  clearTimers('camera');
+  const publication = state.camera.publication;
+  state.camera.publication = null;
+  state.camera.stream?.getTracks().forEach((t) => t.stop());
+  state.camera.stream = null;
+  el.voiceCam.textContent = 'Start camera';
+
+  if (publication) {
+    publication.pc.close();
+    if (publication.resourceUrl) await harmony.api.hangup(publication.resourceUrl).catch(() => {});
+  }
+  const session = state.camera.session;
+  state.camera.session = null;
+  if (session) {
+    await harmony.api.release(state.server, session.username, session.token).catch(() => {});
+  }
+}
+
+/**
+ * Everything the server pushes.
+ *
+ * The roster is the single source of truth for who to subscribe to, which is
+ * why syncPeers() is driven from here rather than from the join: a member who
+ * unmutes ten minutes later is just another roster push.
+ */
+function onRealtimeEvent(msg) {
+  switch (msg.type) {
+    case 'channels':
+      state.channels.list = msg.channels;
+      renderChannels();
+      break;
+
+    case 'voice:roster':
+      if (msg.channelId !== state.voice.channelId) {
+        state.channels.occupancy[msg.channelId] = msg.roster.length;
+        renderChannels();
+        break;
+      }
+      renderVoiceRoster(msg.roster);
+      state.channels.occupancy[msg.channelId] = msg.roster.length;
+      renderChannels();
+      state.voice.syncPeers(msg.roster).catch(() => { /* retried next push */ });
+
+      // A force-mute arrives here and nowhere else. The Phase 0 spike measured
+      // the victim's peer connection still reporting `connected` for about
+      // nine seconds after the server kills their session, so connection state
+      // cannot be what drives this -- the push has to.
+      if (msg.roster.some((m) => m.mid === state.voice.mid && m.forceMuted)) {
+        showChannelsError('An admin muted your microphone.');
+      }
+      break;
+
+    case 'message':
+      if (msg.message.channelId === state.chat.channelId && !state.chat.searching) {
+        state.chat.messages.push(msg.message);
+        renderChat();
+      }
+      break;
+
+    case 'message:updated':
+      if (msg.message.channelId === state.chat.channelId) {
+        const index = state.chat.messages.findIndex((m) => m.id === msg.message.id);
+        if (index >= 0) state.chat.messages[index] = msg.message;
+        state.chat.pinned = state.chat.pinned.filter((m) => m.id !== msg.message.id);
+        if (msg.message.pinned) state.chat.pinned.unshift(msg.message);
+        renderChat();
+      }
+      break;
+
+    case 'message:deleted':
+      if (msg.channelId === state.chat.channelId) {
+        state.chat.messages = state.chat.messages.filter((m) => m.id !== msg.id);
+        state.chat.pinned = state.chat.pinned.filter((m) => m.id !== msg.id);
+        renderChat();
+      }
+      break;
+
+    case 'soundpad':
+      state.soundpad.clips = msg.clips;
+      renderSoundpad();
+      break;
+
+    case 'soundpad:play':
+      // Into the PLAYBACK context, never the outgoing mix. See playSample().
+      playSample(harmony.mediaUrl(msg.hash)).catch((err) =>
+        showChannelsError(`Could not play "${msg.name}": ${err.message}`));
+      break;
+
+    case 'voice:moved':
+      if (msg.channelId == null) {
+        leaveVoice();
+        showChannelsError(`${msg.by} disconnected you.`);
+      } else {
+        const target = state.channels.list.find((c) => c.id === msg.channelId);
+        if (target) {
+          showChannelsError(`${msg.by} moved you to ${target.name}.`);
+          joinVoice(target);
+        }
+      }
+      break;
+
+    case 'streams':
+      // Replaces the 3-second /api/streams poll. The slow reconciliation tick
+      // in syncMosaic stays as a safety net for a dropped socket.
+      state.lastStreams = msg.streams;
+      if (document.getElementById('view-mosaic').hasAttribute('data-active')) {
+        syncMosaic({ streams: msg.streams }).catch(() => { /* next tick retries */ });
+      }
+      break;
+
+    case 'realtime:down':
+      showChannelsError('Reconnecting\u2026');
+      break;
+
+    case 'realtime:up':
+      showChannelsError('');
+      if (msg.channels) {
+        state.channels.list = msg.channels;
+        renderChannels();
+      }
+      // A reconnect means the server has forgotten our presence, because
+      // presence IS the socket. Rejoin rather than appearing to be in a channel
+      // nobody else can see us in.
+      if (state.voice.channelId) {
+        const channel = state.channels.list.find((c) => c.id === state.voice.channelId);
+        if (channel) joinVoice(channel);
+      }
+      break;
+
+    case 'realtime:rejected':
+      showChannelsError('This session expired. Sign in again.');
+      break;
+
+    default:
+      break;
   }
 }
 
@@ -1513,18 +2439,41 @@ async function enterMosaic(usernames = null) {
   showView('view-mosaic');
 
   await syncMosaic();
-  // Streams come and go while you watch; the grid follows.
-  addTimer(setInterval(syncMosaic, 3000), 'mosaic');
+  // Streams come and go while you watch; the grid follows. This used to be the
+  // only mechanism and ran every 3 seconds. The server now pushes the list on
+  // change, so this is demoted to a reconciliation net for the case the socket
+  // is down -- which is also why it is not removed outright.
+  addTimer(setInterval(syncMosaic, MOSAIC_RECONCILE_MS), 'mosaic');
   addTimer(setInterval(updateMosaicMeta, 1000), 'mosaic');
 }
 
-async function syncMosaic() {
-  let streams;
+/**
+ * How often to reconcile the mosaic against the server by polling.
+ *
+ * Fifteen seconds rather than three, because the authoritative path is now a
+ * push. This only has to cover a socket that has quietly died, and the
+ * realtime watchdog already notices that within 35 s.
+ */
+const MOSAIC_RECONCILE_MS = 15_000;
+
+/**
+ * How often to retry voice subscriptions that did not come up.
+ *
+ * Short, because the gap it covers is a peer being silently inaudible, and
+ * cheap, because it does nothing at all unless something is actually missing.
+ */
+const VOICE_RECONCILE_MS = 4000;
+
+async function syncMosaic({ streams: pushed } = {}) {
+  let streams = pushed;
   let iceServers;
-  try {
-    ({ streams, iceServers } = await harmony.api.streams(state.server));
-  } catch {
-    return; // transient; the next tick retries
+
+  if (!streams) {
+    try {
+      ({ streams, iceServers } = await harmony.api.streams(state.server));
+    } catch {
+      return; // transient; the next tick retries
+    }
   }
   if (iceServers) state.mosaic.iceServers = iceServers;
 
@@ -2045,9 +2994,137 @@ async function teardown() {
 // ---------------------------------------------------------------------------
 
 el.continue.addEventListener('click', startSession);
+
+// --- channels and voice ---------------------------------------------------
+
+harmony.realtime.onEvent(onRealtimeEvent);
+
+el.channelsShare.addEventListener('click', () => enterPicker());
+el.channelsWatch.addEventListener('click', () => enterMosaic());
+
+el.channelsSignout.addEventListener('click', async () => {
+  await leaveVoice({ silent: true }).catch(() => {});
+  await harmony.realtime.disconnect();
+  await harmony.api.logout(state.server).catch(() => {});
+  state.auth.user = null;
+  await adoptSession('');
+  showView('view-connect');
+});
+
+el.voiceMute.addEventListener('click', async () => {
+  const muted = state.voice.setMuted(!state.voice.muted);
+  applyVoiceButtons();
+  await harmony.realtime
+    .request('voice:mute', { channelId: state.voice.channelId, muted })
+    .catch(() => { /* local mute still applies */ });
+});
+
+el.voiceDeafen.addEventListener('click', () => {
+  // Deafening implies muting: being able to hear nobody while still talking is
+  // never what anyone means by it, and it is how people end up broadcasting a
+  // conversation they think is private.
+  state.voice.setDeafened(!state.voice.deafened);
+  if (state.voice.deafened && !state.voice.muted) {
+    state.voice.setMuted(true);
+    harmony.realtime
+      .request('voice:mute', { channelId: state.voice.channelId, muted: true })
+      .catch(() => {});
+  }
+  applyVoiceButtons();
+});
+
+el.voiceLeave.addEventListener('click', () => leaveVoice());
+
+el.voiceCam.addEventListener('click', () =>
+  (state.camera.publication ? stopCamera() : startCamera()));
+
+el.soundpadAdd.addEventListener('click', () => el.soundpadFile.click());
+el.soundpadFile.addEventListener('change', () => {
+  const file = el.soundpadFile.files?.[0];
+  el.soundpadFile.value = '';
+  if (file) addSoundpadClip(file);
+});
+
+// --- chat -----------------------------------------------------------------
+
+el.chatForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  sendMessage();
+});
+
+el.chatAttach.addEventListener('click', () => el.chatFile.click());
+
+el.chatFile.addEventListener('change', () => {
+  const file = el.chatFile.files?.[0] ?? null;
+  state.chat.pendingFile = file;
+  el.chatNote.textContent = file ? `Attached ${file.name}. Press Send.` : '';
+  // Reset, so picking the same file twice in a row still fires 'change'.
+  el.chatFile.value = '';
+});
+
+let searchTimer = null;
+el.chatSearch.addEventListener('input', () => {
+  // Debounced: every keystroke is a round trip and a full-text query
+  // otherwise, and the answer for a half-typed word is never useful.
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => runSearch(), 250);
+});
+
+el.chatSearchClear.addEventListener('click', () => {
+  el.chatSearch.value = '';
+  runSearch();
+});
+
+el.channelAdd.addEventListener('click', async () => {
+  const name = window.prompt('Name for the new channel:');
+  if (!name) return;
+  const kind = window.confirm('OK for a voice channel, Cancel for text.') ? 'voice' : 'text';
+  const password = window.prompt('Password (leave empty for an open channel):') || undefined;
+  try {
+    await harmony.api.createChannel(state.server, { kind, name, password });
+    // The server broadcasts the new list to everyone, including us.
+  } catch (err) {
+    showChannelsError(err.message);
+  }
+});
 el.username.addEventListener('keydown', (e) => e.key === 'Enter' && startSession());
 el.serverUrl.addEventListener('keydown', (e) => e.key === 'Enter' && startSession());
 el.password.addEventListener('keydown', (e) => e.key === 'Enter' && startSession());
+el.accountPassword.addEventListener('keydown', (e) => e.key === 'Enter' && startSession());
+el.accountConfirm.addEventListener('keydown', (e) => e.key === 'Enter' && startSession());
+
+/**
+ * Normalise the username box on the way out of it, not on every keystroke.
+ *
+ * On 'blur' and not 'input' deliberately: rewriting the value mid-word moves
+ * the caret and makes typing a name with a space in it feel broken, even though
+ * the result is the same. Waiting until they leave the field shows the stored
+ * form without fighting them for the cursor.
+ */
+el.username.addEventListener('blur', () => {
+  const folded = normalizeName(el.username.value);
+  if (folded !== el.username.value) el.username.value = folded;
+});
+
+el.authModeToggle.addEventListener('click', () => {
+  state.auth.mode = state.auth.mode === 'register' ? 'login' : 'register';
+  showError('');
+  applyAuthMode();
+  el.accountPassword.focus();
+});
+
+// Reflect the initial state once at startup, so the labels and
+// data-auth-mode are never stale before the first server probe.
+applyAuthMode();
+
+el.rememberAccount.addEventListener('change', async () => {
+  await harmony.settings.set({
+    rememberAccount: el.rememberAccount.checked,
+    // Unticking it has to forget what is already stored, or "remember me" is a
+    // setting that only ever points one way.
+    sessionToken: el.rememberAccount.checked ? state.auth.token : '',
+  });
+});
 el.serverUrl.addEventListener('change', async () => {
   // A different server may have a different answer about passwords.
   await probeServer();

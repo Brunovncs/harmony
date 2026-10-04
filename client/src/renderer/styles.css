@@ -254,6 +254,242 @@ select:focus {
   padding: 9px 12px;
 }
 
+/* A button that reads as a link: used for "create an account instead", where a
+   real button would compete with the primary action right below it. */
+.linklike {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--accent, #6ea8fe);
+  cursor: pointer;
+  text-decoration: underline;
+}
+.linklike:hover {
+  filter: brightness(1.2);
+}
+
+.switch-auth {
+  margin: 0.25rem 0 0;
+  font-size: 0.85rem;
+  opacity: 0.85;
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+/* ---------- channels ---------- */
+
+.channels-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) 1fr;
+  gap: 1rem;
+  padding: 1rem;
+  height: calc(100% - 3.5rem);
+  box-sizing: border-box;
+}
+
+@media (max-width: 720px) {
+  .channels-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+}
+
+.channel-list {
+  min-width: 0;
+  overflow-y: auto;
+}
+.channel-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.channel-list h2,
+.voice-head h2 {
+  font-size: 0.95rem;
+  margin: 0 0 0.5rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.7;
+}
+.channel-list ul,
+#voice-roster {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.channel-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.channel-list li:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.channel-list li[data-active] {
+  background: rgba(110, 168, 254, 0.18);
+}
+.channel-list li .kind {
+  opacity: 0.6;
+  font-variant-emoji: text;
+}
+.channel-list li .count {
+  margin-left: auto;
+  font-size: 0.8rem;
+  opacity: 0.6;
+}
+
+.channel-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.empty-pane {
+  margin: auto;
+  opacity: 0.6;
+}
+.voice-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+#voice-roster li {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 6px;
+}
+#voice-roster li[data-speaking] {
+  background: rgba(110, 168, 254, 0.12);
+}
+#voice-roster .tag {
+  font-size: 0.75rem;
+  opacity: 0.7;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 0 0.4rem;
+}
+#voice-roster .tag.forced {
+  color: #ff8c8c;
+  opacity: 1;
+}
+.voice-controls {
+  margin-top: auto;
+  display: flex;
+  gap: 0.5rem;
+  padding-top: 1rem;
+  flex-wrap: wrap;
+}
+button.danger {
+  color: #ff8c8c;
+}
+
+.chat-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.5rem 0;
+}
+.chat-msg {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 0.2rem 0.4rem;
+  border-radius: 6px;
+}
+.chat-msg:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.chat-msg .who {
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+.chat-msg .when {
+  font-size: 0.75rem;
+  opacity: 0.5;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+.chat-msg .text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.chat-msg img,
+.chat-msg video {
+  max-width: min(420px, 100%);
+  max-height: 300px;
+  border-radius: 6px;
+  display: block;
+  margin-top: 0.25rem;
+}
+.chat-msg[data-pinned] {
+  box-shadow: inset 3px 0 0 var(--accent, #6ea8fe);
+}
+.pinned-strip {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  padding: 0.4rem 0.6rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+  max-height: 6rem;
+  overflow-y: auto;
+}
+.chat-form {
+  display: flex;
+  gap: 0.5rem;
+  padding-top: 0.5rem;
+}
+.chat-form input[type='text'] {
+  flex: 1;
+  min-width: 0;
+}
+#chat-active {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+#chat-search {
+  margin-left: auto;
+  max-width: 18rem;
+}
+
+.soundpad {
+  margin-top: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding-top: 0.6rem;
+}
+.soundpad-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.soundpad-head h3 {
+  font-size: 0.8rem;
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.7;
+}
+.soundpad-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+.soundpad-grid button {
+  min-width: 5rem;
+}
+
 /* ---------- connect view ---------- */
 
 #view-connect {

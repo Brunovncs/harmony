@@ -16,11 +16,14 @@
 >
 > **Before you put this anywhere that matters, know what it does not have:**
 >
-> - **One shared password at best, and no accounts at all.** A server password is
->   optional and off by default; without it, anyone who can reach the server can
->   broadcast or watch. Even with it, the password decides *whether* you are in,
->   never *who* you are — everyone who knows it can claim any free username and
->   watch anyone. Do not hand it to people you would not hand a house key.
+> - **The shared password still decides *whether* you are in, not *who* you
+>   are.** It is optional and off by default; without it, anyone who can reach
+>   the server can broadcast or watch. Accounts (below) sit *behind* that
+>   password and give per-person identity, but the shared secret is still a
+>   house key: do not hand it to people you would not hand a house key.
+> - **Account passwords are scrypt-hashed, and that is the extent of it.** There
+>   is no email, no recovery, no second factor and no lockout across addresses.
+>   An owner who forgets their password edits the database by hand.
 > - **No security review, no audit, no fuzzing.** Untrusted input reaches a
 >   media server and a native Windows audio module. Nobody has attacked this on
 >   purpose.
@@ -38,9 +41,22 @@
 have.** Sub-second glass to glass, because nothing is ever transcoded and there
 is no playback buffer to scrub.
 
-**There are no accounts and no passwords.** Type a username to start sharing
-under it. Type a name someone else is already using, and you watch them instead.
-That is the whole interaction model.
+**Type a username to start sharing under it.** Type a name someone else is
+already using, and you watch them instead. That is the whole interaction model,
+and on a server where nobody has registered it is still the *entire* interaction
+model — no sign-up, no profile.
+
+**Accounts are optional, and they are how a name becomes yours.** Register once
+and the nickname is permanently yours: nobody else can stream under it, and the
+server stops honouring anonymous claims the moment the first account exists. The
+first person to present the owner key printed in the server log becomes the
+owner, and can make other people admins.
+
+**Once you are signed in there are channels.** Voice channels where everyone
+hears everyone, text channels with attachments, pinning and substring search,
+an admin-managed soundpad that plays for the whole channel, and a webcam you can
+publish alongside your screen. Names are typed however you like — "Game Night"
+is stored as `gamenight`, because a name becomes part of a URL.
 
 ## Demo
 
@@ -197,7 +213,7 @@ docker run -d --name harmony \
   -p 8080:8080 -p 8889:8889 -p 8189:8189/udp -p 8189:8189/tcp \
   -e MTX_WEBRTCADDITIONALHOSTS=stream.example.com \
   -e HARMONY_SIGNALING_URL=https://stream.example.com:8444 \
-  pedrolucasmiguel/harmony-server:0.1.0
+  pedrolucasmiguel/harmony-server:2.0.0
 ```
 
 `linux/amd64` and `linux/arm64`, so the same tag runs on a mini-PC or a
@@ -211,7 +227,7 @@ perfectly and then play nothing.
 architecture.
 
 **Client:** `cd client && npm install && npm run build` gives you
-`dist/Harmony-1.0.0-portable.exe`.
+`dist/Harmony-2.0.0-portable.exe`.
 
 The full procedure — TLS on a line whose ISP blocks 80 and 443, dynamic IPs,
 packaging, tests and a troubleshooting table — is in
@@ -243,8 +259,13 @@ live, and reports a clear error if it never appears.
 
 **Liveness is never tracked, only observed.** The control server polls MediaMTX
 and mirrors what it reports. If a broadcaster's laptop sleeps, the connection
-drops, MediaMTX forgets the path, and the username frees itself. There is no
-bookkeeping to leak.
+drops, MediaMTX forgets the path, and the stream disappears on its own. There is
+no bookkeeping to leak.
+
+This still holds now that there is a database. Only genuinely durable things are
+stored — accounts, roles, and what people have written down. Who is live and who
+is connected stays derived from reality, so a restart rebuilds it rather than
+reconciling it against a table that can be wrong.
 
 **Media and signaling are separated on purpose.** Signaling is ordinary HTTP and
 goes through a reverse proxy or a Cloudflare Tunnel happily. Media is UDP and
@@ -508,10 +529,29 @@ and must end up decoding that video over WHEP. Nothing is mocked.
 
 ## Known limits
 
-- **One stream per username.** That is the design, not a bug.
-- **No accounts.** The optional server password is one shared secret, not
-  identity: anyone who knows it can claim any free username. Without it, so can
-  anyone who can reach the server.
+- **One stream per username.** That is the design, not a bug. A webcam counts
+  separately, as `<nickname>-cam`.
+- **Voice channels cap at 16 people.** The relay cannot mix audio — mixing is
+  decode + sum + re-encode, which is the transcoding that keeps this server
+  cheap to run and which a Pi cannot do at all. So every member subscribes to
+  every other member and the cost at the relay is N×(N−1): sixteen people is
+  240 concurrent streams.
+
+  Both ends of that have been measured rather than guessed. A 16-person
+  audio-only channel costs a 4-core Pi about **half of one core** (11–14% of
+  the machine, 252 MB, zero packet loss) and a client about **7% of one core**.
+  Neither is the limit — your **upload bandwidth** is, as soon as anyone shares
+  a screen into the channel. See `client/test/relay-load.mjs` to measure your
+  own host.
+- **An admin can mute you, and you will not see it for ~9 seconds** if the
+  roster push is lost. Nothing in WebRTC signals an application-level kick, so
+  the UI is driven by that push rather than by connection state.
+- **Accounts are a thin layer, not a security boundary against the server
+  operator.** They give per-person identity behind the shared password. Anyone
+  with the database file can reset a password; anyone with the server log at
+  first start can claim ownership. On a server with no accounts registered,
+  anyone who knows the shared password can still claim any free username — the
+  anonymous path closes as soon as the first person registers.
 - **No recording on the server.** MediaMTX can do it without re-encoding
   (`record: yes` in `pathDefaults`) but it is off — partly because an SD card is a
   poor place for video, partly because writing to disk is the one thing that

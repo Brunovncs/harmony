@@ -13,10 +13,26 @@ Group=harmony
 WorkingDirectory=/opt/harmony
 EnvironmentFile=/etc/harmony/harmony.env
 ExecStart=/usr/bin/node /opt/harmony/src/index.js
+
+# Accounts, channels and uploads. systemd creates /var/lib/harmony-server,
+# chowns it to this service's user, and adds it to the writable set even under
+# ProtectSystem=strict -- so no ReadWritePaths= is needed and install.sh must
+# NOT create it by hand.
+#
+# The name is harmony-SERVER, not harmony, ON PURPOSE. /var/lib/harmony already
+# exists and is owned by ROOT: the harmony-ip-watch oneshot writes the
+# advertised-ip file there and a root job reads it back. StateDirectory=harmony
+# would make systemd chown that directory to this unprivileged user on every
+# start, handing it write access to a file root trusts. Do not "tidy" these two
+# into one name.
+StateDirectory=harmony-server
+StateDirectoryMode=0750
+Environment=HARMONY_DATA_DIR=%S/harmony-server
 Restart=always
 RestartSec=2
 
-# Hardening -- this process reads config and speaks HTTP, nothing else.
+# Hardening -- this process reads config, speaks HTTP and writes its database
+# to StateDirectory above.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

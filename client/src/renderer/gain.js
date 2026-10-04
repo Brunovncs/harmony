@@ -83,5 +83,51 @@ export function createSink(stream) {
   return sink;
 }
 
+/** Decoded clips, so the second press of a soundpad button is instant. */
+const samples = new Map();
+
+/**
+ * Play a one-shot sound into the PLAYBACK context.
+ *
+ * This is the single easiest thing to get wrong in the soundpad, so it is
+ * worth being explicit: the clip goes here, into the context that plays what
+ * you HEAR. It must never be routed into AudioBridge's gain node, which is the
+ * OUTGOING mix being published. Doing that re-broadcasts the clip to everyone
+ * who is already playing it locally, and they hear it twice, slightly out of
+ * phase.
+ *
+ * The URL is `harmony://app/media/<hash>`, which is same-origin -- so `fetch`
+ * is allowed by the CSP's `'self'` and no network permission is needed.
+ *
+ * @param {string} url
+ * @param {{gain?: number}} options
+ */
+export async function playSample(url, { gain = 1 } = {}) {
+  let buffer = samples.get(url);
+  if (!buffer) {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`could not load the clip (${response.status})`);
+    buffer = await context().decodeAudioData(await response.arrayBuffer());
+    samples.set(url, buffer);
+  }
+
+  const source = context().createBufferSource();
+  source.buffer = buffer;
+  const node = context().createGain();
+  node.gain.value = Math.max(0, Math.min(MAX_GAIN, gain));
+  source.connect(node);
+  node.connect(context().destination);
+  source.start();
+  // Overlapping presses are fine -- each gets its own source node -- but the
+  // nodes have to be released or they accumulate for the life of the context.
+  source.addEventListener('ended', () => {
+    try {
+      source.disconnect();
+      node.disconnect();
+    } catch { /* already torn down */ }
+  });
+  return source;
+}
+
 /** Percent for the UI, from the 0..MAX_GAIN scale. */
 export const asPercent = (gain) => Math.round(gain * 100);

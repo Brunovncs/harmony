@@ -56,6 +56,12 @@ RUN set -eu; \
 # Also on the build platform: the only dependency is Express, which is pure
 # JavaScript. If a native module is ever added this stage has to move to the
 # target platform, or it will install the wrong binaries.
+#
+# The database is `node:sqlite`, built into Node, specifically so that stays
+# true. Watch for optional native addons arriving with a future dependency --
+# `ws`, for instance, has optional peerDependencies (bufferutil,
+# utf-8-validate) that npm does not install by default but would break arm64
+# cross-builds here if something ever pulled them in.
 # --------------------------------------------------------------------------
 FROM --platform=$BUILDPLATFORM node:${NODE_VERSION} AS deps
 WORKDIR /opt/harmony
@@ -86,12 +92,28 @@ COPY mediamtx.yml /etc/harmony/mediamtx.yml
 COPY docker-entrypoint.sh /usr/local/bin/harmony-entrypoint
 RUN chmod 0755 /usr/local/bin/harmony-entrypoint
 
-# Nothing here needs root: every port is above 1024 and nothing is written to
-# disk. `node` already exists in the base image as uid 1000.
+# The one writable path. Created and chowned while still root -- uid 1000
+# cannot create it later under `--read-only`, and the failure would only show
+# up at runtime on a fresh volume.
+#
+# A NAMED volume inherits this ownership (Docker copies the image directory's
+# contents and ownership into an empty one). A BIND mount does NOT -- it keeps
+# the host's ownership, so a bind-mounting operator must chown 1000:1000 the
+# directory themselves. The server says so on startup if it cannot write.
+#
+# Deliberately NO `VOLUME` instruction: it would make `docker run` without -v
+# silently create an anonymous volume, which looks like persistence, cannot be
+# found again, and is orphaned by every `docker rm`. Better that an unmounted
+# container fails loudly, which it does.
+RUN mkdir -p /var/lib/harmony && chown node:node /var/lib/harmony
+
+# Nothing here needs root: every port is above 1024 and the only writable path
+# is the data volume above. `node` already exists in the base image as uid 1000.
 USER node
 
 ENV HARMONY_HOST=0.0.0.0 \
     HARMONY_PORT=8080 \
+    HARMONY_DATA_DIR=/var/lib/harmony \
     NODE_ENV=production
 
 # 8080  control API        8889  WHIP/WHEP signaling (HTTP)

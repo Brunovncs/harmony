@@ -16,6 +16,17 @@ const DEFAULTS = {
   // credential that protects anything else, and the alternative (retyping it on
   // every launch) is what makes people pick a worse password.
   password: '',
+  // The logged-in account's bearer token, kept when "remember me" is ticked.
+  //
+  // Deliberately the TOKEN and not the account password: it expires on its own,
+  // the server can revoke it, and it is useless against any other service the
+  // person may have reused that password on. The shared `password` above is a
+  // different thing -- a room key, not a personal credential.
+  sessionToken: '',
+  rememberAccount: true,
+  // Disk budget for cached avatars, attachments and soundpad clips. Evicted
+  // least-recently-used first, never touching pinned or soundpad files.
+  mediaCacheMb: 512,
   quality: 'balanced',
   // 'sharp' keeps resolution and drops frames; 'smooth' does the opposite.
   priority: 'sharp',

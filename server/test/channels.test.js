@@ -1,0 +1,344 @@
+// Channels, channel-scoped media tokens, and the auth-hook ordering that makes
+// a channel password mean anything.
+//
+//   node --test server/test/channels.test.js
+
+import { after, before, describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+
+import { normalizeName, normalizeUsername, normalizePath } from '../src/rooms.js';
+import { normalizeNickname } from '../src/accounts.js';
+import { parseChannelPath, channelPath } from '../src/channels.js';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const serverEntry = resolve(here, '..', 'src', 'index.js');
+
+// Unique across the suite: node --test runs these files in PARALLEL.
+const FAKE_MTX_PORT = 20000;
+const HARMONY_PORT = 18083;
+const BASE = `http://127.0.0.1:${HARMONY_PORT}`;
+
+let fakeMtx;
+let child;
+let dataDir;
+
+function startFakeMediaMtx() {
+  return new Promise((done) => {
+    fakeMtx = http.createServer((req, res) => {
+      if (req.url.startsWith('/v3/paths/list')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ itemCount: 0, pageCount: 0, items: [] }));
+        return;
+      }
+      if (req.url.startsWith('/v3/webrtcsessions/list')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ itemCount: 0, pageCount: 0, items: [] }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    fakeMtx.listen(FAKE_MTX_PORT, '127.0.0.1', done);
+  });
+}
+
+function startHarmony(extraEnv = {}) {
+  return new Promise((done, fail) => {
+    child = spawn(process.execPath, [serverEntry], {
+      env: {
+        ...process.env,
+        HARMONY_PORT: String(HARMONY_PORT),
+        HARMONY_HOST: '127.0.0.1',
+        HARMONY_DATA_DIR: dataDir,
+        HARMONY_MEDIAMTX_API: `http://127.0.0.1:${FAKE_MTX_PORT}`,
+        HARMONY_POLL_INTERVAL_MS: '200',
+        HARMONY_SIGNALING_URL: 'http://media.test:8889',
+        ...extraEnv,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const timer = setTimeout(() => fail(new Error('server did not start')), 10_000);
+    let out = '';
+    child.stdout.on('data', (b) => {
+      out += b.toString();
+      const match = /^\s*\u2502\s+([A-Za-z0-9_-]{20,})\s+\u2502$/m.exec(out);
+      if (match) ownerKey = match[1];
+      if (out.includes('control server on')) {
+        clearTimeout(timer);
+        done();
+      }
+    });
+    child.stderr.on('data', (b) => process.stderr.write(`[server] ${b}`));
+  });
+}
+
+function stopHarmony() {
+  return new Promise((done) => {
+    if (!child || child.exitCode !== null) return done();
+    child.once('exit', () => done());
+    child.kill('SIGTERM');
+    setTimeout(() => { child.kill('SIGKILL'); done(); }, 4000).unref();
+  });
+}
+
+const api = async (path, { method = 'GET', body, token } = {}) => {
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers: {
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  let json = null;
+  try { json = await res.json(); } catch { /* 204 */ }
+  return { status: res.status, body: json };
+};
+
+let adminToken;
+let memberToken;
+let ownerKey = null;
+
+before(async () => {
+  dataDir = mkdtempSync(resolve(tmpdir(), 'harmony-chan-'));
+  await startFakeMediaMtx();
+  await startHarmony();
+
+  // boss claims ownership with the key the server printed at first start.
+  const owner = await api('/api/accounts/register', {
+    method: 'POST', body: { nickname: 'boss', password: 'hunter22', ownerKey },
+  });
+  assert.equal(owner.body.ownerClaimed, true, 'test setup needs a real owner');
+  adminToken = owner.body.token;
+
+  const member = await api('/api/accounts/register', {
+    method: 'POST', body: { nickname: 'member', password: 'hunter22' },
+  });
+  memberToken = member.body.token;
+});
+
+after(async () => {
+  await stopHarmony();
+  await new Promise((done) => fakeMtx.close(done));
+  rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('name normalisation', () => {
+  it('folds case and strips spaces', () => {
+    assert.equal(normalizeName('  Pedro Lucas  '), 'pedrolucas');
+    assert.equal(normalizeName('Game   Night'), 'gamenight');
+    assert.equal(normalizeName('ALLCAPS'), 'allcaps');
+  });
+
+  it('accepts a spaced, capitalised nickname and stores it folded', () => {
+    assert.equal(normalizeNickname('Pedro Lucas'), 'pedrolucas');
+    assert.equal(normalizeUsername('Pedro Lucas'), 'pedrolucas');
+  });
+
+  it('applies the length cap to the folded form, not the typed one', () => {
+    // 22 characters typed, 20 once the spaces go: inside the nickname cap.
+    assert.equal(normalizeNickname('ab cd ef gh ij kl mnop'), 'abcdefghijklmnop');
+    // 21 characters with nothing to strip: over it.
+    assert.equal(normalizeNickname('a'.repeat(21)), null);
+  });
+
+  it('still refuses the system namespace after folding', () => {
+    assert.equal(normalizeNickname('VC-1-7-v'), null, 'folding must not sneak vc- past the ban');
+    assert.equal(normalizeNickname('Bob Cam'), 'bobcam', 'bobcam is fine; bob-cam is not');
+    assert.equal(normalizeNickname('bob-cam'), null);
+  });
+
+  it('does NOT fold spaces when parsing a MediaMTX path', () => {
+    // A path is not human input. Deleting characters before deciding what it
+    // means is how a parser gets talked into the wrong answer.
+    assert.equal(normalizePath('vc- 1-7-v'), null);
+    assert.equal(normalizePath('vc-1-7-v'), 'vc-1-7-v');
+  });
+});
+
+describe('channel paths', () => {
+  it('round-trips through base36', () => {
+    assert.equal(channelPath(1, 7, 'voice'), 'vc-1-7-v');
+    assert.equal(channelPath(40, 15, 'screen'), 'vc-14-f-s');
+    assert.deepEqual(parseChannelPath('vc-14-f-s'), { cid: 40, mid: 15, kind: 's' });
+  });
+
+  it('refuses anything that is not a channel path', () => {
+    assert.equal(parseChannelPath('alice'), null);
+    assert.equal(parseChannelPath('vc-1-7'), null);
+    assert.equal(parseChannelPath('vc-1-7-x'), null);
+    assert.equal(parseChannelPath('vc--7-v'), null);
+  });
+});
+
+describe('channel management', () => {
+  it('ships a default text and voice channel', async () => {
+    const res = await api('/api/channels', { token: memberToken });
+    assert.equal(res.status, 200);
+    const kinds = res.body.channels.map((c) => c.kind).sort();
+    assert.deepEqual(kinds, ['text', 'voice']);
+  });
+
+  it('does not let a member create a channel', async () => {
+    const res = await api('/api/channels', {
+      method: 'POST', body: { kind: 'voice', name: 'nope' }, token: memberToken,
+    });
+    assert.equal(res.status, 403);
+  });
+
+  it('lets an owner create one, and stores the name folded', async () => {
+    const res = await api('/api/channels', {
+      method: 'POST', body: { kind: 'voice', name: 'Game Night' }, token: adminToken,
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.channel.name, 'gamenight',
+      '"Game Night" is accepted as typed and stored folded');
+    assert.equal(res.body.channel.kind, 'voice');
+    assert.equal(res.body.channel.locked, false);
+  });
+
+  it('refuses a name that is nothing but spaces', async () => {
+    const res = await api('/api/channels', {
+      method: 'POST', body: { kind: 'voice', name: '   ' }, token: adminToken,
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_name');
+  });
+
+  it('refuses a kind that is neither voice nor text', async () => {
+    const res = await api('/api/channels', {
+      method: 'POST', body: { kind: 'telepathy', name: 'hmm' }, token: adminToken,
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_kind');
+  });
+
+  it('marks a password-protected channel as locked', async () => {
+    const res = await api('/api/channels', {
+      method: 'POST',
+      body: { kind: 'voice', name: 'Private Room', password: 'letmein' },
+      token: adminToken,
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.channel.name, 'privateroom');
+    assert.equal(res.body.channel.locked, true);
+  });
+
+  it('does not leak the password hash to clients', async () => {
+    const res = await api('/api/channels', { token: memberToken });
+    for (const c of res.body.channels) {
+      assert.equal(c.password_hash, undefined);
+      assert.equal(c.passwordHash, undefined);
+    }
+  });
+
+  it('reorders only on a complete permutation', async () => {
+    const before = (await api('/api/channels', { token: adminToken })).body.channels;
+    const ids = before.map((c) => c.id);
+
+    const partial = await api('/api/channels/reorder', {
+      method: 'POST', body: { ids: ids.slice(0, 2) }, token: adminToken,
+    });
+    assert.equal(partial.status, 400, 'a partial list must be refused outright');
+
+    const reversed = [...ids].reverse();
+    const ok = await api('/api/channels/reorder', {
+      method: 'POST', body: { ids: reversed }, token: adminToken,
+    });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(ok.body.channels.map((c) => c.id), reversed);
+  });
+
+  it('does not let a member reorder channels', async () => {
+    const res = await api('/api/channels/reorder', {
+      method: 'POST', body: { ids: [] }, token: memberToken,
+    });
+    assert.equal(res.status, 403);
+  });
+});
+
+describe('channel-scoped media tokens', () => {
+  it('refuses a read on a channel path with no token', async () => {
+    const res = await api('/mediamtx/auth', {
+      method: 'POST', body: { action: 'read', path: 'vc-1-1-v', query: '' },
+    });
+    assert.equal(res.status, 401,
+      'the open-server shortcut must NOT apply to channel paths');
+  });
+
+  it('refuses a read on a channel path with a made-up token', async () => {
+    const res = await api('/mediamtx/auth', {
+      method: 'POST',
+      body: { action: 'read', path: 'vc-1-1-v', query: 'token=h1.1.1.rw.zzzz.AAAAAAAAAAAAAAAAAAAAAA' },
+    });
+    assert.equal(res.status, 401);
+  });
+
+  it('still allows a plain username read on an open server', async () => {
+    // The legacy branch must keep working: this server has no HARMONY_PASSWORD.
+    const res = await api('/mediamtx/auth', {
+      method: 'POST', body: { action: 'read', path: 'alice', query: '' },
+    });
+    assert.equal(res.status, 204);
+  });
+
+  it('refuses a publish to a channel path with no token', async () => {
+    const res = await api('/mediamtx/auth', {
+      method: 'POST', body: { action: 'publish', path: 'vc-1-1-v', query: '' },
+    });
+    assert.equal(res.status, 401);
+  });
+});
+
+describe('the webcam path', () => {
+  it('is derived from the authenticated nickname, not from the body', async () => {
+    const res = await api('/api/session', {
+      method: 'POST',
+      // A deliberately hostile body: neither of these may influence the path.
+      body: { kind: 'camera', username: 'boss' },
+      token: memberToken,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.username, 'member-cam');
+    assert.match(res.body.whipUrl, /\/member-cam\/whip/);
+  });
+
+  it('cannot be claimed by registering the name', async () => {
+    const res = await api('/api/accounts/register', {
+      method: 'POST', body: { nickname: 'member-cam', password: 'hunter22' },
+    });
+    assert.equal(res.status, 400,
+      'if -cam were registerable, somebody could hold another user\u2019s camera path');
+    assert.equal(res.body.error, 'invalid_nickname');
+  });
+
+  it('needs a login', async () => {
+    const res = await api('/api/session', { method: 'POST', body: { kind: 'camera' } });
+    assert.equal(res.status, 401);
+  });
+});
+
+describe('the username namespace cannot reach channels', () => {
+  it('refuses to register a nickname in the vc- namespace', async () => {
+    const res = await api('/api/accounts/register', {
+      method: 'POST', body: { nickname: 'vc-1-1-v', password: 'hunter22' },
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it('refuses a session claim on a channel path name', async () => {
+    const res = await api('/api/session', {
+      method: 'POST', body: { username: 'vc-1-1-v' }, token: memberToken,
+    });
+    // A logged-in caller streams under their own nickname, so this is simply
+    // ignored -- which is itself the proof that the body cannot steer the path.
+    assert.equal(res.body.username, 'member');
+  });
+});

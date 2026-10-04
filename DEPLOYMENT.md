@@ -84,7 +84,7 @@ docker run -d --name harmony --restart unless-stopped \
   -p 8080:8080 -p 8889:8889 -p 8189:8189/udp -p 8189:8189/tcp \
   -e MTX_WEBRTCADDITIONALHOSTS=stream.example.com \
   -e HARMONY_SIGNALING_URL=https://stream.example.com:8444 \
-  pedrolucasmiguel/harmony-server:0.1.0
+  pedrolucasmiguel/harmony-server:2.0.0
 ```
 
 Published for `linux/amd64` and `linux/arm64`. Compose and shell examples, plus
@@ -244,12 +244,23 @@ The easy case. Caddy gets a certificate by itself:
 ```
 stream.example.com {
     handle /api/* { reverse_proxy 127.0.0.1:8080 }
+    handle /ws    { reverse_proxy 127.0.0.1:8080 }
     handle        { reverse_proxy 127.0.0.1:8889 }
 }
 ```
 
 Set `HARMONY_SIGNALING_URL=https://stream.example.com`. You still forward UDP
 8189 separately.
+
+> **`handle /ws` is not optional from 2.0.0 on.** Channels, voice, chat and the
+> soundpad all run over one WebSocket at `/ws` on the control server. Without
+> that line it falls into the catch-all, gets proxied to MediaMTX, and every
+> channel feature fails — while `/api/*` keeps working perfectly, so the server
+> looks healthy. `reverse_proxy` handles the upgrade itself; nothing else is
+> needed.
+>
+> If your Caddyfile has `admin off`, `systemctl reload caddy` cannot work —
+> reload talks to the admin API on :2019. Use `systemctl restart caddy`.
 
 ### B. Your ISP blocks inbound 80 and 443
 
@@ -274,6 +285,7 @@ sudo certbot certonly --dns-cloudflare \
 https://stream.example.com:8444 {
     tls /etc/caddy/tls/fullchain.pem /etc/caddy/tls/privkey.pem
     handle /api/* { reverse_proxy 127.0.0.1:8080 }
+    handle /ws    { reverse_proxy 127.0.0.1:8080 }
     handle        { reverse_proxy 127.0.0.1:8889 }
 }
 ```
@@ -543,10 +555,37 @@ usually faster than guessing.
 
 ## Security notes
 
-- **There are still no accounts.** `HARMONY_PASSWORD` is one shared secret for
-  everyone, not per-user identity: it decides *whether* you are in, never *who*
-  you are. Anyone who knows it can claim any free username and watch anyone.
-  Without it the server is open to whoever can reach it.
+- **`HARMONY_PASSWORD` is still one shared secret for everyone.** It decides
+  *whether* you are in, never *who* you are. Without it the server is open to
+  whoever can reach it.
+- **Accounts sit behind that password.** They give per-person identity: a
+  registered nickname cannot be claimed by anyone else, and `/api/session`
+  ignores whatever username a logged-in client asks for in favour of the one it
+  authenticated as. Passwords are scrypt-hashed (N=16384), session tokens are
+  random 256-bit values stored only as sha256. Until the first account is
+  registered the old anonymous flow still works, so an upgraded server does not
+  lock anyone out mid-call.
+- **The owner key is printed to stdout on first start, once.** Anyone who can
+  read the log can claim ownership, so claim it immediately. It is not
+  regenerated and not reprinted once an owner exists.
+- **Channel passwords are enforced at the media server, not just in the UI.**
+  Each member gets a short-lived token scoped to one channel and one slot, and
+  the MediaMTX auth hook checks channel paths *before* the legacy branches —
+  otherwise a client holding the process-wide watch token could listen to a
+  locked channel, and on a server with no `HARMONY_PASSWORD` a channel password
+  would mean nothing at all.
+- **Admin force-mute is enforced by refusing the publish**, not by kicking the
+  session. Kicking stops the audio within ~3 seconds but the path is
+  immediately re-publishable, so the refusal is what makes it stick.
+- **Uploads are capped three ways**: 25 MB per file, an allowlist of content
+  types (no HTML or scripts, ever), and `HARMONY_MAX_DISK_BYTES` (2 GB default)
+  for the total. The last one is not optional on an SD card: once the
+  filesystem fills, *every* SQLite write throws and the whole server stops, not
+  just uploads.
+- **There is now one writable directory.** `/var/lib/harmony-server` under
+  systemd (`StateDirectory=`), or the `harmony-data` volume under Docker. It
+  holds the database; back it up. The container still runs `read_only: true`
+  apart from that one mount.
 - **Keep secrets out of the repo.** `.gitignore` covers `.env`, `*.key`,
   `*.pem`, `*.crt`, `cloudflare.ini` and `*.local.md`. Note that running
   MediaMTX from a checkout makes it drop a self-signed `auto.key` in the working

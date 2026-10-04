@@ -55,8 +55,14 @@ export const harmony = {
     reveal: lift(raw.clips.reveal),
   },
 
+  // Every method is listed by hand rather than mapped over raw.api, because
+  // lift() has to wrap each one and the push-style subscriptions (onPcm,
+  // onEvent) must NOT be wrapped. The cost of that is this list: a method
+  // added to the preload and forgotten here is simply undefined at runtime,
+  // with no error until something calls it.
   api: {
     setPassword: lift(raw.api.setPassword),
+    setSessionToken: lift(raw.api.setSessionToken),
     health: lift(raw.api.health),
     streams: lift(raw.api.streams),
     session: lift(raw.api.session),
@@ -64,5 +70,50 @@ export const harmony = {
     release: lift(raw.api.release),
     sdp: lift(raw.api.sdp),
     hangup: lift(raw.api.hangup),
+
+    register: lift(raw.api.register),
+    login: lift(raw.api.login),
+    logout: lift(raw.api.logout),
+    me: lift(raw.api.me),
+    roster: lift(raw.api.roster),
+    setRole: lift(raw.api.setRole),
+
+    channels: lift(raw.api.channels),
+    createChannel: lift(raw.api.createChannel),
+    updateChannel: lift(raw.api.updateChannel),
+    deleteChannel: lift(raw.api.deleteChannel),
+    reorderChannels: lift(raw.api.reorderChannels),
+
+    messages: lift(raw.api.messages),
+    postMessage: lift(raw.api.postMessage),
+    pinMessage: lift(raw.api.pinMessage),
+    deleteMessage: lift(raw.api.deleteMessage),
+    search: lift(raw.api.search),
+    soundpad: lift(raw.api.soundpad),
+    addClip: lift(raw.api.addClip),
+    deleteClip: lift(raw.api.deleteClip),
+  },
+
+  media: {
+    setServer: lift(raw.media.setServer),
+    keep: lift(raw.media.keep),
+    stats: lift(raw.media.stats),
+    upload: lift(raw.media.upload),
+  },
+
+  /**
+   * The URL for a cached file.
+   *
+   * Usable directly as an <img src> or <audio src>: the protocol handler in
+   * main downloads and verifies it on first use, so the renderer never needs
+   * to know whether it is already on disk.
+   */
+  mediaUrl: (hash) => `harmony://app/media/${hash}`,
+
+  realtime: {
+    connect: lift(raw.realtime.connect),
+    request: lift(raw.realtime.request),
+    disconnect: lift(raw.realtime.disconnect),
+    onEvent: (handler) => raw.realtime.onEvent(handler),
   },
 };

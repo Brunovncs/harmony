@@ -9,10 +9,16 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 import { LoginLimiter, secretsMatch } from '../src/auth.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+// Each run gets its own database. Without this the suite would inherit the
+// deployment default (/var/lib/harmony) and leak state between runs.
+const dataDir = mkdtempSync(resolve(tmpdir(), 'harmony-test-'));
 const serverEntry = resolve(here, '..', 'src', 'index.js');
 
 const FAKE_MTX_PORT = 19998;
@@ -165,6 +171,7 @@ function startHarmony() {
       env: {
         ...process.env,
         HARMONY_PORT: String(HARMONY_PORT),
+        HARMONY_DATA_DIR: dataDir,
         HARMONY_HOST: '127.0.0.1',
         HARMONY_MEDIAMTX_API: `http://127.0.0.1:${FAKE_MTX_PORT}`,
         HARMONY_POLL_INTERVAL_MS: '100',
@@ -203,9 +210,14 @@ describe('password-protected server', () => {
     await new Promise((r) => setTimeout(r, 350));
   });
 
-  after(() => {
-    child?.kill();
+  // Must await the exit before removing the directory: on Windows the still-
+  // running server holds harmony.db open and rmSync fails with EPERM.
+  after(async () => {
+    if (child && child.exitCode === null) {
+      await new Promise((done) => { child.once('exit', done); child.kill(); });
+    }
     fakeMtx?.close();
+    rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   it('answers /api/health without a password, so the client can ask whether it needs one', async () => {

@@ -63,9 +63,53 @@ contextBridge.exposeInMainWorld('harmony', {
     reveal: invoke('clips:reveal'),
   },
 
+  media: {
+    setServer: invoke('media:server'),
+    keep: invoke('media:keep'),
+    stats: invoke('media:stats'),
+    upload: invoke('media:upload'),
+  },
+
+  realtime: {
+    connect: invoke('realtime:connect'),
+    request: invoke('realtime:request'),
+    disconnect: invoke('realtime:disconnect'),
+
+    /**
+     * Server-pushed frames: roster changes, channel edits, stream lists.
+     * @param {(msg: object) => void} handler
+     * @returns {() => void} unsubscribe
+     */
+    onEvent(handler) {
+      const listener = (_event, msg) => handler(msg);
+      ipcRenderer.on('realtime:event', listener);
+      return () => ipcRenderer.removeListener('realtime:event', listener);
+    },
+  },
+
   // Every network request goes through main -- see src/main/api.js.
   api: {
     setPassword: invoke('api:password'),
+    setSessionToken: invoke('api:session-token'),
+    register: invoke('api:register'),
+    login: invoke('api:login'),
+    logout: invoke('api:logout'),
+    me: invoke('api:me'),
+    roster: invoke('api:roster'),
+    setRole: invoke('api:set-role'),
+    channels: invoke('api:channels'),
+    createChannel: invoke('api:create-channel'),
+    updateChannel: invoke('api:update-channel'),
+    deleteChannel: invoke('api:delete-channel'),
+    reorderChannels: invoke('api:reorder-channels'),
+    messages: invoke('api:messages'),
+    postMessage: invoke('api:post-message'),
+    pinMessage: invoke('api:pin-message'),
+    deleteMessage: invoke('api:delete-message'),
+    search: invoke('api:search'),
+    soundpad: invoke('api:soundpad'),
+    addClip: invoke('api:add-clip'),
+    deleteClip: invoke('api:delete-clip'),
     health: invoke('api:health'),
     streams: invoke('api:streams'),
     session: invoke('api:session'),

@@ -200,7 +200,13 @@ export async function publish({
  * Subscribe to a WHEP endpoint.
  * @returns {Promise<{pc: RTCPeerConnection, stream: MediaStream, resourceUrl: string|null}>}
  */
-export async function watch({ url, iceServers, insertableStreams = false, codec = 'H264' }) {
+export async function watch({
+  url,
+  iceServers,
+  insertableStreams = false,
+  codec = 'H264',
+  media = 'both',
+}) {
   const pc = new RTCPeerConnection({
     iceServers,
     bundlePolicy: 'max-bundle',
@@ -221,8 +227,14 @@ export async function watch({ url, iceServers, insertableStreams = false, codec 
     // The receive side needs the same profile ordering as the send side: offer
     // baseline first and the hardware decoder is never chosen, which is what
     // made watching a stream cost as much as sending one.
-    const rx = pc.addTransceiver('video', { direction: 'recvonly' });
-    preferCodec(rx, codec, { direction: 'receive' });
+    // media: 'audio' is for voice-channel paths, which carry Opus and nothing
+    // else. Offering a video transceiver there still works -- MediaMTX simply
+    // answers with nothing on it -- but it costs an m-line and a decoder slot
+    // per subscription, and a 16-person channel opens fifteen of them.
+    if (media !== 'audio') {
+      const rx = pc.addTransceiver('video', { direction: 'recvonly' });
+      preferCodec(rx, codec, { direction: 'receive' });
+    }
     pc.addTransceiver('audio', { direction: 'recvonly' });
 
     pc.addEventListener('track', (event) => {

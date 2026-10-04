@@ -6,7 +6,7 @@ docker run -d --name harmony \
   -p 8189:8189/udp -p 8189:8189/tcp \
   -e MTX_WEBRTCADDITIONALHOSTS=stream.example.com \
   -e HARMONY_SIGNALING_URL=https://stream.example.com:8444 \
-  pedrolucasmiguel/harmony-server:0.1.0
+  pedrolucasmiguel/harmony-server:2.0.0
 ```
 
 | File | What |
@@ -68,7 +68,7 @@ real interfaces so LAN clients connect directly:
 docker run -d --name harmony --network host \
   -e MTX_WEBRTCADDITIONALHOSTS=stream.example.com \
   -e HARMONY_SIGNALING_URL=https://stream.example.com:8444 \
-  pedrolucasmiguel/harmony-server:0.1.0
+  pedrolucasmiguel/harmony-server:2.0.0
 ```
 
 Note this also exposes MediaMTX's control API on port 9997 to the host's
@@ -127,10 +127,74 @@ outsiders can connect.
 docker compose pull && docker compose up -d
 ```
 
-Nothing is stored on disk, so there is nothing to migrate. Viewers reconnect.
-If a password is set, note that watch tokens are generated per process, so a
-restart invalidates outstanding watch URLs — clients pick up fresh ones
-automatically.
+Accounts, roles and channels live in SQLite in the `harmony-data` volume and
+survive the upgrade. Schema migrations run automatically at startup and are
+logged (`[db] migrated to schema vN`); there is nothing to run by hand.
+
+Viewers reconnect. If a password is set, note that watch tokens are generated
+per process, so a restart invalidates outstanding watch URLs — clients pick up
+fresh ones automatically.
+
+> **Upgrading from 0.1.0?** That release wrote nothing to disk and the compose
+> file had no `volumes:` key. Take the new `docker-compose.yml`, or the
+> container will refuse to start and tell you what to add — it will not run
+> without somewhere to keep accounts.
+>
+> Server and client are versioned together from 2.0.0 onwards. A 1.0.0 client
+> still works against a 2.0.0 server right up until somebody registers an
+> account, after which it cannot claim a username and has to be updated.
+
+### The data volume
+
+| | |
+|---|---|
+| Contents | `harmony.db` (accounts, roles, channels, messages) and `uploads/` |
+| Upload quota | `HARMONY_MAX_DISK_BYTES`, default 2 GB — raise it if you back the volume with a real disk |
+| Where | the `harmony-data` named volume, mounted at `/var/lib/harmony` |
+| Override | `HARMONY_DATA_DIR` |
+
+The container still runs with `read_only: true`; this one volume is the only
+writable path, which is strictly better than dropping the hardening.
+
+**Back up:**
+
+```bash
+docker run --rm -v harmony_harmony-data:/data -v "$PWD:/out" \
+  alpine tar czf /out/harmony-backup.tgz -C /data .
+```
+
+**Restore:**
+
+```bash
+docker compose down
+docker run --rm -v harmony_harmony-data:/data -v "$PWD:/in" \
+  alpine sh -c 'rm -rf /data/* && tar xzf /in/harmony-backup.tgz -C /data'
+docker compose up -d
+```
+
+Taking the backup while the server is running is fine for a friends' server —
+SQLite is in WAL mode, so the worst case is losing the last few seconds of
+writes. `docker compose stop` first if you want it exact.
+
+**A bind mount instead of a named volume** keeps the *host's* ownership rather
+than the image's, so you have to chown it yourself:
+
+```bash
+mkdir -p /srv/harmony-data && chown 1000:1000 /srv/harmony-data
+# then:  -v /srv/harmony-data:/var/lib/harmony
+```
+
+### The owner key
+
+On a brand new server, the first start prints a one-time key:
+
+```bash
+docker compose logs harmony | head -20
+```
+
+Register in the client, paste it into the *owner key* box, and that account
+becomes the owner. It is consumed on use and is not printed again once an owner
+exists.
 
 ## Building it yourself
 
@@ -139,7 +203,7 @@ docker build -t harmony-server ./server
 
 # Multi-arch, straight to a registry:
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t you/harmony-server:0.1.0 --push ./server
+  -t you/harmony-server:2.0.0 --push ./server
 ```
 
 `MEDIAMTX_VERSION` is a build arg, pinned to the release `mediamtx.yml` is

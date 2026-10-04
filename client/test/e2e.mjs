@@ -21,8 +21,14 @@ const repoRoot = resolve(here, '..', '..');
 const serverEntry = resolve(repoRoot, 'server', 'src', 'index.js');
 const mediamtxConfig = resolve(repoRoot, 'server', 'mediamtx.yml');
 
+// Scratch database for the Harmony server under test; removed on exit.
+const dataDir = mkdtempSync(join(tmpdir(), 'harmony-e2e-'));
+
 const MEDIAMTX_BIN = process.env.MEDIAMTX_BIN;
-const HARMONY_PORT = 18081;
+// Deliberately outside the 1808x range the server suite uses: auth.test.js
+// also binds 18081, and running the two at once gave EADDRINUSE and a dozen
+// "cancelled" tests that looked like real failures.
+const HARMONY_PORT = 18100;
 const MTX_API_PORT = 9997;
 const SIGNALING = 'http://127.0.0.1:8889';
 const USERNAME = 'e2etest';
@@ -74,6 +80,11 @@ async function startHarmonyServer() {
       ...process.env,
       HARMONY_PORT: String(HARMONY_PORT),
       HARMONY_HOST: '127.0.0.1',
+      // A fresh database per run. Without it the suite inherits the deployment
+      // default (/var/lib/harmony) and, worse, carries accounts between runs --
+      // which would silently flip /api/session out of its anonymous mode and
+      // break every legacy check from the second run onwards.
+      HARMONY_DATA_DIR: dataDir,
       HARMONY_MEDIAMTX_API: `http://127.0.0.1:${MTX_API_PORT}`,
       HARMONY_SIGNALING_URL: SIGNALING,
       HARMONY_POLL_INTERVAL_MS: '400',
@@ -355,6 +366,18 @@ async function run() {
   // MediaMTX names the publishing session; if a source change restarted the
   // connection this id would change, and every viewer would have been dropped.
   const sessionBefore = (await mtxPaths()).find((p) => p.name === USERNAME)?.source?.id;
+
+  // Wait for the preview to actually have decoded a frame before reading its
+  // width. videoWidth is 0 until loadedmetadata fires, so reading it at a
+  // fixed point in the sequence was a race: it passed while the preview
+  // happened to be ready and failed when anything earlier got slower. The
+  // assertion below is about the stream surviving a picker reopen, so the
+  // preview being up is a precondition to wait for, not a coin flip.
+  await waitFor(bcCdp, "document.getElementById('preview').videoWidth > 0", {
+    label: 'preview to report a size',
+    timeoutMs: 15_000,
+  });
+
   const beforeSwitch = await bcCdp.evaluate(`
     const v = document.getElementById('preview');
     return { stats: document.getElementById('broadcast-stats').textContent, w: v.videoWidth };

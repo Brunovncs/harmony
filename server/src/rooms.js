@@ -43,7 +43,62 @@ const RESERVED = new Set([
   'static',
 ]);
 
+/**
+ * Prefixes and suffixes that belong to the system rather than to people.
+ *
+ * `vc-` is the voice-channel path namespace (vc-<channel>-<slot>-<kind>). Those
+ * paths satisfy USERNAME_RE, so without this guard somebody could claim the
+ * literal username `vc-1-7-v` and publish into a voice channel using an
+ * ordinary stream token -- walking straight past the channel's password.
+ *
+ * `-cam` is the webcam path derived from a username (`bob` publishes its camera
+ * to `bob-cam`). If that were a claimable login name, Bob's camera path would
+ * be hijackable by anyone who registered it first. It is also why nicknames cap
+ * at 20 characters while paths allow 24.
+ *
+ * This function validates USER INPUT only. The MediaMTX auth hook must not use
+ * it to parse a path -- a `vc-...` path is legitimate there and would be
+ * rejected here. Keep the two jobs apart; merging them is what created the hole
+ * this comment describes.
+ */
+/**
+ * Fold human-typed input into the stored form.
+ *
+ * People type "Pedro Lucas" and "Game Night"; what gets stored, and what ends
+ * up in a URL, is `pedrolucas` and `gamenight`. Accepting the typed form and
+ * normalising it is friendlier than rejecting it, and normalising rather than
+ * keeping both forms means there is exactly one spelling of any given name --
+ * so `Pedro Lucas` and `pedrolucas` can never be two different people.
+ *
+ * Only ever applied to input a HUMAN typed. Never to a MediaMTX path: see
+ * normalizePath below.
+ */
+export function normalizeName(raw) {
+  return String(raw ?? '').trim().toLowerCase().replace(/\s+/g, '');
+}
+
+export function isSystemName(value) {
+  return value.startsWith('vc-') || value.endsWith('-cam');
+}
+
 export function normalizeUsername(raw) {
+  const value = normalizeName(raw);
+  if (!USERNAME_RE.test(value)) return null;
+  if (isSystemName(value)) return null;
+  return RESERVED.has(value) ? null : value;
+}
+
+/**
+ * Validate a MediaMTX path, which may legitimately be a system path.
+ *
+ * Used by the auth hook, where `vc-1-7-v` and `bob-cam` are exactly the names
+ * that must be allowed through for the per-action checks to run.
+ */
+export function normalizePath(raw) {
+  // Deliberately NOT normalizeName(): this validates a path MediaMTX reports,
+  // not something a person typed. Silently deleting characters from it before
+  // deciding what it means is how a parser gets talked into accepting a path
+  // the rest of the system does not agree about.
   const value = String(raw ?? '').trim().toLowerCase();
   if (!USERNAME_RE.test(value)) return null;
   return RESERVED.has(value) ? null : value;
@@ -65,6 +120,15 @@ export class Rooms {
     const live = new Map();
     for (const [name, path] of paths) {
       if (!path.ready) continue;
+      // Voice-channel paths are owned by the channel subsystem and must never
+      // reach /api/streams: a 1.0.0 client would list thirty "streams" called
+      // vc-1-7-v and open a tile for every one of them.
+      //
+      // `<nickname>-cam` is deliberately NOT filtered. It is a real, watchable
+      // stream that happens to be a webcam, and a client that lists it as
+      // "bob-cam" is showing something true and useful. Filtering it would
+      // make cameras publishable but invisible.
+      if (name.startsWith('vc-')) continue;
       live.set(name, { viewers: path.viewers, since: path.readyTime, tracks: path.tracks });
     }
     this.#live = live;

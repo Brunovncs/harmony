@@ -21,7 +21,7 @@ USAGE
   exit 2
 fi
 
-IMAGE="${HARMONY_IMAGE:-pedrolucasmiguel/harmony-server:0.1.0}"
+IMAGE="${HARMONY_IMAGE:-pedrolucasmiguel/harmony-server:2.0.0}"
 NAME="${HARMONY_NAME:-harmony}"
 SIGNALING_URL="${HARMONY_SIGNALING_URL:-http://${PUBLIC_HOST}:8889}"
 
@@ -46,7 +46,11 @@ docker run -d \
   -e HARMONY_SIGNALING_URL="$SIGNALING_URL" \
   -e HARMONY_PASSWORD="${HARMONY_PASSWORD:-}" \
   \
-  `# Nothing is written to disk and it runs unprivileged.` \
+  `# Accounts and channels live here. A named volume inherits the image's` \
+  `# uid-1000 ownership; a bind mount would keep the host's and need a chown.` \
+  -v harmony-data:/var/lib/harmony \
+  \
+  `# Read-only apart from that one volume, and it runs unprivileged.` \
   --read-only \
   --tmpfs /tmp \
   --security-opt no-new-privileges:true \
@@ -61,6 +65,10 @@ echo
 echo "  clients connect to:  ${SIGNALING_URL%/*}"
 echo "  control API:         http://localhost:8080/api/health"
 echo "  logs:                docker logs -f ${NAME}"
+echo
+echo "Accounts and channels persist in the 'harmony-data' volume."
+echo "On a brand new server the owner key is printed once, at the top of the log:"
+echo "  docker logs ${NAME} | head -20"
 echo
 echo "Forward these on your router to this machine:"
 echo "  UDP 8189  (media -- without it nothing plays)"

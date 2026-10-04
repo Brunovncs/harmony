@@ -45,11 +45,63 @@
             maxlength="24"
             placeholder="your-name"
           />
-          <small
+          <small id="username-hint"
             >Free name &rarr; you start streaming. Name already live &rarr; you join and
             watch.</small
           >
         </label>
+
+        <!-- Everything from here to #account-end appears only on a server that
+             has accounts. An older server never reports `hasAccounts`, so the
+             whole block stays hidden and the single-box flow is untouched. -->
+        <div id="account-fields" hidden>
+          <label class="field">
+            <span id="account-password-label">Your password</span>
+            <input
+              id="account-password"
+              type="password"
+              autocomplete="off"
+              placeholder="At least 6 characters"
+            />
+          </label>
+
+          <label class="field" id="account-confirm-field" hidden>
+            <span>Confirm password</span>
+            <input id="account-confirm" type="password" autocomplete="off" />
+          </label>
+
+          <label class="field" id="owner-key-field" hidden>
+            <span>Owner key</span>
+            <input
+              id="owner-key"
+              type="text"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="Printed in the server log on first start"
+            />
+            <small
+              >This server has no owner yet. Paste the key from the server log to claim
+              it &mdash; or leave this empty to join as an ordinary member.</small
+            >
+          </label>
+
+          <label class="check">
+            <input type="checkbox" id="remember-account" checked />
+            <span>
+              Stay signed in
+              <small
+                >Keeps a login token on this machine, not your password. It expires after
+                30 days unused, and signing out revokes it.</small
+              >
+            </span>
+          </label>
+
+          <p class="switch-auth">
+            <span id="auth-mode-text"></span>
+            <button type="button" class="linklike" id="auth-mode-toggle"></button>
+          </p>
+        </div>
+        <!-- #account-end -->
 
         <button class="primary" id="continue">Continue</button>
         <button class="ghost small" id="test-connection">Test my connection</button>
@@ -119,6 +171,94 @@
     </section>
 
     <!-- ================= Source picker ================= -->
+    <!-- The lobby, shown only to a signed-in user on a server that has
+         accounts. Without one the app keeps its original single-box flow and
+         never comes here. -->
+    <section class="view" id="view-channels">
+      <header class="bar">
+        <div class="bar-left">
+          <strong id="channels-who">Signed in</strong>
+          <span class="muted" id="channels-role"></span>
+        </div>
+        <div class="bar-right">
+          <button class="ghost small" id="channels-share">Share my screen</button>
+          <button class="ghost small" id="channels-watch">Watch everyone</button>
+          <button class="ghost small" id="channels-signout">Sign out</button>
+        </div>
+      </header>
+
+      <div class="channels-layout">
+        <aside class="channel-list">
+          <div class="channel-list-head">
+            <h2>Channels</h2>
+            <button class="ghost small" id="channel-add" hidden>+ New</button>
+          </div>
+          <ul id="channel-items"></ul>
+          <p class="error" id="channels-error" hidden></p>
+        </aside>
+
+        <section class="channel-main">
+          <div id="voice-idle" class="empty-pane">
+            <p>Pick a voice channel to join it.</p>
+          </div>
+
+
+          <div id="chat-active" hidden>
+            <header class="voice-head">
+              <h2 id="chat-name"></h2>
+              <input
+                id="chat-search"
+                type="search"
+                placeholder="Search text, author or image/video/audio"
+                autocomplete="off"
+              />
+              <button class="ghost small" id="chat-search-clear" hidden>Clear</button>
+            </header>
+
+            <div id="chat-pinned" class="pinned-strip" hidden></div>
+            <div id="chat-log" class="chat-log"></div>
+
+            <form id="chat-form" class="chat-form">
+              <input
+                id="chat-input"
+                type="text"
+                placeholder="Message"
+                autocomplete="off"
+                maxlength="4000"
+              />
+              <input id="chat-file" type="file" hidden />
+              <button type="button" class="ghost" id="chat-attach">Attach</button>
+              <button type="submit" class="primary small">Send</button>
+            </form>
+            <p class="muted" id="chat-note"></p>
+          </div>
+
+          <div id="voice-active" hidden>
+            <header class="voice-head">
+              <h2 id="voice-name"></h2>
+              <span class="muted" id="voice-count"></span>
+            </header>
+            <ul id="voice-roster"></ul>
+            <div class="soundpad" id="soundpad" hidden>
+              <div class="soundpad-head">
+                <h3>Soundpad</h3>
+                <button class="ghost small" id="soundpad-add" hidden>+ Add clip</button>
+                <input id="soundpad-file" type="file" accept="audio/*" hidden />
+              </div>
+              <div class="soundpad-grid" id="soundpad-grid"></div>
+            </div>
+
+            <div class="voice-controls">
+              <button class="ghost" id="voice-cam">Start camera</button>
+              <button class="ghost" id="voice-mute">Mute mic</button>
+              <button class="ghost" id="voice-deafen">Deafen</button>
+              <button class="ghost danger" id="voice-leave">Disconnect</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+
     <section class="view" id="view-picker">
       <header class="bar">
         <div>

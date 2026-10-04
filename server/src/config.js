@@ -73,6 +73,22 @@ export const config = {
   // source picking, permission prompts and the ICE handshake.
   claimTtlMs: num(process.env.HARMONY_CLAIM_TTL_MS, 30_000),
 
+  // Where accounts, channels and uploads live. The one writable path Harmony
+  // needs; see db.js for what happens when it is not writable.
+  dataDir: process.env.HARMONY_DATA_DIR ?? '/var/lib/harmony',
+
+  // Total bytes of uploads allowed before new ones are refused.
+  //
+  // Not a nicety on an SD-card host: once the filesystem is full EVERY SQLite
+  // write throws, so an unbounded uploads directory does not degrade the
+  // server, it stops it. 2 GB by default.
+  maxDiskBytes: num(process.env.HARMONY_MAX_DISK_BYTES, 2 * 1024 * 1024 * 1024),
+
+  // A session nobody has used in this long is dropped. Long enough that the
+  // "remember me" box is worth ticking, short enough that an abandoned laptop
+  // does not stay logged in forever.
+  sessionIdleMs: num(process.env.HARMONY_SESSION_IDLE_MS, 30 * 24 * 60 * 60 * 1000),
+
   // Handed to clients so their RTCPeerConnection can discover its own public
   // address. The server does not need STUN for itself; MTX_WEBRTCADDITIONALHOSTS
   // tells it what to advertise.

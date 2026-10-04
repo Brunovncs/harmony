@@ -11,8 +11,14 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+// Each run gets its own database. Without this the suite would inherit the
+// deployment default (/var/lib/harmony) and leak state between runs.
+const dataDir = mkdtempSync(resolve(tmpdir(), 'harmony-test-'));
 const serverEntry = resolve(here, '..', 'src', 'index.js');
 
 const FAKE_MTX_PORT = 19997;
@@ -44,6 +50,7 @@ function startHarmony() {
       env: {
         ...process.env,
         HARMONY_PORT: String(HARMONY_PORT),
+        HARMONY_DATA_DIR: dataDir,
         HARMONY_HOST: '127.0.0.1',
         HARMONY_MEDIAMTX_API: `http://127.0.0.1:${FAKE_MTX_PORT}`,
         HARMONY_POLL_INTERVAL_MS: '100',
@@ -94,9 +101,14 @@ describe('username reservation', () => {
     await settle();
   });
 
-  after(() => {
-    child?.kill();
+  // Must await the exit before removing the directory: on Windows the still-
+  // running server holds harmony.db open and rmSync fails with EPERM.
+  after(async () => {
+    if (child && child.exitCode === null) {
+      await new Promise((done) => { child.once('exit', done); child.kill(); });
+    }
     fakeMtx?.close();
+    rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   it('reports healthy once MediaMTX answers', async () => {
@@ -106,10 +118,30 @@ describe('username reservation', () => {
   });
 
   it('rejects malformed usernames', async () => {
-    for (const bad of ['', 'a', 'has space', 'UPPER!', '-leading', 'x'.repeat(25)]) {
+    // Note "has space" is NOT here: spaces are folded out rather than refused.
+    // See the test below.
+    for (const bad of ['', 'a', 'UPPER!', '-leading', 'x'.repeat(25), 'vc-1-7-v', 'bob-cam']) {
       const res = await post('/api/session', { username: bad });
       assert.equal(res.status, 400, `expected 400 for ${JSON.stringify(bad)}`);
     }
+  });
+
+  it('folds capitals and spaces instead of refusing them', async () => {
+    // A username becomes a MediaMTX path and part of a URL, so it cannot keep
+    // either -- but there is no reason to make somebody discover that by being
+    // rejected. "Pedro Lucas" is a reasonable thing to type.
+    const res = await post('/api/session', { username: '  Pedro Lucas  ' });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.username, 'pedrolucas');
+    assert.match(body.whipUrl, /\/pedrolucas\/whip/);
+  });
+
+  it('applies the length limit to the folded name, not the typed one', async () => {
+    // 26 characters typed, 22 once the spaces go: inside the 24 limit.
+    const res = await post('/api/session', { username: 'aa bb cc dd ee ff gg hh ii' });
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).username, 'aabbccddeeffgghhii');
   });
 
   it('rejects names that collide with routing or MediaMTX internals', async () => {

@@ -35,15 +35,27 @@ esac
 echo "==> Architecture $(uname -m) -> ${MTX_ARCH}"
 
 # --- dependencies -----------------------------------------------------------
+# Node 24, not 22: the database is `node:sqlite`, which is only unflagged from
+# Node 22.13. Installing the 22.x line risks landing on an earlier 22 where
+# `import ... from "node:sqlite"` throws at startup with nothing to install to
+# fix it, so take the next LTS line and leave no room for doubt.
 if ! command -v node >/dev/null 2>&1; then
-  echo "==> Installing Node.js 22"
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  echo "==> Installing Node.js 24"
+  curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
   apt-get install -y nodejs
 fi
 
 NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
-if (( NODE_MAJOR < 20 )); then
-  echo "Node 20+ required, found $(node -v)" >&2
+NODE_MINOR="$(node -p 'process.versions.node.split(".")[1]')"
+if (( NODE_MAJOR < 22 )) || { (( NODE_MAJOR == 22 )) && (( NODE_MINOR < 13 )); }; then
+  echo "Node 22.13+ required (node:sqlite is flagged before that), found $(node -v)" >&2
+  echo "  curl -fsSL https://deb.nodesource.com/setup_24.x | sudo bash - && sudo apt-get install -y nodejs" >&2
+  exit 1
+fi
+
+# Fail now rather than at first boot if this build has no SQLite.
+if ! node -e 'import("node:sqlite").then(()=>0,()=>process.exit(1))'; then
+  echo "This Node build has no node:sqlite module. Install Node 24 from nodesource." >&2
   exit 1
 fi
 echo "==> Node $(node -v)"

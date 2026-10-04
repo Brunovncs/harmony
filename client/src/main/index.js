@@ -8,8 +8,15 @@ const appAudio = require('./app-audio');
 const api = require('./api');
 const clips = require('./clips');
 const gpu = require('./gpu');
+const { RealtimeClient } = require('./realtime');
+const { MediaCache, HASH_RE } = require('./media-cache');
 
 const RENDERER_DIR = path.join(__dirname, '..', 'renderer');
+
+/** Set once the renderer tells us which server it is talking to. */
+let mediaServer = '';
+/** @type {MediaCache|null} */
+let mediaCache = null;
 const MODULES_DIR = path.join(__dirname, '..', '..', 'node_modules');
 
 // Chromium throttles renderers whose window is hidden, minimised or covered by
@@ -67,6 +74,39 @@ function registerProtocol() {
   protocol.handle('harmony', async (request) => {
     const { pathname } = new URL(request.url);
     const rel = decodeURIComponent(pathname).replace(/^\/+/, '') || 'index.html';
+
+    // `media/<hash>` is fetched from the server on first use and served from
+    // disk forever after. Because the handler awaits the cache, an
+    // <img src="harmony://app/media/..."> in the renderer just works: no IPC,
+    // no loading state, and nothing in the renderer that knows or cares
+    // whether it was a hit or a miss.
+    //
+    // Note this lives under `app/` deliberately. The scheme is registered
+    // {standard: true}, so the host is part of the origin; `harmony://media`
+    // would be a different origin and the CSP's `'self'` would block every
+    // image it was added to allow.
+    if (rel.startsWith('media/')) {
+      const hash = rel.slice('media/'.length);
+      if (!HASH_RE.test(hash)) return new Response('Bad hash', { status: 400 });
+      if (!mediaCache || !mediaServer) return new Response('No server', { status: 503 });
+      try {
+        const { path: file, contentType } = await mediaCache.get(hash, (h) =>
+          api.fetchUpload(mediaServer, h));
+        const response = await net.fetch(pathToFileURL(file).toString());
+        return new Response(response.body, {
+          status: 200,
+          headers: {
+            'Content-Type': contentType,
+            'Content-Security-Policy': "default-src 'none'; sandbox",
+            'X-Content-Type-Options': 'nosniff',
+            // Content-addressed: the bytes behind a hash never change.
+            'Cache-Control': 'public, max-age=31536000, immutable',
+          },
+        });
+      } catch (err) {
+        return new Response(`Media unavailable: ${err.message}`, { status: 404 });
+      }
+    }
 
     // `vendor/...` serves ES modules straight from node_modules, so third-party
     // libraries stay managed by npm instead of being copied into the repo.
@@ -153,6 +193,10 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  mediaCache = new MediaCache({
+    dir: path.join(app.getPath('userData'), 'media'),
+    budgetBytes: (settings.read().mediaCacheMb ?? 512) * 1024 * 1024,
+  });
   registerProtocol();
   gpu.watch();
 
@@ -189,6 +233,7 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   appAudio.stop();
+  realtime.disconnect();
   if (process.platform !== 'darwin') app.quit();
 });
 
@@ -272,9 +317,71 @@ handle('app:relaunch', () => {
 });
 
 handle('api:password', (_e, value) => api.setPassword(value));
+handle('api:session-token', (_e, value) => api.setSessionToken(value));
+handle('api:register', (_e, s, n, p, k) => api.register(s, n, p, k));
+handle('api:login', (_e, s, n, p, k) => api.login(s, n, p, k));
+handle('api:logout', (_e, s) => api.logout(s));
+handle('api:me', (_e, s) => api.me(s));
+handle('api:roster', (_e, s) => api.roster(s));
+handle('api:set-role', (_e, s, id, role) => api.setRole(s, id, role));
+handle('api:channels', (_e, s) => api.channels(s));
+handle('api:create-channel', (_e, s, body) => api.createChannel(s, body));
+handle('api:update-channel', (_e, s, id, body) => api.updateChannel(s, id, body));
+handle('api:delete-channel', (_e, s, id) => api.deleteChannel(s, id));
+handle('api:reorder-channels', (_e, s, ids) => api.reorderChannels(s, ids));
+
+// ---------------------------------------------------------------------------
+// Realtime
+//
+// One socket for the whole app, owned here. Server-pushed frames are forwarded
+// to the renderer on 'realtime:event' using the same push pattern as
+// 'window:visibility' and 'audio:pcm'.
+// ---------------------------------------------------------------------------
+
+const realtime = new RealtimeClient();
+
+realtime.on('event', (payload) => {
+  if (win && !win.isDestroyed()) win.webContents.send('realtime:event', payload);
+});
+
+handle('realtime:connect', (_e, server, token) => realtime.connect(server, token));
+handle('realtime:request', (_e, type, payload) => realtime.request(type, payload));
+/**
+ * Which server the media route should download from.
+ *
+ * Set by the renderer at connect time rather than baked into every URL,
+ * because the URL is `harmony://app/media/<hash>` -- a hash and nothing else,
+ * which is what lets it be used directly in an <img> tag.
+ */
+handle('media:server', (_e, server) => {
+  mediaServer = String(server ?? '');
+  return true;
+});
+handle('media:keep', (_e, hashes) => {
+  mediaCache?.setKeepSet(Array.isArray(hashes) ? hashes : []);
+  return true;
+});
+handle('media:stats', () => mediaCache?.stats() ?? null);
+handle('media:upload', (_e, server, bytes, contentType) =>
+  api.uploadFile(server, bytes, contentType));
+
+handle('api:messages', (_e, s, id, before) => api.messages(s, id, before));
+handle('api:post-message', (_e, s, id, body) => api.postMessage(s, id, body));
+handle('api:pin-message', (_e, s, id, pinned) => api.pinMessage(s, id, pinned));
+handle('api:delete-message', (_e, s, id) => api.deleteMessage(s, id));
+handle('api:search', (_e, s, id, q) => api.search(s, id, q));
+handle('api:soundpad', (_e, s) => api.soundpad(s));
+handle('api:add-clip', (_e, s, body) => api.addClip(s, body));
+handle('api:delete-clip', (_e, s, id) => api.deleteClip(s, id));
+
+handle('realtime:disconnect', () => {
+  realtime.disconnect();
+  return true;
+});
 handle('api:health', (_e, server) => api.health(server));
 handle('api:streams', (_e, server) => api.streams(server));
-handle('api:session', (_e, server, username, token) => api.session(server, username, token));
+handle('api:session', (_e, server, username, token, kind) =>
+  api.session(server, username, token, kind));
 handle('api:heartbeat', (_e, server, u, t) => api.heartbeat(server, u, t));
 handle('api:release', (_e, server, u, t) => api.release(server, u, t));
 handle('api:sdp', (_e, url, offer) => api.sdpExchange(url, offer));
