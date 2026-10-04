@@ -2658,7 +2658,7 @@ function renderChannelVideo() {
       volume.className = 'tile-volume';
       volume.min = '0';
       volume.max = String(asPercent(MAX_GAIN));
-      volume.value = String(asPercent(tile.gain ?? 1));
+      volume.value = String(asPercent(state.voice.tileGain(key)));
       volume.title = 'Volume for this share';
 
       const apply = (percent) => {

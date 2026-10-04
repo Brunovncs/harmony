@@ -806,11 +806,23 @@ export class VoiceSession {
   /** Tiles to draw, in a stable order so the grid does not reshuffle itself. */
   get videoTiles() {
     return [...this.#video.entries()]
-      .map(([key, { mid, kind, stream, sink }]) => ({
-        key, mid, kind, stream, gain: sink?.value ?? 1,
+      // tileGain rather than the sink's own value: the remembered level is
+      // the one source of truth, and a tile whose subscription has just
+      // been rebuilt would otherwise report 1 until the sink caught up.
+      .map(([key, { mid, kind, stream }]) => ({
+        key, mid, kind, stream, gain: this.tileGain(key),
       }))
       .sort((a, b) => a.mid - b.mid || a.kind.localeCompare(b.kind));
   }
+
+  /*
+   * What each tile was last set to, by key.
+   *
+   * Kept outside the subscription so that closing a share and reopening it
+   * -- or its owner's path dropping and coming back -- does not quietly
+   * reset a level somebody chose.
+   */
+  #tileGains = new Map();
 
   /**
    * How loudly one screen share is played, 0..MAX_GAIN.
@@ -818,17 +830,18 @@ export class VoiceSession {
    * Per tile rather than per person: somebody's game audio and their voice
    * are different things to want at different volumes, and turning a noisy
    * share down should not also turn them down when they talk.
+   *
+   * Deafen does NOT reach this. See setDeafened.
    */
   setTileGain(key, gain) {
-    const sub = this.#video.get(key);
-    if (!sub?.sink) return 0;
     const value = Math.max(0, Math.min(MAX_GAIN, Number(gain) || 0));
-    sub.sink.set(this.deafened ? 0 : value);
+    this.#tileGains.set(key, value);
+    this.#video.get(key)?.sink?.set(value);
     return value;
   }
 
   tileGain(key) {
-    return this.#video.get(key)?.sink?.value ?? 1;
+    return this.#tileGains.get(key) ?? this.#video.get(key)?.sink?.value ?? 1;
   }
 
   /**
@@ -873,15 +886,20 @@ export class VoiceSession {
           url: this.peerUrl(mid, kind),
           iceServers: this.iceServers,
         });
-        // A screen share carries the sharer's audio. It goes through gain.js
-        // like every other incoming stream rather than through the <video>
-        // element, so the tile stays muted and deafen covers it -- otherwise
-        // deafening would silence everybody except the person sharing.
+        // A screen share carries the sharer's audio. It goes through
+        // gain.js like every other incoming stream rather than through the
+        // <video> element, so that the tile's own volume slider has
+        // something to act on.
+        //
+        // Straight to whatever this tile was last set to, rather than to 1
+        // and then corrected: a share whose path drops and comes back
+        // should not blast at full volume for the moment before the next
+        // render.
         //
         // No keep-alive element is needed here: the tile IS one. See
         // #keepAlive for why voice subscriptions have to make their own.
         const sink = createSink(stream);
-        sink.set(this.deafened ? 0 : 1);
+        sink.set(this.#tileGains.get(key) ?? 1);
         this.#video.set(key, { pc, stream, sink, mid, kind });
         changed = true;
       } catch {
@@ -972,10 +990,19 @@ export class VoiceSession {
   }
 
   /**
-   * Deafen: silence everyone, without tearing the subscriptions down.
+   * Deafen: silence every VOICE, without tearing the subscriptions down.
    *
-   * Gain rather than hang-up because this is a toggle people flip constantly.
-   * Hanging up would make un-deafening cost a full round of ICE per member.
+   * Voices only. A screen share's audio is not a person talking to you --
+   * it is part of the thing you are watching, and it has its own slider and
+   * its own mute on the tile. Deafening used to take it too, on the
+   * reasoning that "a deafen that leaves one person's game audio playing is
+   * not a deafen"; in use that is wrong, because the reason to deafen is
+   * usually that people are talking while you are trying to watch
+   * something. The two controls are independent.
+   *
+   * Gain rather than hang-up because this is a toggle people flip
+   * constantly. Hanging up would make un-deafening cost a full round of ICE
+   * per member.
    */
   setDeafened(deafened) {
     this.deafened = Boolean(deafened);
@@ -986,9 +1013,6 @@ export class VoiceSession {
       // not quietly undo somebody you turned down or muted.
       sub.sink.set(this.deafened || pref?.muted ? 0 : (pref?.gain ?? 1));
     }
-    // Screen shares too: a deafen that leaves one person's game audio playing
-    // is not a deafen.
-    for (const sub of this.#video.values()) sub.sink?.set(this.deafened ? 0 : 1);
     return this.deafened;
   }
 
@@ -1003,6 +1027,7 @@ export class VoiceSession {
     this.#micChain?.close();
     this.#micChain = null;
     this.#closedVideo.clear();
+    this.#tileGains.clear();
     await this.stopCam();
     for (const mid of [...this.#subs.keys()]) await this.unsubscribe(mid);
     for (const key of [...this.#video.keys()]) this.unsubscribeVideo(key);
