@@ -254,6 +254,9 @@ module.exports = {
   roster: (s) => requestJson(s, '/api/accounts'),
   setRole: (s, id, role) =>
     requestJson(s, `/api/accounts/${id}/role`, { method: 'POST', body: { role } }),
+
+  setDisplayName: (s, displayName) =>
+    requestJson(s, '/api/accounts/display-name', { method: 'POST', body: { displayName } }),
   streams: (s) => requestJson(s, '/api/streams'),
   // `token` is sent only when reclaiming a username this client already holds.
   // `kind` is 'camera' to claim the caller's own `<nickname>-cam` path. The

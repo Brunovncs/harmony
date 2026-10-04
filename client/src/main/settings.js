@@ -52,6 +52,18 @@ const DEFAULTS = {
   // back in restores it.
   voiceCameraId: '',
   /*
+   * Input volume as a percentage, and the noise gate as a 0-100
+   * sensitivity where 0 is off.
+   *
+   * Percentages rather than a gain and an RMS, so that what is stored is
+   * what the sliders show. The RMS the gate actually uses is derived from
+   * the sensitivity in the renderer, which keeps the curve in one place
+   * and means changing it later does not have to migrate anybody's saved
+   * number.
+   */
+  micGain: 100,
+  micSensitivity: 0,
+  /*
    * How loudly soundpad clips play, as a percentage.
    *
    * A number rather than a gain so that what is stored is what the slider

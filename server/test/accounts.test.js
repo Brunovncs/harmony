@@ -321,6 +321,123 @@ describe('roles', () => {
     assert.equal(res.status, 400);
     assert.equal(res.body.error, 'invalid_role');
   });
+
+  /*
+   * An admin may hand out admin and nothing else.
+   *
+   * The asymmetry is the point: trusting somebody enough to let them in is
+   * a smaller decision than being able to throw out the person who trusted
+   * you. With symmetric powers any two admins can demote each other and the
+   * first to click wins, which turns a falling-out into a race.
+   */
+  describe('an admin can promote but not demote', () => {
+    let adminToken;
+    let carolId;
+
+    before(async () => {
+      // alice was made an admin by the first test in the outer block.
+      adminToken = (await api('/api/accounts/login', {
+        method: 'POST', body: { nickname: 'alice', password: 'hunter22' },
+      })).body.token;
+      const roster = await api('/api/accounts', { token: ownerToken });
+      carolId = roster.body.users.find((u) => u.nickname === 'carol').id;
+    });
+
+    it('lets an admin promote a member', async () => {
+      const res = await api(`/api/accounts/${carolId}/role`, {
+        method: 'POST', body: { role: 'admin' }, token: adminToken,
+      });
+      assert.equal(res.status, 200);
+      assert.equal(res.body.user.role, 'admin');
+    });
+
+    it('does not let an admin demote another admin', async () => {
+      const res = await api(`/api/accounts/${carolId}/role`, {
+        method: 'POST', body: { role: 'member' }, token: adminToken,
+      });
+      assert.equal(res.status, 403);
+      assert.equal(res.body.error, 'owner_only');
+    });
+
+    it('does not let an admin appoint an owner', async () => {
+      const res = await api(`/api/accounts/${carolId}/role`, {
+        method: 'POST', body: { role: 'owner' }, token: adminToken,
+      });
+      assert.equal(res.status, 403);
+      assert.equal(res.body.error, 'owner_only');
+    });
+
+    it('lets the owner take admin away again', async () => {
+      const res = await api(`/api/accounts/${carolId}/role`, {
+        method: 'POST', body: { role: 'member' }, token: ownerToken,
+      });
+      assert.equal(res.status, 200);
+      assert.equal(res.body.user.role, 'member');
+    });
+  });
+
+  /*
+   * Display names.
+   *
+   * A label, not an identity. Nothing is looked up by it, no path is built
+   * from it and no uniqueness is claimed for it, which is exactly why it
+   * can hold the characters a nickname cannot.
+   */
+  describe('display names', () => {
+    it('accepts capitals, spaces, accents and emoji', async () => {
+      const res = await api('/api/accounts/display-name', {
+        method: 'POST', body: { displayName: 'Pedro Lucas \u{1F996}' }, token: ownerToken,
+      });
+      assert.equal(res.status, 200);
+      assert.equal(res.body.user.displayName, 'Pedro Lucas \u{1F996}');
+      assert.equal(res.body.user.customName, true);
+      // The nickname is untouched. It is what the auth hook parses out of a
+      // MediaMTX path, so a display name reaching it would be a security
+      // change rather than a cosmetic one.
+      assert.match(res.body.user.nickname, /^[a-z0-9-]+$/);
+    });
+
+    it('falls back to the nickname when cleared', async () => {
+      const res = await api('/api/accounts/display-name', {
+        method: 'POST', body: { displayName: '   ' }, token: ownerToken,
+      });
+      assert.equal(res.status, 200);
+      assert.equal(res.body.user.displayName, res.body.user.nickname);
+      assert.equal(res.body.user.customName, false);
+    });
+
+    it('refuses control characters, which are invisible', async () => {
+      const res = await api('/api/accounts/display-name', {
+        // A right-to-left override: it would reverse everything drawn after
+        // it, including other people's names on the same line.
+        method: 'POST', body: { displayName: 'bob\u202Eeve' }, token: ownerToken,
+      });
+      assert.equal(res.status, 400);
+      assert.equal(res.body.error, 'bad_characters');
+    });
+
+    it('counts code points, not UTF-16 units', async () => {
+      // 32 dinosaurs is 64 .length and 32 characters. The limit is about
+      // how much room a name takes on screen, so it has to agree with what
+      // a person can see.
+      const ok = await api('/api/accounts/display-name', {
+        method: 'POST', body: { displayName: '\u{1F996}'.repeat(32) }, token: ownerToken,
+      });
+      assert.equal(ok.status, 200);
+      const tooLong = await api('/api/accounts/display-name', {
+        method: 'POST', body: { displayName: '\u{1F996}'.repeat(33) }, token: ownerToken,
+      });
+      assert.equal(tooLong.status, 400);
+      assert.equal(tooLong.body.error, 'too_long');
+    });
+
+    it('needs a login, and renames only the person asking', async () => {
+      const res = await api('/api/accounts/display-name', {
+        method: 'POST', body: { displayName: 'Nobody' },
+      });
+      assert.equal(res.status, 401);
+    });
+  });
 });
 
 describe('/api/session is not an impersonation hole', () => {

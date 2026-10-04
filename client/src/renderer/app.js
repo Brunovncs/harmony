@@ -4,7 +4,9 @@ import { AudioBridge } from './audio-bridge.js';
 import { runConnectionTest } from './connection-test.js';
 import { ClipBuffer, CLIP_SECONDS } from './clip-buffer.js';
 import { VoiceSession } from './voice.js';
-import { createSink, MAX_GAIN, asPercent, playSample, setOutputDevice } from './gain.js';
+import {
+  createSink, MAX_GAIN, asPercent, playSample, setOutputDevice, monitorStream,
+} from './gain.js';
 
 // ---------------------------------------------------------------------------
 // Quality presets
@@ -148,6 +150,13 @@ const el = {
   voiceInput: $('voice-input'),
   voiceOutput: $('voice-output'),
   voiceDeviceNote: $('voice-device-note'),
+  micGain: $('mic-gain'),
+  micGainLabel: $('mic-gain-label'),
+  micGate: $('mic-gate'),
+  micGateLabel: $('mic-gate-label'),
+  micMeter: $('mic-meter'),
+  micMeterFill: $('mic-meter-fill'),
+  micMeterMark: $('mic-meter-mark'),
   voiceCamera: $('voice-camera'),
   voiceCam: $('voice-cam'),
   voiceScreen: $('voice-screen'),
@@ -162,6 +171,7 @@ const el = {
   voiceState: $('voice-state'),
   voiceWhere: $('voice-where'),
   selfStatus: $('self-status'),
+  selfName: $('self-name'),
   peerMenu: $('peer-menu'),
   peerMenuAvatar: $('peer-menu-avatar'),
   peerMenuName: $('peer-menu-name'),
@@ -890,6 +900,7 @@ function showChannelsError(message) {
 }
 
 const isAdmin = () => state.auth.user?.role === 'owner' || state.auth.user?.role === 'admin';
+const isOwner = () => state.auth.user?.role === 'owner';
 
 /* Asking the person something ------------------------------------------
  *
@@ -954,6 +965,9 @@ function ask(spec) {
       input.type = field.type ?? 'text';
       input.placeholder = field.placeholder ?? '';
       input.autocomplete = 'off';
+      // The server refuses past 32 code points. Being stopped at the
+      // keyboard beats typing a name and being told no.
+      if (field.maxlength) input.maxLength = field.maxlength;
     }
     input.name = field.name;
     input.value = field.value ?? '';
@@ -986,6 +1000,26 @@ const AVATAR_MAX_BYTES = 256 * 1024;
 const knownUser = (id) => state.users.get(id) ?? null;
 
 /**
+ * What to call somebody.
+ *
+ * ONE function, used everywhere a person's name is drawn, because the
+ * alternative is a display name that appears in the roster and not in the
+ * chat -- and somebody wondering which of the two people is them.
+ *
+ * The accounts list rather than the roster: a roster entry describes a
+ * membership of a channel, and it is built on the server from the nickname
+ * because that is the identity the slot is keyed to. The display name is a
+ * property of the person, so it is looked up by user id and the roster's
+ * own nickname is only the fallback for somebody not in the list yet.
+ */
+const displayOf = (userId, fallback = '') =>
+  knownUser(userId)?.displayName || fallback || knownUser(userId)?.nickname || 'someone';
+
+/** The same, for the shape avatarEl wants. */
+const faceOf = (userId, fallback = '') =>
+  knownUser(userId) ?? { nickname: fallback };
+
+/**
  * One avatar: the picture if there is one, initials if there is not.
  *
  * `harmony://app/media/<hash>` is same-origin, so the CSP's `img-src 'self'`
@@ -1001,7 +1035,11 @@ function avatarEl(user, extraClass = '') {
     img.alt = '';
     span.append(img);
   } else {
-    span.textContent = String(user?.nickname ?? '?').slice(0, 2).toUpperCase();
+    // Initials from whatever they are CALLED, so the letters match the name
+    // written beside them. [...spread] rather than slice(0, 2), because
+    // slice would cut an emoji in half and render half a surrogate pair.
+    const name = String(user?.displayName || user?.nickname || '?');
+    span.textContent = [...name].slice(0, 2).join('').toUpperCase();
   }
   return span;
 }
@@ -1095,7 +1133,7 @@ async function setOwnAvatar(file) {
  * deployment and its tests carry on unchanged.
  */
 async function enterChannels() {
-  el.channelsWho.textContent = state.auth.user.nickname;
+  el.channelsWho.textContent = state.auth.user.displayName || state.auth.user.nickname;
   el.channelsRole.textContent = state.auth.user.role === 'member' ? '' : state.auth.user.role;
   el.channelAdd.hidden = !isAdmin();
   // The media route serves `harmony://app/media/<hash>` -- a hash and nothing
@@ -1257,11 +1295,11 @@ function renderChannels() {
     list.append(...members.map((member) => {
       const row = document.createElement('span');
       row.className = 'channel-member';
-      row.append(avatarEl(knownUser(member.userId) ?? { nickname: member.nickname }, 'tiny'));
+      row.append(avatarEl(faceOf(member.userId, member.nickname), 'tiny'));
 
       const name = document.createElement('span');
       name.className = 'member-name';
-      name.textContent = member.nickname;
+      name.textContent = displayOf(member.userId, member.nickname);
       row.append(name);
 
       // Exactly the indicators the voice pane shows, from the same helper --
@@ -1417,6 +1455,10 @@ async function joinVoice(channel, password) {
     // The speaking ring. 100 ms is the usual figure for this: slower and a
     // short word never lights it, faster and it costs more than it is worth
     // for something nobody can perceive.
+    // Before the ring and the ping: the chain is built inside startMic, so
+    // this is the first moment there is anything to apply them to.
+    applyMicTuning();
+
     addTimer(setInterval(renderSpeaking, SPEAKING_POLL_MS), 'voice');
 
     // The ping on the signal icon. Started with a reading rather than one
@@ -1670,7 +1712,7 @@ function voiceRow(member) {
   const li = document.createElement('li');
   li.dataset.mid = String(member.mid);
 
-  li.append(avatarEl(knownUser(member.userId) ?? { nickname: member.nickname }));
+  li.append(avatarEl(faceOf(member.userId, member.nickname)));
 
   const name = document.createElement('span');
   name.className = 'member-name';
@@ -1752,9 +1794,9 @@ function openPeerMenu(channelId, mid, event) {
   const userId = member.userId;
 
   el.peerMenuAvatar.replaceChildren(
-    ...avatarEl(knownUser(userId) ?? { nickname: member.nickname }).childNodes,
+    ...avatarEl(faceOf(userId, member.nickname)).childNodes,
   );
-  el.peerMenuName.textContent = member.nickname;
+  el.peerMenuName.textContent = displayOf(userId, member.nickname);
 
   const rows = [];
 
@@ -1853,6 +1895,55 @@ function openPeerMenu(channelId, mid, event) {
     rows.push(force, move);
   }
 
+  /*
+   * Handing out admin, and taking it back.
+   *
+   * An admin may promote a member; only the owner may demote anybody or
+   * appoint another owner. The server enforces exactly this -- see the
+   * comment on POST /api/accounts/:id/role for why the two directions are
+   * not symmetric -- and what follows only decides which button to draw.
+   *
+   * The role comes from the accounts list rather than from the roster,
+   * because the roster describes a membership of this channel and a role
+   * is a property of the person.
+   */
+  const them = knownUser(userId);
+  const theirRole = them?.role ?? 'member';
+  const canPromote = isAdmin() && theirRole === 'member';
+  const canDemote = isOwner() && theirRole === 'admin';
+
+  if (canPromote || canDemote) {
+    if (rows.length) rows.push(document.createElement('hr'));
+    const role = document.createElement('button');
+    role.type = 'button';
+    role.className = 'ghost menu-item set-role';
+    role.textContent = canPromote ? 'Make admin' : 'Remove admin';
+    role.title = canPromote
+      ? 'They can manage channels, mute and move people'
+      : 'Back to an ordinary member';
+    role.addEventListener('click', async () => {
+      closePeerMenu();
+      const next = canPromote ? 'admin' : 'member';
+      if (!await askConfirm(
+        canPromote
+          ? `Make ${displayOf(userId, member.nickname)} an admin?`
+          : `Remove ${displayOf(userId, member.nickname)}'s admin?`,
+        {
+          text: canPromote
+            ? 'They will be able to create and delete channels, force-mute and move anybody, '
+              + 'and delete anybody\u0027s messages. Only you can take it back.'
+            : 'They go back to being an ordinary member.',
+        },
+      )) return;
+      try {
+        await harmony.api.setRole(state.server, userId, next);
+      } catch (err) {
+        showChannelsError(err.message);
+      }
+    });
+    rows.push(role);
+  }
+
   // Nothing on offer -- an ordinary member right-clicking somebody in a
   // channel they are not in. A menu with no entries is worse than none.
   if (rows.length === 0) {
@@ -1888,11 +1979,27 @@ function renderVoiceRoster(roster) {
     const li = existing.get(String(member.mid)) ?? voiceRow(member);
     li.dataset.userId = String(member.userId);
 
-    const picture = avatarEl(knownUser(member.userId) ?? { nickname: member.nickname });
+    const picture = avatarEl(faceOf(member.userId, member.nickname));
     li.querySelector('.avatar').replaceChildren(...picture.childNodes);
 
     li.querySelector('.member-name').textContent =
-      member.nickname + (member.mid === state.voice.mid ? ' (you)' : '');
+      displayOf(member.userId, member.nickname)
+      + (member.mid === state.voice.mid ? ' (you)' : '');
+
+    // Who can throw you out is worth being able to see without opening a
+    // menu on every person in turn.
+    const role = knownUser(member.userId)?.role;
+    let badge = li.querySelector('.role-tag');
+    if (role === 'owner' || role === 'admin') {
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'tag role-tag';
+        li.querySelector('.member-name').after(badge);
+      }
+      badge.textContent = role;
+    } else if (badge) {
+      badge.remove();
+    }
     renderStatus(li.querySelector('.status'), member);
 
     // Greys their picture: you can still see them talking, which is the
@@ -2042,6 +2149,67 @@ async function refreshVoiceDevices({ apply = true } = {}) {
   await applyVoiceCamera(chosenCam);
 }
 
+/*
+ * Sensitivity, 1..100, to an RMS threshold.
+ *
+ * Exponential, because loudness is. Linear, the bottom quarter of the
+ * slider would cover everything between "a quiet room" and "someone
+ * talking" and the top three quarters would all mean "nothing gets
+ * through" -- which is a control that only works at one setting.
+ *
+ * 0.0008 is roughly a quiet room at normal gain; 60x that is a shout. The
+ * speaking indicator's own threshold, SPEAK_ON in gain.js, is 0.0075 and
+ * lands near the middle of this range, which is a useful sanity check that
+ * the scale covers the right territory.
+ */
+const gateThreshold = (sensitivity) =>
+  (sensitivity <= 0 ? 0 : 0.0008 * (60 ** (sensitivity / 100)));
+
+/** Where that threshold sits on the meter, as a percentage of its width. */
+const meterPercent = (rms) => Math.min(100, Math.sqrt(Math.max(0, rms) / 0.25) * 100);
+
+const MIC_METER_MS = 60;
+
+function applyMicTuning() {
+  const gain = Number(state.settings.micGain ?? 100);
+  const sensitivity = Number(state.settings.micSensitivity ?? 0);
+
+  el.micGain.value = String(gain);
+  el.micGainLabel.textContent = `${gain}%`;
+  el.micGainLabel.toggleAttribute('data-boosted', gain > 100);
+
+  el.micGate.value = String(sensitivity);
+  el.micGateLabel.textContent = sensitivity === 0 ? 'Off' : String(sensitivity);
+
+  const threshold = gateThreshold(sensitivity);
+  el.micMeterMark.hidden = sensitivity === 0;
+  el.micMeterMark.style.left = `${meterPercent(threshold)}%`;
+
+  state.voice.setMicGain(gain / 100);
+  state.voice.setMicThreshold(threshold);
+}
+
+/**
+ * Drive the meter while the dialog is open, and only while it is open.
+ *
+ * Reading an analyser sixteen times a second is cheap, but doing it forever
+ * for a bar nobody is looking at is a battery cost with no reader.
+ */
+let micMeterTimer = null;
+
+function startMicMeter() {
+  stopMicMeter();
+  micMeterTimer = setInterval(() => {
+    el.micMeterFill.style.width = `${meterPercent(state.voice.micLevel)}%`;
+    el.micMeter.toggleAttribute('data-gated', !state.voice.micOpen);
+  }, MIC_METER_MS);
+}
+
+function stopMicMeter() {
+  if (micMeterTimer) clearInterval(micMeterTimer);
+  micMeterTimer = null;
+}
+
 /** Point the microphone at a device, if we are publishing one. */
 async function applyVoiceInput(deviceId) {
   if (!state.voice.micLive) return;
@@ -2111,8 +2279,10 @@ navigator.mediaDevices?.addEventListener?.('devicechange', () => {
 
 const KIND_LABEL = { c: 'camera', s: 'screen' };
 
-const nameOfMid = (mid) =>
-  state.channels.roster.find((m) => m.mid === mid)?.nickname ?? `slot ${mid}`;
+const nameOfMid = (mid) => {
+  const member = state.channels.roster.find((m) => m.mid === mid);
+  return member ? displayOf(member.userId, member.nickname) : `slot ${mid}`;
+};
 
 /**
  * Draw the tiles.
@@ -2143,10 +2313,28 @@ function ownChannelTiles() {
   return mine;
 }
 
+/**
+ * The handle on your own share, while you are listening to it.
+ *
+ * Module scope rather than per tile: tiles are rebuilt whenever the roster
+ * changes, and a handle held in a closure would be lost on the next push
+ * with the audio still playing and nothing left to stop it.
+ */
+let ownMonitor = null;
+
+function stopOwnMonitor() {
+  ownMonitor?.close();
+  ownMonitor = null;
+}
+
 function renderChannelVideo() {
   const tiles = state.voice.channelId
     ? [...ownChannelTiles(), ...state.voice.videoTiles]
     : [];
+
+  // Stopping the share leaves nothing to listen to, and a monitor left
+  // open on a dead stream is a node graph nobody can reach to close.
+  if (ownMonitor && !tiles.some((t) => t.own && t.kind === 's')) stopOwnMonitor();
   const existing = new Map(
     [...el.channelVideo.children].map((node) => [node.dataset.key, node]),
   );
@@ -2175,6 +2363,43 @@ function renderChannelVideo() {
     // element play it too would double it.
     video.muted = true;
     video.srcObject = stream;
+
+    /*
+     * Hear your own screen share.
+     *
+     * Top right, away from the controls in the caption, because this one
+     * acts on YOUR speakers rather than on the tile -- and because it is
+     * the only way to answer "is my game audio actually going out?"
+     * without asking somebody.
+     *
+     * Safe where monitoring your own microphone would not be: a screen's
+     * audio is not coming back in through a microphone, so there is no
+     * loop to start. Routed into the playback context like everything
+     * else, so the output picker and deafen both reach it.
+     */
+    if (own && kind === 's') {
+      const corner = document.createElement('span');
+      corner.className = 'tile-corner';
+      const listen = document.createElement('button');
+      listen.className = 'tile-btn';
+      listen.type = 'button';
+      listen.dataset.role = 'monitor';
+      listen.innerHTML = '&#127911;';
+      listen.title = 'Hear your own stream';
+      listen.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (ownMonitor) {
+          ownMonitor.close();
+          ownMonitor = null;
+        } else {
+          ownMonitor = monitorStream(stream, 1);
+        }
+        listen.toggleAttribute('data-on', Boolean(ownMonitor));
+        listen.title = ownMonitor ? 'Stop hearing your own stream' : 'Hear your own stream';
+      });
+      corner.append(listen);
+      figure.append(corner);
+    }
 
     const label = document.createElement('figcaption');
     const name = document.createElement('span');
@@ -2328,8 +2553,8 @@ function messageRow(message) {
   const who = document.createElement('span');
   who.className = 'who';
   who.append(
-    avatarEl(knownUser(message.userId) ?? { nickname: message.nickname }, 'tiny'),
-    document.createTextNode(message.nickname),
+    avatarEl(faceOf(message.userId, message.nickname), 'tiny'),
+    document.createTextNode(displayOf(message.userId, message.nickname)),
   );
 
   const text = document.createElement('span');
@@ -2425,7 +2650,8 @@ function renderChat({ scrollToBottom = false } = {}) {
     el.chatPinned.replaceChildren(
       ...state.chat.pinned.map((m) => {
         const line = document.createElement('div');
-        line.textContent = `\u{1F4CC} ${m.nickname}: ${m.body || '(attachment)'}`;
+        line.textContent =
+          `\u{1F4CC} ${displayOf(m.userId, m.nickname)}: ${m.body || '(attachment)'}`;
         return line;
       }),
     );
@@ -2861,10 +3087,17 @@ function onRealtimeEvent(msg) {
       if (msg.user.id === state.auth.user?.id) {
         state.auth.user = msg.user;
         renderOwnAvatar();
+        el.channelsWho.textContent = msg.user.displayName || msg.user.nickname;
+        el.channelsRole.textContent = msg.user.role === 'member' ? '' : msg.user.role;
+        // Being made an admin has to reach the controls, not just the badge.
+        el.channelAdd.hidden = !isAdmin();
+        applyVoiceButtons();
       }
-      // Pictures are drawn from this map in three places, and the cheapest
-      // way to be sure none of them is stale is to draw them all again.
+      // Names and pictures are drawn from this map in several places, and
+      // the cheapest way to be sure none of them is stale is to draw them
+      // all again.
       renderVoiceRoster(state.channels.roster);
+      renderChannels();
       renderChat();
       break;
 
@@ -4700,6 +4933,47 @@ el.ask.addEventListener('cancel', (event) => {
   closeAsk(null);
 });
 
+/**
+ * Your display name.
+ *
+ * Server-side only, and deliberately nothing like the nickname. The
+ * nickname is an identity -- folded, unique, what you log in with, and what
+ * a MediaMTX path is built from. This is a label: any character, capitals
+ * included, and two people may pick the same one. Clearing it puts the
+ * nickname back, which is why the field is not required.
+ */
+el.selfName.addEventListener('click', async () => {
+  const me = state.auth.user;
+  if (!me) return;
+  const answer = await ask({
+    title: 'Your display name',
+    text: `Shown to everybody on this server. Leave it empty to go back to "${me.nickname}". `
+      + 'Capitals, spaces and accents are all fine.',
+    okLabel: 'Save',
+    fields: [{
+      name: 'displayName',
+      label: 'Display name',
+      value: me.customName ? me.displayName : '',
+      placeholder: me.nickname,
+      maxlength: 32,
+    }],
+  });
+  if (answer === null) return;
+  try {
+    const { user } = await harmony.api.setDisplayName(state.server, answer.displayName ?? '');
+    state.auth.user = { ...state.auth.user, ...user };
+    state.users.set(user.id, user);
+    // The broadcast repaints everybody else; this repaints us without
+    // waiting for our own message to come back round.
+    el.channelsWho.textContent = user.displayName || user.nickname;
+    renderVoiceRoster(state.channels.roster);
+    renderChannels();
+    renderChat();
+  } catch (err) {
+    showChannelsError(err.message);
+  }
+});
+
 el.avatarButton.addEventListener('click', () => el.avatarFile.click());
 el.avatarFile.addEventListener('change', () => {
   const file = el.avatarFile.files?.[0];
@@ -4764,8 +5038,34 @@ el.soundpadMute.addEventListener('click', async () => {
  */
 el.voiceConfig.addEventListener('click', () => {
   el.devicesDialog.showModal();
+  applyMicTuning();
+  startMicMeter();
   refreshVoiceDevices().catch((err) => deviceNote(err.message));
 });
+el.devicesDialog.addEventListener('close', stopMicMeter);
+
+/*
+ * Input volume and sensitivity.
+ *
+ * Applied on 'input' so the meter and your own voice respond as you drag,
+ * and written on 'change' so one drag is one settings write rather than
+ * forty.
+ */
+const micTuningInput = () => {
+  state.settings.micGain = Number(el.micGain.value);
+  state.settings.micSensitivity = Number(el.micGate.value);
+  applyMicTuning();
+};
+const micTuningSave = () => harmony.settings
+  .set({ micGain: Number(el.micGain.value), micSensitivity: Number(el.micGate.value) })
+  .then(() => harmony.settings.get())
+  .then((settings) => { state.settings = settings; })
+  .catch(() => { /* it is applied either way; it just will not persist */ });
+
+el.micGain.addEventListener('input', micTuningInput);
+el.micGate.addEventListener('input', micTuningInput);
+el.micGain.addEventListener('change', micTuningSave);
+el.micGate.addEventListener('change', micTuningSave);
 
 el.voiceSoundboard.addEventListener('click', () => {
   el.soundpad.dataset.shown = el.soundpad.dataset.shown === '0' ? '1' : '0';

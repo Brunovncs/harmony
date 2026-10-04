@@ -12,7 +12,7 @@
 // bandwidth, not this file.
 
 import { publish, watch } from './webrtc.js';
-import { createSink, createMeter, MAX_GAIN } from './gain.js';
+import { createSink, createMeter, createMicChain, MAX_GAIN } from './gain.js';
 
 /**
  * Microphone constraints.
@@ -75,6 +75,7 @@ export class VoiceSession {
   #openingVideo = new Set();
 
   /** @type {{pc: RTCPeerConnection, resourceUrl: string|null}|null} */
+  #micChain = null;
   #cam = null;
   #camStream = null;
 
@@ -308,39 +309,73 @@ export class VoiceSession {
   /**
    * Round trip to the relay, in milliseconds.
    *
-   * From the NOMINATED candidate pair on the microphone publish. That is a
-   * real measurement -- STUN binding requests over the live path -- rather
-   * than an HTTP ping to the control server, which would travel a different
-   * route to a different process and tell you about neither the media path
-   * nor the thing people mean when they say the call is laggy.
+   * A real measurement over the live media path -- STUN consent checks on
+   * the connection actually carrying the audio -- rather than an HTTP ping
+   * to the control server, which would travel a different route to a
+   * different process and describe neither.
    *
-   * The publish rather than a subscription on purpose: it exists for the
-   * whole call, while subscriptions come and go with whoever is in the room.
+   * Three ways of finding the pair, in order, because the first one is the
+   * only CORRECT one and the only one that is not always there:
    *
-   * @returns {Promise<number|null>} null before ICE has settled, or when
-   *   there is no microphone running -- which is not an error, and the
-   *   caller should show nothing rather than a zero.
+   *   1. transport.selectedCandidatePairId. Authoritative, but Chromium
+   *      does not always expose a transport stat for a WHIP connection
+   *      with no DTLS role change, and it is absent entirely while ICE is
+   *      still checking.
+   *   2. a nominated pair in state 'succeeded'. Chromium spells it
+   *      `nominated`, Firefox `selected`, and a sendonly connection to a
+   *      relay sometimes reports NEITHER flag while still being connected
+   *      on exactly one pair -- which is what made the first attempt here
+   *      show "Measuring..." forever.
+   *   3. any succeeded pair that has a round trip at all. With one pair,
+   *      which is the normal case for a host-to-host LAN connection, this
+   *      is the same pair the other two would have chosen.
+   *
+   * And where the pair has no currentRoundTripTime yet -- it only appears
+   * once a STUN response has come back -- the running average from
+   * totalRoundTripTime is used instead, which is a slightly staler number
+   * and much better than none.
+   *
+   * @returns {Promise<number|null>} null only when there is genuinely
+   *   nothing to measure: no microphone, or no response yet.
    */
   async rtt() {
-    if (!this.#mic) return null;
+    const pc = this.#mic?.pc ?? [...this.#subs.values()][0]?.pc ?? null;
+    if (!pc) return null;
+
     let stats;
     try {
-      stats = await this.#mic.pc.getStats();
+      stats = await pc.getStats();
     } catch {
       return null;
     }
 
-    let pair = null;
+    const pairs = new Map();
+    let selectedId = null;
     stats.forEach((r) => {
-      // `selected` is Firefox's spelling; Chromium reports `nominated` plus
-      // a succeeded state. Checking both costs nothing and the alternative
-      // is a number that is silently absent on one of them.
-      if (r.type !== 'candidate-pair') return;
-      const chosen = r.nominated === true || r.selected === true;
-      if (chosen && r.state === 'succeeded') pair = r;
+      if (r.type === 'candidate-pair') pairs.set(r.id, r);
+      // Both spellings: the stat moved between spec revisions and
+      // Chromium still reports the old one on some connections.
+      if (r.type === 'transport' && (r.selectedCandidatePairId || r.selectedCandidatePair)) {
+        selectedId = r.selectedCandidatePairId ?? r.selectedCandidatePair;
+      }
     });
-    if (!pair || typeof pair.currentRoundTripTime !== 'number') return null;
-    return Math.round(pair.currentRoundTripTime * 1000);
+    if (pairs.size === 0) return null;
+
+    const succeeded = [...pairs.values()].filter((r) => r.state === 'succeeded');
+    const pair = pairs.get(selectedId)
+      ?? succeeded.find((r) => r.nominated === true || r.selected === true)
+      ?? succeeded.find((r) => typeof r.currentRoundTripTime === 'number')
+      ?? succeeded[0]
+      ?? null;
+    if (!pair) return null;
+
+    if (typeof pair.currentRoundTripTime === 'number') {
+      return Math.round(pair.currentRoundTripTime * 1000);
+    }
+    if (pair.responsesReceived > 0 && typeof pair.totalRoundTripTime === 'number') {
+      return Math.round((pair.totalRoundTripTime / pair.responsesReceived) * 1000);
+    }
+    return null;
   }
 
   async publishStats() {
@@ -429,7 +464,7 @@ export class VoiceSession {
 
     this.#mic = await publish({
       url: publishUrl,
-      stream: this.#micStream,
+      stream: this.#processed(this.#micStream),
       iceServers: this.iceServers,
     });
 
@@ -443,6 +478,67 @@ export class VoiceSession {
       params.encodings[0].maxBitrate = VOICE_BITRATE;
       await sender.setParameters(params).catch(() => { /* not fatal */ });
     }
+  }
+
+  /**
+   * The stream that is actually published: the capture, then volume and gate.
+   *
+   * Falls back to the raw capture when Web Audio will not take the stream.
+   * Losing the input volume is a shame; losing the microphone entirely over
+   * it would not be, and this is the path that took three releases to make
+   * audible in the first place.
+   *
+   * Mute still acts on the SOURCE track rather than on the chain's output,
+   * deliberately: `enabled = false` collapses the bitrate on the wire,
+   * while a gain of zero would go on encoding silence at full price.
+   */
+  #processed(stream) {
+    this.#micChain?.close();
+    this.#micChain = createMicChain(stream, {
+      gain: this.micGain,
+      threshold: this.micThreshold,
+    });
+    const track = this.#micChain?.track;
+    if (!track) {
+      this.#micChain = null;
+      return stream;
+    }
+    return new MediaStream([track]);
+  }
+
+  /** Input volume, 0..MAX_GAIN. Kept on the session, so it survives a
+   *  device switch and a rejoin. */
+  micGain = 1;
+
+  /** Noise gate, as an RMS level between 0 and 1. 0 is off. */
+  micThreshold = 0;
+
+  setMicGain(value) {
+    this.micGain = Math.max(0, Math.min(MAX_GAIN, Number(value) || 0));
+    this.#micChain?.setGain(this.micGain);
+    return this.micGain;
+  }
+
+  setMicThreshold(value) {
+    this.micThreshold = Math.max(0, Number(value) || 0);
+    this.#micChain?.setThreshold(this.micThreshold);
+    return this.micThreshold;
+  }
+
+  /**
+   * What the microphone is hearing right now, 0..1.
+   *
+   * Read BEFORE the gate, which is the only useful place to read it from:
+   * a meter showing the gate's output reads zero whenever the gate is shut,
+   * so it could never show you that the gate is shut too often.
+   */
+  get micLevel() {
+    return this.#micChain?.level ?? this.#micMeter?.read().level ?? 0;
+  }
+
+  /** Whether the gate is currently letting sound through. */
+  get micOpen() {
+    return this.#micChain ? this.#micChain.open : true;
   }
 
   /**
@@ -482,7 +578,11 @@ export class VoiceSession {
       stream.getTracks().forEach((t) => t.stop());
       return false;
     }
-    await sender.replaceTrack(track);
+    // Through the chain again, or changing headset silently drops the input
+    // volume and the gate -- which reads as "picking my headset breaks my
+    // microphone settings" and is impossible to guess the cause of.
+    const processed = this.#processed(stream);
+    await sender.replaceTrack(processed.getAudioTracks()[0] ?? track);
 
     this.#micStream?.getTracks().forEach((t) => t.stop());
     this.#micStream = stream;
@@ -855,6 +955,8 @@ export class VoiceSession {
     // person, not about this channel, and re-muting them on every rejoin is
     // the kind of thing that makes a mute feel broken.
     await this.stopMic();
+    this.#micChain?.close();
+    this.#micChain = null;
     await this.stopCam();
     for (const mid of [...this.#subs.keys()]) await this.unsubscribe(mid);
     for (const key of [...this.#video.keys()]) this.unsubscribeVideo(key);

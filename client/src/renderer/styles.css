@@ -384,10 +384,25 @@ select:focus {
  * it: the row's click handler joins the channel, so a nested list would make
  * clicking somebody's name join it too.
  */
+/*
+ * align-items is set EXPLICITLY, and it is the whole reason the names were
+ * floating in the middle of the sidebar.
+ *
+ * This element is an <li>, so `.channel-list li` matches it -- and that
+ * rule says `align-items: center`, which is right for a channel row laid
+ * out in a line and wrong for this one, which is a column. A centred
+ * cross-axis in a column container centres every child HORIZONTALLY.
+ *
+ * `.channel-list li` is (0,1,1) and `.channel-members` is (0,1,0), so the
+ * row rule wins every property this one does not name. Naming it is the
+ * fix; the lesson is that a shared `li` selector reaches further than it
+ * looks.
+ */
 .channel-members {
   list-style: none;
   display: flex;
   flex-direction: column;
+  align-items: stretch;
   gap: 0.15rem;
   /* Barely indented. This is the roster now, not a footnote under the
      channel row, so it gets the width the names need. */
@@ -511,6 +526,14 @@ select:focus {
 #voice-roster .tag.forced {
   color: #ff8c8c;
   opacity: 1;
+}
+#voice-roster .role-tag {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.55;
+  border-color: currentColor;
+  flex: 0 0 auto;
 }
 
 /* ---------- who is doing what ---------- */
@@ -771,12 +794,18 @@ select:focus {
  * second before it appears, which for something you are checking because
  * the call sounds wrong is long enough that you let go and give up.
  */
+/*
+ * Anchored to the icon's left edge, not centred on it.
+ *
+ * Centred, it needed half its own width of room to the left -- and the icon
+ * lives about ten pixels from the left edge of the window, so the tooltip
+ * was cut off against it.
+ */
 .voice-signal::after {
   content: attr(data-ping);
   position: absolute;
   bottom: calc(100% + 0.35rem);
-  left: 50%;
-  transform: translateX(-50%);
+  left: 0;
   padding: 0.2rem 0.45rem;
   border-radius: 5px;
   background: #0f1115;
@@ -877,10 +906,23 @@ select:focus {
   outline: 2px solid var(--accent, #6ea8fe);
   outline-offset: 1px;
 }
-.self-identity .avatar {
+.self-avatar {
+  flex: 0 0 auto;
+  background: none;
+  border: 0;
+  padding: 0.1rem;
+  cursor: pointer;
+  line-height: 0;
+  color: inherit;
+}
+.self-avatar .avatar {
   width: 2.1em;
   height: 2.1em;
   font-size: 0.68em;
+}
+.self-avatar:hover .avatar {
+  outline: 2px solid var(--accent, #6ea8fe);
+  outline-offset: 1px;
 }
 .self-text {
   display: flex;
@@ -1319,6 +1361,83 @@ button.danger {
   justify-content: flex-end;
   gap: 0.5rem;
   margin-top: 0.8rem;
+}
+
+/* ---------- tuning the microphone ---------- */
+
+.mic-tuning {
+  margin-top: 0.9rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.mic-tuning .field > span:first-child {
+  font-size: 0.78rem;
+  opacity: 0.7;
+}
+.mic-meter {
+  position: relative;
+  height: 0.6rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.mic-meter-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: #3fc77a;
+  /* No transition on the width: this is a meter, and smoothing it would
+     make it lag behind the voice it is supposed to be showing. */
+}
+/* Grey while the gate is shut, so you can see the gate working rather than
+   having to infer it from other people not hearing you. */
+.mic-meter[data-gated] .mic-meter-fill {
+  background: rgba(255, 255, 255, 0.3);
+}
+.mic-meter-mark {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: #e3a008;
+}
+.mic-hint {
+  font-size: 0.75rem;
+  margin: 0;
+}
+
+/* ---------- hear your own share ---------- */
+
+/*
+ * Top right of the tile, away from the controls in the caption: this one
+ * does something to YOUR speakers rather than to the tile, and it is the
+ * only control that is yours alone.
+ */
+.tile-corner {
+  position: absolute;
+  top: 0.3rem;
+  right: 0.3rem;
+  display: flex;
+  gap: 0.2rem;
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+  z-index: 2;
+}
+.channel-tile:hover .tile-corner,
+.channel-tile:focus-within .tile-corner,
+.channel-tile[data-big] .tile-corner,
+.tile-corner:has([data-on]) {
+  opacity: 1;
+}
+.tile-corner .tile-btn {
+  background: rgba(0, 0, 0, 0.55);
+  padding: 0.2rem 0.35rem;
+}
+.tile-corner .tile-btn[data-on] {
+  background: rgba(110, 168, 254, 0.8);
 }
 
 /* ---------- small admin controls ---------- */

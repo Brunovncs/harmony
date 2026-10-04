@@ -326,8 +326,14 @@
             labels to know what state the call is in.
           -->
           <div class="self-strip">
-            <button class="self-identity" id="avatar-button" title="Change your picture">
+            <!-- Two targets, because they are two different things: click
+                 your face to change your face, your name to change your
+                 name. One button doing both needs a menu to disambiguate,
+                 which is a click more than either deserves. -->
+            <button class="self-avatar" id="avatar-button" title="Change your picture">
               <span class="avatar" id="channels-avatar"></span>
+            </button>
+            <button class="self-identity" id="self-name" title="Change your display name">
               <span class="self-text">
                 <strong id="channels-who">Signed in</strong>
                 <span class="self-status" id="self-status">Online</span>
@@ -617,6 +623,57 @@
               <select id="voice-camera"></select>
             </label>
             <span class="muted" id="voice-device-note"></span>
+          </div>
+
+          <!--
+            Input volume and the gate, with a meter.
+
+            The meter is not decoration. A noise gate you cannot see is a
+            gate you cannot set: the only way to pick a threshold is to
+            watch where your voice sits and where the room sits, and the
+            marker on the bar is that threshold drawn in the same units.
+          -->
+          <div class="mic-tuning">
+            <label class="field">
+              <span>Input volume</span>
+              <span class="peer-audio">
+                <input
+                  id="mic-gain"
+                  class="peer-volume"
+                  type="range"
+                  min="0"
+                  max="200"
+                  step="5"
+                  value="100"
+                />
+                <span class="peer-volume-label" id="mic-gain-label">100%</span>
+              </span>
+            </label>
+
+            <label class="field">
+              <span>Input sensitivity</span>
+              <span class="peer-audio">
+                <input
+                  id="mic-gate"
+                  class="peer-volume"
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value="0"
+                />
+                <span class="peer-volume-label" id="mic-gate-label">Off</span>
+              </span>
+            </label>
+
+            <div class="mic-meter" id="mic-meter">
+              <div class="mic-meter-fill" id="mic-meter-fill"></div>
+              <div class="mic-meter-mark" id="mic-meter-mark" hidden></div>
+            </div>
+            <p class="muted mic-hint">
+              Speak normally. Put the marker just above where the bar sits when
+              you are quiet, and below where it sits when you talk.
+            </p>
           </div>
         <div class="ask-buttons">
           <button type="submit" class="primary" id="devices-close">Done</button>

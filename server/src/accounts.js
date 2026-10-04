@@ -33,7 +33,17 @@ const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 32 };
 const NICKNAME_RE = /^[a-z0-9][a-z0-9_-]{1,19}$/;
 
 /** Roles, most privileged first. */
-export const ROLES = ['owner', 'admin', 'member'];
+export /*
+ * How long a display name may be, in CODE POINTS rather than UTF-16 units.
+ *
+ * `.length` counts an emoji as two and a flag as four, so a limit written
+ * against it refuses names that are visibly shorter than the ones it
+ * accepts -- which is exactly the kind of rule that looks arbitrary and
+ * racist from the outside.
+ */
+const MAX_DISPLAY_NAME = 32;
+
+const ROLES = ['owner', 'admin', 'member'];
 
 /**
  * "Pedro Lucas" is accepted and stored as `pedrolucas` -- the nickname becomes
@@ -119,8 +129,12 @@ export class Accounts {
       count: db.prepare('SELECT COUNT(*) AS n FROM users'),
       countOwners: db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'owner'"),
       setRole: db.prepare('UPDATE users SET role = ? WHERE id = ?'),
+      setDisplayName: db.prepare('UPDATE users SET display_name = ? WHERE id = ?'),
       setAvatar: db.prepare('UPDATE users SET avatar_hash = ? WHERE id = ?'),
-      list: db.prepare('SELECT id, nickname, role, avatar_hash, created_at FROM users ORDER BY nickname'),
+      list: db.prepare(
+        'SELECT id, nickname, display_name, role, avatar_hash, created_at '
+        + 'FROM users ORDER BY nickname',
+      ),
 
       addSession: db.prepare(
         'INSERT INTO sessions (token_hash, user_id, created_at, last_seen) VALUES (?, ?, ?, ?)',
@@ -146,6 +160,17 @@ export class Accounts {
 
   find(nickname) {
     return this.#q.byNickname.get(nickname) ?? null;
+  }
+
+  /**
+   * One account by id, or null.
+   *
+   * The raw row, password hash included -- publicUser() is what shapes it
+   * for a response, and callers inside the server need the role to decide
+   * whether the person asking is allowed to do what they are asking.
+   */
+  byId(userId) {
+    return this.#q.byId.get(Number(userId)) ?? null;
   }
 
   list() {
@@ -257,6 +282,45 @@ export class Accounts {
    * reference counting: setting a new picture has to give the old file's
    * reference back or the uploads directory only ever grows.
    */
+  /**
+   * Set, or clear, somebody's display name.
+   *
+   * Almost nothing is refused. This is a label rather than an identity --
+   * nothing is looked up by it, no path is built from it, no uniqueness is
+   * claimed for it -- so capitals, spaces, accents and emoji are all fine,
+   * and two people may choose the same one. Only three things are checked:
+   *
+   *   - a length, so one person cannot push every other name off the
+   *     sidebar;
+   *   - control characters, which are invisible and would let somebody
+   *     plant a right-to-left override or a zero-width join in a name
+   *     everybody else has to read;
+   *   - all-whitespace, which renders as a person with no name at all.
+   *
+   * Empty clears it, and the nickname shows again.
+   *
+   * The client renders every name with textContent, never innerHTML, so
+   * markup in a name is text. That is where the XSS answer lives; this is
+   * not the place to start a second, weaker one.
+   */
+  setDisplayName(userId, raw) {
+    const user = this.#q.byId.get(Number(userId));
+    if (!user) return { ok: false, error: 'no_such_user' };
+
+    const value = String(raw ?? '').trim();
+    if (value === '') {
+      this.#q.setDisplayName.run(null, user.id);
+      return { ok: true, user: this.#q.byId.get(user.id) };
+    }
+    if ([...value].length > MAX_DISPLAY_NAME) return { ok: false, error: 'too_long' };
+    // \p{C} is every control, format and unassigned code point, which
+    // covers the bidi overrides and the zero-width characters together.
+    if (/\p{C}/u.test(value)) return { ok: false, error: 'bad_characters' };
+
+    this.#q.setDisplayName.run(value, user.id);
+    return { ok: true, user: this.#q.byId.get(user.id) };
+  }
+
   setAvatar(userId, hash) {
     const user = this.#q.byId.get(userId);
     if (!user) return { ok: false, error: 'no_such_user' };
@@ -269,6 +333,10 @@ export class Accounts {
 export const publicUser = (u) => (u ? {
   id: u.id,
   nickname: u.nickname,
+  // What to show. Resolved here rather than in each client, so that every
+  // client resolves it the same way and a null stays a null on the wire.
+  displayName: u.display_name || u.nickname,
+  customName: Boolean(u.display_name),
   role: u.role,
   avatarHash: u.avatar_hash ?? null,
   createdAt: u.created_at,

@@ -154,6 +154,23 @@ const MIGRATIONS = [
       CREATE INDEX soundpad_order ON soundpad_clips(position, id);
     `);
   },
+
+  /*
+   * v5 -- a display name.
+   *
+   * SEPARATE from the nickname, not a relaxing of it. The nickname is an
+   * identity: it is folded, it is unique, it is what you log in with, it is
+   * what a MediaMTX path is built from and what the auth hook parses. A
+   * display name is a label, so it may be anything -- capitals, spaces,
+   * accents, emoji -- and two people may pick the same one.
+   *
+   * NULL means "no preference", which renders as the nickname. Storing the
+   * nickname into it instead would mean a later change of nickname quietly
+   * failing to show up.
+   */
+  (db) => {
+    db.exec('ALTER TABLE users ADD COLUMN display_name TEXT');
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

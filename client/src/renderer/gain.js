@@ -116,6 +116,146 @@ export function createMeter(stream) {
   };
 }
 
+/**
+ * Input volume and a noise gate, between the microphone and the publish.
+ *
+ * Chromium's own capture processing (echo cancellation, noise suppression,
+ * AGC) happens BEFORE the track exists, so it is untouched by this -- what
+ * arrives here is already cleaned up, and this only decides how loud it is
+ * and whether it is let through at all.
+ *
+ * The gate is polled rather than built from a DynamicsCompressor or a
+ * WorkletNode. A compressor cannot be made to close completely, and a
+ * worklet would be a second file loaded over a custom protocol with its own
+ * CSP question, for an envelope follower that is nine lines. 25 ms is far
+ * shorter than a syllable.
+ *
+ * Opening is INSTANT and closing is slow, which is the right way round: a
+ * gate that fades in eats the first consonant of every sentence, and one
+ * that slams shut chops the end of a word and breathes between them.
+ *
+ * @param {MediaStream} stream the raw getUserMedia capture
+ * @returns {{track: MediaStreamTrack, setGain: Function, setThreshold: Function,
+ *            level: number, open: boolean, close: Function} | null} null if
+ *   Web Audio refuses the stream, in which case the caller publishes the raw
+ *   track and simply has no gain or gate.
+ */
+const GATE_POLL_MS = 25;
+const GATE_HOLD_MS = 300;
+const GATE_RELEASE = 0.55;
+
+export function createMicChain(stream, { gain = 1, threshold = 0 } = {}) {
+  let source;
+  try {
+    source = context().createMediaStreamSource(stream);
+  } catch (err) {
+    console.warn('[gain] could not process the microphone:', err.message);
+    return null;
+  }
+
+  const analyser = context().createAnalyser();
+  analyser.fftSize = 1024;
+  analyser.smoothingTimeConstant = 0.1;
+  const volume = context().createGain();
+  const gate = context().createGain();
+  const dest = context().createMediaStreamDestination();
+
+  // The analyser sits FIRST, so the meter shows what the microphone hears
+  // rather than what survived the gate -- which is what you need to see in
+  // order to set the gate at all.
+  source.connect(analyser);
+  analyser.connect(volume);
+  volume.connect(gate);
+  gate.connect(dest);
+
+  volume.gain.value = Math.max(0, Math.min(MAX_GAIN, gain));
+  gate.gain.value = 1;
+
+  const buffer = new Float32Array(analyser.fftSize);
+  let level = 0;
+  let open = true;
+  let openUntil = 0;
+  let cutoff = threshold;
+
+  const timer = setInterval(() => {
+    analyser.getFloatTimeDomainData(buffer);
+    let sum = 0;
+    for (const sample of buffer) sum += sample * sample;
+    const rms = Math.sqrt(sum / buffer.length);
+    level = Math.max(rms, level * GATE_RELEASE);
+
+    if (cutoff <= 0) {
+      if (!open) {
+        open = true;
+        gate.gain.setTargetAtTime(1, context().currentTime, 0.005);
+      }
+      return;
+    }
+
+    const now = Date.now();
+    if (rms >= cutoff) openUntil = now + GATE_HOLD_MS;
+    const shouldBeOpen = now < openUntil;
+    if (shouldBeOpen === open) return;
+    open = shouldBeOpen;
+    // 5 ms to open, 120 ms to close.
+    gate.gain.setTargetAtTime(open ? 1 : 0, context().currentTime, open ? 0.005 : 0.04);
+  }, GATE_POLL_MS);
+  timer.unref?.();
+
+  return {
+    track: dest.stream.getAudioTracks()[0] ?? null,
+    setGain(value) {
+      volume.gain.value = Math.max(0, Math.min(MAX_GAIN, Number(value) || 0));
+    },
+    setThreshold(value) {
+      cutoff = Math.max(0, Number(value) || 0);
+    },
+    get level() {
+      return level;
+    },
+    get open() {
+      return open;
+    },
+    close() {
+      clearInterval(timer);
+      for (const node of [source, analyser, volume, gate, dest]) {
+        try { node.disconnect(); } catch { /* already gone */ }
+      }
+    },
+  };
+}
+
+/**
+ * Hear your own screen share.
+ *
+ * Into the PLAYBACK context, the same one every incoming stream goes to, so
+ * that the output device picker and deafen both reach it. There is no echo
+ * risk: a screen's audio is not coming back in through a microphone, which
+ * is exactly why this is safe here and would not be for your own voice.
+ */
+export function monitorStream(stream, gain = 1) {
+  let source;
+  try {
+    source = context().createMediaStreamSource(stream);
+  } catch (err) {
+    console.warn('[gain] could not monitor:', err.message);
+    return null;
+  }
+  const node = context().createGain();
+  node.gain.value = Math.max(0, Math.min(MAX_GAIN, gain));
+  source.connect(node);
+  node.connect(context().destination);
+  return {
+    set(value) {
+      node.gain.value = Math.max(0, Math.min(MAX_GAIN, Number(value) || 0));
+    },
+    close() {
+      try { source.disconnect(); } catch { /* already gone */ }
+      try { node.disconnect(); } catch { /* already gone */ }
+    },
+  };
+}
+
 let ctx = null;
 
 /**

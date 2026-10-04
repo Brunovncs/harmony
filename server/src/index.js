@@ -406,14 +406,69 @@ app.post('/api/accounts/avatar', requireLogin, (req, res) => {
   return res.json({ user });
 });
 
+/**
+ * Change your own display name.
+ *
+ * Your OWN: there is no id in the path. Renaming other people is not a
+ * thing an admin needs to do, and leaving it out means there is no
+ * permission check here to get wrong.
+ */
+app.post('/api/accounts/display-name', requireLogin, (req, res) => {
+  const result = accounts.setDisplayName(req.user.id, req.body?.displayName);
+  if (!result.ok) {
+    const messages = {
+      no_such_user: 'No such user.',
+      too_long: 'That name is too long. 32 characters at most.',
+      bad_characters: 'That name contains characters that cannot be displayed.',
+    };
+    return res.status(400).json({ error: result.error, message: messages[result.error] });
+  }
+  const user = publicUser(result.user);
+  realtime?.broadcast({ type: 'user:updated', user });
+  return res.json({ user });
+});
+
 /** Anyone logged in may see the roster; it is a friends' server, not a forum. */
 app.get('/api/accounts', requireLogin, (_req, res) => {
   res.json({ users: accounts.list().map((u) => publicUser(u)) });
 });
 
-app.post('/api/accounts/:id/role', requireRole('owner'), (req, res) => {
+/**
+ * Change somebody's role.
+ *
+ * An admin may hand out admin, and that is all. Only the owner may take it
+ * away, and only the owner may make another owner.
+ *
+ * The asymmetry is deliberate and is the usual shape for this: trusting
+ * someone enough to let them in is a smaller decision than being able to
+ * throw out the person who trusted you. With symmetric powers any two
+ * admins can demote each other, and the first one to click wins -- which
+ * turns a falling-out between friends into an irreversible race.
+ *
+ * Enforced here rather than by hiding the control, because the control
+ * being hidden is a statement about one client's UI and this is a statement
+ * about the server.
+ */
+app.post('/api/accounts/:id/role', requireRole('owner', 'admin'), (req, res) => {
   const id = Number.parseInt(req.params.id, 10);
-  const result = accounts.setRole(id, String(req.body?.role ?? ''));
+  const role = String(req.body?.role ?? '');
+
+  if (req.user.role !== 'owner') {
+    const target = accounts.byId(id);
+    if (!target) {
+      return res.status(400).json({ error: 'no_such_user', message: 'No such user.' });
+    }
+    // Promotion only, to admin only, and only from member -- which also
+    // stops an admin demoting themselves into a server with no admins.
+    if (role !== 'admin' || target.role !== 'member') {
+      return res.status(403).json({
+        error: 'owner_only',
+        message: 'Only the owner can remove an admin or appoint another owner.',
+      });
+    }
+  }
+
+  const result = accounts.setRole(id, role);
   if (!result.ok) {
     const messages = {
       invalid_role: 'Role must be owner, admin or member.',
