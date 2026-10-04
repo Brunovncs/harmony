@@ -492,6 +492,7 @@ only types a name.
 ```bash
 npm --prefix server test    # reservation, accounts, channels, chat, soundpad
 npm --prefix client test    # launches the app, drives it over CDP
+npm --prefix client run test:ui   # clicks through the channels view
 
 MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:e2e
 MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:channel-video

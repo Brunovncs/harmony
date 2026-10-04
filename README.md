@@ -553,10 +553,17 @@ client/
 ```bash
 npm --prefix server test          # reservation, accounts, channels, chat, soundpad
 npm --prefix client test          # launches the app, drives it over CDP
+npm --prefix client run test:ui   # clicks through the channels view
 
 MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:e2e
 MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:channel-video
 ```
+
+`test:ui` is the one that would have caught 2.0.0's mistake. It signs a real
+client in against a real server and uses the sidebar, the chat pane, the
+avatar button and the admin controls the way a person would -- because a
+route with a passing test and no control in front of it is not a feature, and
+every other suite here would have said it was.
 
 The e2e suite starts MediaMTX and the control server, then drives two Electron
 clients — one publishes its screen over WHIP, the other enters the same username
