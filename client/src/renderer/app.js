@@ -1544,15 +1544,26 @@ function applyVoiceButtons() {
   el.voiceWhere.textContent = channel ? channel.name : '';
 
   /*
-   * The top-right share button goes away while you are in a call.
+   * The top-right share button follows you into the call.
    *
-   * It publishes to the FLAT namespace -- the one an old client watches
-   * through the mosaic -- and the panel's button publishes into the channel.
-   * Having both reachable at once meant picking the wrong one shared your
-   * screen to a place the people you were talking to could not see, with no
-   * feedback that anything was wrong except that nobody said anything.
+   * It used to publish to the FLAT namespace -- the one an old client
+   * watches through the mosaic -- while the panel's button published into
+   * the channel. Two buttons, almost the same label, genuinely different
+   * destinations: pressing the wrong one put your screen somewhere the
+   * people you were talking to could not see it, and the only feedback was
+   * that nobody said anything.
+   *
+   * Hiding it while in a call was the first attempt and it was the wrong
+   * one. The button you reach for should work, not vanish. So in a channel
+   * it IS the channel's share button, and it says where it is going.
    */
-  el.channelsShare.hidden = Boolean(state.voice.channelId);
+  if (state.voice.channelId) {
+    el.channelsShare.textContent = sharing
+      ? 'Stop sharing'
+      : `Share to ${channel?.name ?? 'this channel'}`;
+  } else {
+    el.channelsShare.textContent = 'Share my screen';
+  }
 }
 
 /** Connected, or trying to be. Driven by the socket, never by guesswork. */
@@ -4587,10 +4598,14 @@ el.continue.addEventListener('click', startSession);
 harmony.realtime.onEvent(onRealtimeEvent);
 
 el.channelsShare.addEventListener('click', () => {
-  // Clear the channel target first. enterPicker() reads it to decide which
-  // WHIP URL the share publishes to, and it is left set after a channel
-  // share stops -- so the top-right button could re-enter the picker still
-  // pointed at a channel, which is most of why it behaved oddly.
+  // In a channel this is the channel's share button, exactly as the one in
+  // the panel is. Same function, so the two can never drift.
+  if (state.voice.channelId) return shareScreenHere();
+
+  // Outside one, clear the channel target first. enterPicker() reads it to
+  // decide which WHIP URL to publish to, and it is left set after a channel
+  // share stops -- so this button could re-enter the picker still pointed at
+  // a channel, which is most of why it behaved oddly.
   state.share.target = null;
   return enterPicker();
 });
