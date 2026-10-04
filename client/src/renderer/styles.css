@@ -552,6 +552,34 @@ select:focus {
      with the text instead of shouting over it. */
   font-variant-emoji: text;
 }
+/*
+ * A slash across the mic and the headphones, drawn rather than relying on a
+ * colour. "Not audible" and "not listening" are the two states somebody
+ * checks before they start talking, and a greyer emoji is not a reading
+ * anybody makes reliably at this size.
+ */
+.status-dot[data-kind='muted'],
+.status-dot[data-kind='forced'],
+.status-dot[data-kind='deaf'] {
+  position: relative;
+  opacity: 1;
+}
+.status-dot[data-kind='muted']::after,
+.status-dot[data-kind='forced']::after,
+.status-dot[data-kind='deaf']::after {
+  content: '';
+  position: absolute;
+  left: -5%;
+  right: -5%;
+  top: 50%;
+  border-top: 1.5px solid currentColor;
+  transform: rotate(-20deg);
+}
+.status-dot[data-kind='muted'],
+.status-dot[data-kind='deaf'] {
+  color: #d0d4dc;
+}
+/* Somebody else decided this one, which is a different kind of fact. */
 .status-dot[data-kind='forced'] {
   color: #ff8c8c;
   opacity: 1;
@@ -1374,6 +1402,25 @@ button.danger {
    not hide until there is something behind it. */
 .channel-tile[data-preview-off] .tile-corner {
   opacity: 1;
+}
+
+/* A closed channel tile. Same box, no picture, no connection. */
+.channel-tile.ghost-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  aspect-ratio: 16 / 9;
+  border: 1px dashed rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.03);
+  text-align: center;
+  padding: 0.5rem;
+  box-sizing: border-box;
+}
+.channel-tile.ghost-tile:hover {
+  border-color: var(--accent, #6ea8fe);
+  background: rgba(110, 168, 254, 0.1);
 }
 
 /* Your own tiles read as a preview, not as somebody else's camera. */

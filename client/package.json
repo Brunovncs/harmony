@@ -1,6 +1,6 @@
 {
   "name": "@harmony/client",
-  "version": "2.8.0",
+  "version": "2.9.0",
   "private": true,
   "description": "Harmony desktop client: share a screen or window, or watch someone else's",
   "main": "src/main/index.js",

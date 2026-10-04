@@ -5,7 +5,7 @@ import { runConnectionTest } from './connection-test.js';
 import { ClipBuffer, CLIP_SECONDS } from './clip-buffer.js';
 import { VoiceSession } from './voice.js';
 import {
-  createSink, MAX_GAIN, asPercent, playSample, setOutputDevice, monitorStream,
+  createSink, MAX_GAIN, asPercent, playSample, setOutputDevice, monitorStream, playCue,
 } from './gain.js';
 
 // ---------------------------------------------------------------------------
@@ -157,6 +157,7 @@ const el = {
   micMeter: $('mic-meter'),
   micMeterFill: $('mic-meter-fill'),
   micMeterMark: $('mic-meter-mark'),
+  voiceSounds: $('voice-sounds'),
   voiceCamera: $('voice-camera'),
   voiceCam: $('voice-cam'),
   voiceScreen: $('voice-screen'),
@@ -1441,6 +1442,9 @@ async function joinVoice(channel, password) {
     el.voiceIdle.hidden = true;
     el.voiceActive.hidden = false;
     applyVoiceConnection(true);
+    // A new channel is a new room: without this, arriving somewhere with
+    // five people in it plays five join sounds at once.
+    resetCues();
     applyStage();
 
     await state.voice.startMic(
@@ -1452,6 +1456,23 @@ async function joinVoice(channel, password) {
     await harmony.realtime.request('voice:publishing', {
       channelId: channel.id, kind: 'v', on: true,
     });
+
+    /*
+     * Carry mute and deafen into the new channel.
+     *
+     * Presence is per membership and a fresh one starts unmuted, so
+     * switching channels while muted left everybody in the new one seeing
+     * you as live -- waiting for an answer from somebody whose microphone
+     * was off. The local state was right the whole time, which is why it
+     * was invisible from this side.
+     */
+    if (state.voice.muted || state.voice.deafened) {
+      await harmony.realtime.request('voice:mute', {
+        channelId: channel.id,
+        muted: state.voice.muted,
+        deafened: state.voice.deafened,
+      }).catch(() => { /* the roster is cosmetic; the mic is already off */ });
+    }
 
     applyVoiceButtons();
     renderVoiceRoster(reply.roster ?? []);
@@ -1472,11 +1493,21 @@ async function joinVoice(channel, password) {
 
     addTimer(setInterval(renderSpeaking, SPEAKING_POLL_MS), 'voice');
 
-    // The ping on the signal icon. Started with a reading rather than one
-    // poll interval of blankness, though ICE will not have a round trip
-    // this early -- renderPing says "Measuring..." rather than nothing, so
-    // hovering in the first few seconds answers the question it was asked.
-    addTimer(setInterval(() => { renderPing(); }, PING_POLL_MS), 'voice');
+    /*
+     * The ping is NOT on a per-join timer any more.
+     *
+     * It was, in the 'voice' group, which is cleared on leave and rebuilt
+     * on join -- and switching channels does both in one go, which left it
+     * stuck showing the previous channel's number. Rather than work out
+     * which of the two transitions dropped it, the timer now lives for the
+     * life of the app and asks whether there is a call rather than being
+     * told; see startPingLoop. A transition cannot lose a timer that is
+     * never torn down.
+     *
+     * Reset here so the last channel's figure is not shown as this one's
+     * for the first few seconds.
+     */
+    clearPing();
     renderPing();
 
     // Renew the media tokens at half their life, so a missed tick still
@@ -1580,6 +1611,7 @@ async function leaveVoice({ silent = false } = {}) {
     await harmony.realtime.request('voice:leave', { channelId }).catch(() => {});
   }
   state.channels.roster = [];
+  resetCues();
   closePeerMenu();
   el.voiceActive.hidden = true;
   el.voiceIdle.hidden = state.chat.channelId !== null;
@@ -1645,9 +1677,20 @@ const PING_POLL_MS = 4000;
 const PING_OK_MS = 60;
 const PING_BAD_MS = 150;
 
+function clearPing() {
+  el.voiceSignal.dataset.ping = 'Measuring\u2026';
+  el.voiceSignal.removeAttribute('data-quality');
+}
+
 async function renderPing() {
-  if (!state.voice.channelId) return;
+  if (!state.voice.channelId) {
+    clearPing();
+    return;
+  }
   const ms = await state.voice.rtt();
+  // The channel can have changed while getStats was in flight; writing the
+  // old connection's number onto the new one would be worse than nothing.
+  if (!state.voice.channelId) return;
   if (ms === null) {
     el.voiceSignal.dataset.ping = 'Measuring\u2026';
     el.voiceSignal.dataset.quality = 'ok';
@@ -1676,14 +1719,21 @@ function applyVoiceConnection(up) {
  * disagree about what a person is doing -- which they would within a week if
  * each built its own.
  *
- * Muted and admin-muted are deliberately the SAME glyph in different colours
- * rather than two different symbols: they mean the same thing to a listener
- * (this person is not audible), and the difference is who decided, which is
- * what the colour and the tooltip carry.
+ * A MICROPHONE and a PAIR OF HEADPHONES, not two shades of the same symbol.
+ * They are different facts and the difference matters before you speak:
+ * muted means nobody can hear you, deafened means you cannot hear anybody.
+ * Both wear a slash drawn in CSS, so the state reads without relying on
+ * colour alone.
+ *
+ * Muted and admin-muted stay the same glyph in different colours, because
+ * those two DO mean the same thing to a listener -- this person is not
+ * audible -- and the difference is only who decided, which the colour and
+ * the tooltip carry.
  */
 const STATUS = [
-  { key: 'forced', glyph: '\u{1F507}', title: 'muted by an admin' },
-  { key: 'muted', glyph: '\u{1F507}', title: 'muted themselves' },
+  { key: 'forced', glyph: '\u{1F3A4}', title: 'muted by an admin' },
+  { key: 'muted', glyph: '\u{1F3A4}', title: 'muted themselves' },
+  { key: 'deaf', glyph: '\u{1F3A7}', title: 'deafened -- cannot hear anybody' },
   { key: 'cam', glyph: '\u{1F4F7}', title: 'camera on' },
   { key: 'screen', glyph: '\u{1F5A5}', title: 'sharing a screen' },
 ];
@@ -1692,6 +1742,9 @@ function statusKeys(member) {
   const keys = [];
   if (member.forceMuted) keys.push('forced');
   else if (member.muted) keys.push('muted');
+  // Alongside the mic, not instead of it. Deafening implies muting, and
+  // showing only the headphones would hide that they are also silent.
+  if (member.deafened) keys.push('deaf');
   if (member.publishing?.includes('c')) keys.push('cam');
   if (member.publishing?.includes('s')) keys.push('screen');
   return keys;
@@ -1975,7 +2028,55 @@ function openPeerMenu(channelId, mid, event) {
   el.peerMenu.style.top = `${Math.max(8, y)}px`;
 }
 
+/*
+ * The little noises.
+ *
+ * Driven by diffing the roster rather than by a server event, because the
+ * roster is already the single source of truth for who is in the channel
+ * and a parallel set of join/leave events would be a second one that could
+ * disagree with it. Everything that changes presence -- joining, leaving,
+ * being moved by an admin, a socket dying -- shows up here for free.
+ *
+ * `lastCueRoster` is null until the first roster for a channel has been
+ * seen, so arriving in a room of six people plays nothing. Only CHANGES
+ * from a state you have already been shown are worth a sound.
+ */
+let lastCueRoster = null;
+
+function resetCues() {
+  lastCueRoster = null;
+}
+
+function playRosterCues(roster) {
+  if (state.settings?.voiceSounds === false) return;
+  const now = new Map(roster.map((m) => [m.userId, m]));
+
+  if (lastCueRoster === null) {
+    lastCueRoster = now;
+    return;
+  }
+
+  for (const userId of now.keys()) {
+    if (!lastCueRoster.has(userId)) playCue('join');
+  }
+  for (const userId of lastCueRoster.keys()) {
+    if (!now.has(userId)) playCue('leave');
+  }
+  // Going live, which is the one people most want to be told about, and
+  // the only one that can fire for somebody who was already here.
+  for (const [userId, member] of now) {
+    const before = lastCueRoster.get(userId);
+    if (!before) continue;
+    const wasSharing = (before.publishing ?? []).includes('s');
+    const isSharing = (member.publishing ?? []).includes('s');
+    if (isSharing && !wasSharing) playCue('live');
+  }
+
+  lastCueRoster = now;
+}
+
 function renderVoiceRoster(roster) {
+  playRosterCues(roster);
   state.channels.roster = roster;
   el.voiceCount.textContent = `${roster.length} ${roster.length === 1 ? 'person' : 'people'}`;
 
@@ -2600,6 +2701,30 @@ function renderChannelVideo() {
     hideBtn.innerHTML = '&#8211;';
     hideBtn.title = 'Minimize to a strip';
 
+    /*
+     * Close, which is not the same thing as minimize.
+     *
+     * Minimize shrinks the tile and keeps paying for it -- the decoder, the
+     * downstream bandwidth, the relay's egress. Close hangs the
+     * subscription up, which is what you want when somebody is sharing a
+     * game you are not watching, and leaves a square behind so you can pick
+     * it back up without hunting for them in a list.
+     */
+    let closeBtn = null;
+    if (!own) {
+      closeBtn = document.createElement('button');
+      closeBtn.className = 'tile-btn';
+      closeBtn.type = 'button';
+      closeBtn.dataset.role = 'close';
+      closeBtn.innerHTML = '&#10005;';
+      closeBtn.title = 'Stop watching this, and stop downloading it';
+      closeBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        state.voice.closeVideo(key);
+        renderChannelVideo();
+      });
+    }
+
     const maximize = () => {
       const wasBig = figure.hasAttribute('data-big');
       for (const node of el.channelVideo.children) node.removeAttribute('data-big');
@@ -2619,6 +2744,7 @@ function renderChannelVideo() {
     });
 
     controls.append(bigBtn, fsBtn, hideBtn);
+    if (closeBtn) controls.append(closeBtn);
     label.append(controls);
 
     // The whole tile is still a maximize target: it is what people reach
@@ -2628,6 +2754,39 @@ function renderChannelVideo() {
     figure.append(video, label);
     return figure;
   }));
+
+  /*
+   * A square for every tile that is closed but still being published.
+   *
+   * Appended after the live tiles rather than kept in position, because the
+   * grid reflows anyway and a square that holds an exact slot would need
+   * the whole list to be ordered by something stabler than "who joined
+   * first". Keeping them together at the end is honest about what they are.
+   */
+  for (const { key, mid, kind } of state.voice.closedTiles) {
+    const node = document.createElement('figure');
+    node.className = 'channel-tile ghost-tile';
+    node.dataset.key = `closed:${key}`;
+    node.title = 'Watch this again';
+
+    const name = document.createElement('span');
+    name.className = 'ghost-name';
+    name.textContent = `${nameOfMid(mid)} \u00B7 ${KIND_LABEL[kind] ?? kind}`;
+
+    const hint = document.createElement('span');
+    hint.className = 'ghost-hint';
+    hint.textContent = 'Closed \u00B7 click to watch again';
+
+    node.append(name, hint);
+    node.addEventListener('click', () => {
+      state.voice.reopenVideo(key);
+      renderChannelVideo();
+      state.voice.syncVideo()
+        .then((r) => { if (r.changed) renderChannelVideo(); })
+        .catch(() => { /* the reconciliation tick comes back */ });
+    });
+    el.channelVideo.append(node);
+  }
 
   // After the children exist, not before: applyStage counts them to decide
   // whether there is a stage at all.
@@ -4424,6 +4583,9 @@ function deviceForVoiceInput() {
 const VOICE_RECONCILE_MS = 4000;
 const SPEAKING_POLL_MS = 100;
 
+// One timer, started once, never cleared. See the comment in joinVoice.
+setInterval(() => { renderPing(); }, PING_POLL_MS);
+
 async function syncMosaic({ streams: pushed } = {}) {
   let streams = pushed;
   let iceServers;
@@ -5088,7 +5250,9 @@ el.voiceMute.addEventListener('click', async () => {
   const muted = state.voice.setMuted(!state.voice.muted);
   applyVoiceButtons();
   await harmony.realtime
-    .request('voice:mute', { channelId: state.voice.channelId, muted })
+    .request('voice:mute', {
+      channelId: state.voice.channelId, muted, deafened: state.voice.deafened,
+    })
     .catch(() => { /* local mute still applies */ });
 });
 
@@ -5097,12 +5261,14 @@ el.voiceDeafen.addEventListener('click', () => {
   // never what anyone means by it, and it is how people end up broadcasting a
   // conversation they think is private.
   state.voice.setDeafened(!state.voice.deafened);
-  if (state.voice.deafened && !state.voice.muted) {
-    state.voice.setMuted(true);
-    harmony.realtime
-      .request('voice:mute', { channelId: state.voice.channelId, muted: true })
-      .catch(() => {});
-  }
+  if (state.voice.deafened && !state.voice.muted) state.voice.setMuted(true);
+  harmony.realtime
+    .request('voice:mute', {
+      channelId: state.voice.channelId,
+      muted: state.voice.muted,
+      deafened: state.voice.deafened,
+    })
+    .catch(() => { /* local state still applies */ });
   applyVoiceButtons();
 });
 
@@ -5234,8 +5400,17 @@ el.soundpadMute.addEventListener('click', async () => {
  * can have appeared while the app was in the background and this is the
  * exact moment somebody wants to see it.
  */
+el.voiceSounds.addEventListener('change', async () => {
+  await harmony.settings.set({ voiceSounds: el.voiceSounds.checked });
+  state.settings = await harmony.settings.get();
+  // A preview of what you just turned on, so the switch has an effect you
+  // can hear rather than one you have to wait for somebody else to cause.
+  if (el.voiceSounds.checked) playCue('join');
+});
+
 el.voiceConfig.addEventListener('click', () => {
   el.devicesDialog.showModal();
+  el.voiceSounds.checked = state.settings?.voiceSounds !== false;
   applyMicTuning();
   startMicMeter();
   refreshVoiceDevices().catch((err) => deviceNote(err.message));

@@ -249,7 +249,7 @@ export class Realtime {
 
   #voiceMute(user, msg) {
     const channelId = Number(msg.channelId);
-    if (!this.#deps.voice.setMuted(channelId, user.id, msg.muted)) {
+    if (!this.#deps.voice.setMuted(channelId, user.id, msg.muted, msg.deafened)) {
       return { type: 'voice:error', error: 'not_in_channel' };
     }
     this.#broadcastRoster(channelId);

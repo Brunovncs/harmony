@@ -75,6 +75,16 @@ export class VoiceSession {
   #openingVideo = new Set();
 
   /** @type {{pc: RTCPeerConnection, resourceUrl: string|null}|null} */
+  /*
+   * Tiles the user has closed, by key.
+   *
+   * syncVideo is driven by the roster, so without this a closed tile is
+   * reopened by the very next roster push -- which is every time anybody
+   * mutes. The key is remembered rather than the subscription kept, because
+   * the whole point of closing one is to stop paying for its decoder and
+   * its downstream bandwidth.
+   */
+  #closedVideo = new Set();
   #micChain = null;
   #cam = null;
   #camStream = null;
@@ -766,6 +776,33 @@ export class VoiceSession {
     return this.#cam ? this.#camStream : null;
   }
 
+  /**
+   * Stop watching one tile, keeping the fact that it exists.
+   *
+   * The subscription really is torn down. `closedTiles` then reports it so
+   * the UI can leave a square in its place, which is what makes this
+   * different from the stream simply ending.
+   */
+  closeVideo(key) {
+    this.#closedVideo.add(key);
+    this.unsubscribeVideo(key);
+  }
+
+  /** Watch it again. The next syncVideo opens it. */
+  reopenVideo(key) {
+    this.#closedVideo.delete(key);
+  }
+
+  /** Closed tiles whose owner is still publishing, for the empty squares. */
+  get closedTiles() {
+    const out = [];
+    for (const key of this.#closedVideo) {
+      const [mid, kind] = key.split(':');
+      out.push({ key, mid: Number(mid), kind });
+    }
+    return out.sort((a, b) => a.mid - b.mid || a.kind.localeCompare(b.kind));
+  }
+
   /** Tiles to draw, in a stable order so the grid does not reshuffle itself. */
   get videoTiles() {
     return [...this.#video.entries()]
@@ -819,8 +856,16 @@ export class VoiceSession {
       if (!wanted.has(key)) this.unsubscribeVideo(key);
     }
 
+    // A closed tile whose stream has ended stops being closed: the square
+    // goes away with the stream, and if they ever share again it opens
+    // normally rather than staying invisibly suppressed.
+    for (const key of [...this.#closedVideo]) {
+      if (!wanted.has(key)) this.#closedVideo.delete(key);
+    }
+
     let changed = false;
     for (const [key, { mid, kind }] of wanted) {
+      if (this.#closedVideo.has(key)) continue;
       if (this.#video.has(key) || this.#openingVideo.has(key)) continue;
       this.#openingVideo.add(key);
       try {
@@ -957,6 +1002,7 @@ export class VoiceSession {
     await this.stopMic();
     this.#micChain?.close();
     this.#micChain = null;
+    this.#closedVideo.clear();
     await this.stopCam();
     for (const mid of [...this.#subs.keys()]) await this.unsubscribe(mid);
     for (const key of [...this.#video.keys()]) this.unsubscribeVideo(key);

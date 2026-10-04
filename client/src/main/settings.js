@@ -63,6 +63,9 @@ const DEFAULTS = {
    */
   micGain: 100,
   micSensitivity: 0,
+  // The join / leave / went-live tones. On, because the whole point of
+  // them is to tell you about something you were not looking at.
+  voiceSounds: true,
   /*
    * How loudly soundpad clips play, as a percentage.
    *

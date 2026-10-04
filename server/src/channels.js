@@ -324,6 +324,16 @@ export class VoiceRooms {
       userId: user.id,
       nickname: user.nickname,
       muted: false,
+      /*
+       * Deafened is DIFFERENT from muted and worth its own flag.
+       *
+       * Muted means nobody can hear you; deafened means you cannot hear
+       * anybody, which is the one people actually need to know before they
+       * start talking to you. Folding it into `muted` -- which deafening
+       * implies -- would show a mic icon for somebody who simply is not
+       * listening, and there is no way to tell those apart afterwards.
+       */
+      deafened: false,
       forceMuted: false,
       publishing: new Set(),
     };
@@ -376,6 +386,7 @@ export class VoiceRooms {
         userId: m.userId,
         nickname: m.nickname,
         muted: m.muted,
+        deafened: m.deafened,
         forceMuted: m.forceMuted,
         publishing: [...m.publishing],
       }))
@@ -407,10 +418,18 @@ export class VoiceRooms {
     return out;
   }
 
-  setMuted(channelId, userId, muted) {
+  /**
+   * Mute, deafen, or both.
+   *
+   * `deafened` is optional and only written when it is actually sent, so an
+   * older client that knows nothing about it does not silently un-deafen
+   * somebody every time they toggle their microphone.
+   */
+  setMuted(channelId, userId, muted, deafened) {
     const found = this.find(channelId, userId);
     if (!found) return false;
     found.member.muted = Boolean(muted);
+    if (deafened !== undefined) found.member.deafened = Boolean(deafened);
     return true;
   }
 

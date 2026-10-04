@@ -226,6 +226,71 @@ export function createMicChain(stream, { gain = 1, threshold = 0 } = {}) {
 }
 
 /**
+ * The little noises: somebody arrived, somebody left, somebody went live.
+ *
+ * SYNTHESISED, not played from files. Three reasons, in order: there is
+ * nothing to ship, cache or 404 on; the renderer's CSP allows no remote
+ * media and a bundled file would still have to come through the harmony://
+ * protocol for no benefit; and a pair of sine tones is both smaller and
+ * easier to make unobtrusive than any recording would be.
+ *
+ * Sine waves with a soft attack and a long decay, because a square wave or
+ * a hard edge is a click, and a click in your ear every time somebody joins
+ * is the fastest way to make people turn these off.
+ *
+ * Rising means arriving and falling means leaving. That mapping is not
+ * arbitrary -- it is the one every other application of this kind uses, so
+ * it is already learned.
+ */
+const CUES = {
+  // D5 -> A5, up a fifth.
+  join: [[587.33, 0], [880.0, 0.09]],
+  // A5 -> D5, the same interval downwards.
+  leave: [[880.0, 0], [587.33, 0.09]],
+  // One note, higher and shorter: it fires while people are talking and
+  // should read as a notification rather than as an arrival.
+  live: [[1046.5, 0]],
+};
+
+const CUE_GAIN = 0.07;
+const CUE_LENGTH = 0.22;
+
+export function playCue(name, volume = 1) {
+  const notes = CUES[name];
+  if (!notes) return;
+  const ctx = context();
+  const level = Math.max(0, Math.min(1, volume)) * CUE_GAIN;
+  if (level <= 0) return;
+
+  for (const [frequency, delay] of notes) {
+    const start = ctx.currentTime + delay;
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = frequency;
+
+    const envelope = ctx.createGain();
+    // Ramps rather than steps. setValueAtTime alone produces a
+    // discontinuity, and a discontinuity in a waveform is a click.
+    envelope.gain.setValueAtTime(0.0001, start);
+    envelope.gain.exponentialRampToValueAtTime(level, start + 0.015);
+    envelope.gain.exponentialRampToValueAtTime(0.0001, start + CUE_LENGTH);
+
+    osc.connect(envelope);
+    envelope.connect(ctx.destination);
+    osc.start(start);
+    osc.stop(start + CUE_LENGTH + 0.02);
+    // Oscillators are one-shot; without this the graph grows for the life
+    // of the context, one dead node per join.
+    osc.addEventListener('ended', () => {
+      try {
+        osc.disconnect();
+        envelope.disconnect();
+      } catch { /* already gone */ }
+    });
+  }
+}
+
+/**
  * Hear your own screen share.
  *
  * Into the PLAYBACK context, the same one every incoming stream goes to, so
