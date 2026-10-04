@@ -742,12 +742,18 @@ async function run() {
         + `bob is ${whyNot.myMute}/${whyNot.myDeafen}`,
   );
 
-  const ringStyle = await a.evaluate(`
-    const li = [...document.querySelectorAll('#voice-roster li')]
-      .find((x) => x.hasAttribute('data-speaking'));
-    if (!li) return null;
-    return { shadow: getComputedStyle(li.querySelector('.avatar')).boxShadow };
-  `);
+  // Sampled with a wait, not once: the ring is supposed to blink, so
+  // reading it at one arbitrary instant is a coin toss.
+  const ringStyle = await waitFor(a, `
+    (() => {
+      const li = [...document.querySelectorAll('#voice-roster li')]
+        .find((x) => x.hasAttribute('data-speaking'));
+      if (!li) return null;
+      const shadow = getComputedStyle(li.querySelector('.avatar')).boxShadow;
+      return shadow.includes('63, 199, 122') ? { shadow } : null;
+    })()
+  `.replace(/\s+/g, ' '), { label: 'the ring being green', timeoutMs: 15_000 })
+    .catch(() => null);
   check(
     'the ring is green, and a shadow rather than a border so nothing shifts',
     typeof ringStyle?.shadow === 'string' && ringStyle.shadow.includes('63, 199, 122'),
@@ -912,6 +918,47 @@ async function run() {
     ownTile.caption ?? '(none)',
   );
 
+  // --- the controls on a channel tile -----------------------------------
+  //
+  // Sharing into a voice channel puts the mosaic on the same screen as the
+  // chat and the roster, so the tiles need the same handles the standalone
+  // mosaic has: make it big, make it small, make it fullscreen.
+  await waitFor(a, "document.querySelectorAll('#channel-video .channel-tile').length > 0", {
+    label: 'a tile to inspect', timeoutMs: 30_000,
+  }).catch(() => false);
+  const tileControls = await a.evaluate(`
+    const tile = document.querySelector('#channel-video .channel-tile');
+    if (!tile) return null;
+    return {
+      roles: [...tile.querySelectorAll('.tile-btn')].map((b) => b.dataset.role),
+      hasName: Boolean(tile.querySelector('.tile-name')),
+    };
+  `);
+  check(
+    'a channel tile carries maximize, fullscreen and minimize',
+    tileControls
+      && ['maximize', 'fullscreen', 'minimize'].every((r) => tileControls.roles.includes(r)),
+    tileControls ? tileControls.roles.join(', ') : 'no tiles to check',
+  );
+
+  const sized = tileControls ? await a.evaluate(`
+    const tile = document.querySelector('#channel-video .channel-tile');
+    const big = tile.querySelector('[data-role="maximize"]');
+    big.click();
+    const maximized = tile.hasAttribute('data-big');
+    big.click();
+    const restored = !tile.hasAttribute('data-big');
+    tile.querySelector('[data-role="minimize"]').click();
+    const minimized = tile.hasAttribute('data-small');
+    tile.querySelector('[data-role="minimize"]').click();
+    return { maximized, restored, minimized };
+  `) : { maximized: false, restored: false, minimized: false };
+  check(
+    'maximize and minimize both work, and both undo',
+    sized.maximized && sized.restored && sized.minimized,
+    JSON.stringify(sized),
+  );
+
   // --- force-mute -------------------------------------------------------
   //
   // The victim's peer connection stays `connected` for about nine seconds
@@ -963,6 +1010,34 @@ async function run() {
     'the button offers to undo it',
     toggled.includes('Unmute'),
     toggled.join(', '),
+  );
+
+  /*
+   * And the offer has to be real.
+   *
+   * It was not: the handler read `!member.forceMuted` off the object the
+   * row was built from, which is frozen at the moment the row first
+   * appeared -- when nobody was muted. So the button sent another MUTE
+   * every time and a force-mute could never be lifted. The label flipped
+   * correctly, which made it look as though the button did nothing at all.
+   */
+  await a.evaluate(`
+    const row = [...document.querySelectorAll('#voice-roster li')]
+      .find((li) => li.textContent.includes('bob'));
+    [...row.querySelectorAll('button')].find((x) => x.textContent === 'Unmute').click();
+    return true;
+  `);
+  const lifted = await waitFor(
+    b,
+    "(() => { const li = [...document.querySelectorAll('#voice-roster li')]"
+    + ".find((x) => x.querySelector('.member-name').textContent.startsWith('bob'));"
+    + " return Boolean(li) && !li.querySelector('.status-dot[data-kind=\"forced\"]'); })()",
+    { label: 'the force-mute being lifted' },
+  ).catch(() => false);
+  check(
+    'and a force-mute can actually be lifted again',
+    Boolean(lifted),
+    lifted ? 'the admin mute cleared on the muted person' : 'stuck muted',
   );
 
   // --- moving somebody out ----------------------------------------------

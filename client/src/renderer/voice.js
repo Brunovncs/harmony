@@ -595,9 +595,30 @@ export class VoiceSession {
 
   /** Tiles to draw, in a stable order so the grid does not reshuffle itself. */
   get videoTiles() {
-    return [...this.#video.values()]
-      .map(({ mid, kind, stream }) => ({ mid, kind, stream }))
+    return [...this.#video.entries()]
+      .map(([key, { mid, kind, stream, sink }]) => ({
+        key, mid, kind, stream, gain: sink?.value ?? 1,
+      }))
       .sort((a, b) => a.mid - b.mid || a.kind.localeCompare(b.kind));
+  }
+
+  /**
+   * How loudly one screen share is played, 0..MAX_GAIN.
+   *
+   * Per tile rather than per person: somebody's game audio and their voice
+   * are different things to want at different volumes, and turning a noisy
+   * share down should not also turn them down when they talk.
+   */
+  setTileGain(key, gain) {
+    const sub = this.#video.get(key);
+    if (!sub?.sink) return 0;
+    const value = Math.max(0, Math.min(MAX_GAIN, Number(gain) || 0));
+    sub.sink.set(this.deafened ? 0 : value);
+    return value;
+  }
+
+  tileGain(key) {
+    return this.#video.get(key)?.sink?.value ?? 1;
   }
 
   /**

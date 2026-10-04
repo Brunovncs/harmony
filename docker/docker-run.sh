@@ -21,7 +21,7 @@ USAGE
   exit 2
 fi
 
-IMAGE="${HARMONY_IMAGE:-pedrolucasmiguel/harmony-server:2.2.3}"
+IMAGE="${HARMONY_IMAGE:-pedrolucasmiguel/harmony-server:2.3.0}"
 NAME="${HARMONY_NAME:-harmony}"
 SIGNALING_URL="${HARMONY_SIGNALING_URL:-http://${PUBLIC_HOST}:8889}"
 

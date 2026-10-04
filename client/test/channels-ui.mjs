@@ -111,22 +111,38 @@ const setInput = (id, value) =>
   + `i.dispatchEvent(new Event('change', {bubbles:true}));`;
 
 /**
- * window.prompt and window.confirm block a renderer forever under CDP.
+ * Fill in the app's own dialog and press its button.
  *
- * The admin controls use them deliberately -- a friends' server does not need
- * a modal framework -- so the test answers them instead of avoiding the code
- * paths that use them, which are the paths being tested.
+ * NOTHING IS STUBBED, and that is the point. This test used to replace
+ * window.prompt before clicking, which meant it proved the code worked
+ * against a browser that has prompt() -- and Electron does not. Every
+ * feature behind a prompt (naming a channel, naming a clip, entering a
+ * channel password) was unreachable in the shipped app and the suite was
+ * perfectly green. Replacing a platform function in a test is how that
+ * happens.
+ *
+ * `param {Record<string, string>} values keyed by field name
  */
-const stubDialogs = (answers) => `
-  window.__asked = [];
-  window.prompt = (q) => {
-    window.__asked.push(q);
-    const next = ${JSON.stringify(answers)}[window.__asked.length - 1];
-    return next === undefined ? null : next;
-  };
-  window.confirm = (q) => { window.__asked.push(q); return true; };
-  return true;
-`;
+const answerDialog = (cdp, values = {}) => cdp.evaluate(`
+  const dialog = document.getElementById('ask');
+  if (!dialog.open) return { ok: false, reason: 'no dialog is open' };
+  const wanted = ${JSON.stringify(values)};
+  for (const [name, value] of Object.entries(wanted)) {
+    const input = dialog.querySelector(` + "`[name=\"${name}\"]`" + `);
+    if (!input) return { ok: false, reason: 'no field called ' + name };
+    input.value = value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  document.getElementById('ask-ok').click();
+  return { ok: true };
+`);
+
+/** Wait for the dialog to be showing. */
+const dialogOpen = (cdp) => waitFor(
+  cdp,
+  "document.getElementById('ask').open === true",
+  { label: 'the dialog opening' },
+);
 
 // ---------------------------------------------------------------------------
 
@@ -211,9 +227,23 @@ async function run() {
   );
 
   // --- creating a channel -----------------------------------------------
-  await cdp.evaluate(stubDialogs(['Game Night', '']));
   await cdp.evaluate("document.getElementById('channel-add').click(); return true;");
-  // confirm() answers true, which the handler reads as "voice".
+  await dialogOpen(cdp);
+
+  const dialogShape = await cdp.evaluate(`
+    const dialog = document.getElementById('ask');
+    return {
+      title: document.getElementById('ask-title').textContent,
+      fields: [...dialog.querySelectorAll('[name]')].map((i) => i.name),
+    };
+  `);
+  check(
+    'asking for a new channel opens the app\u0027s own dialog, not a prompt',
+    dialogShape.fields.join(',') === 'name,kind,password',
+    `"${dialogShape.title}" with [${dialogShape.fields}]`,
+  );
+
+  await answerDialog(cdp, { name: 'Game Night', kind: 'voice', password: '' });
   await waitFor(cdp, "document.querySelectorAll('#channel-items li.channel-row').length === 3", {
     label: 'the new channel',
   });
@@ -375,12 +405,13 @@ async function run() {
   // --- deleting ---------------------------------------------------------
   //
   // The route existed and was tested in 2.0.0. Nothing called it.
-  await cdp.evaluate(stubDialogs([]));
   await cdp.evaluate(`
     const msg = document.querySelector('#chat-log .chat-msg');
     [...msg.querySelectorAll('button')].find((b) => b.textContent === 'Delete').click();
     return true;
   `);
+  await dialogOpen(cdp);
+  await answerDialog(cdp);
   await sleep(900);
   const afterDelete = await cdp.evaluate(`
     return {
@@ -396,6 +427,43 @@ async function run() {
   );
 
   // --- the soundpad -----------------------------------------------------
+  /*
+   * The first clip goes in THROUGH THE UI -- the file input and the naming
+   * dialog -- because that path used window.prompt and therefore threw the
+   * instant anybody tried it. Adding clips straight through the API, which
+   * is what this test did, exercised everything except the part that was
+   * broken.
+   */
+  await cdp.evaluate(`
+    const bytes = new TextEncoder().encode('OggS\u0000\u0002ui clip');
+    const file = new File([bytes], 'airhorn.ogg', { type: 'audio/ogg' });
+    const input = document.getElementById('soundpad-file');
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  `);
+  await dialogOpen(cdp);
+  const clipDialog = await cdp.evaluate(`
+    return {
+      title: document.getElementById('ask-title').textContent,
+      suggested: document.querySelector('#ask-fields [name="name"]')?.value ?? null,
+    };
+  `);
+  check(
+    'adding a soundpad clip asks for a name in the dialog, not a prompt',
+    clipDialog.suggested === 'airhorn',
+    `"${clipDialog.title}" suggesting "${clipDialog.suggested}"`,
+  );
+  await answerDialog(cdp, { name: 'airhorn' });
+  await waitFor(
+    cdp,
+    "document.querySelectorAll('#soundpad-grid .clip-cell').length === 1",
+    { label: 'the clip appearing' },
+  );
+  check('the named clip appears on the soundpad', true, 'added through the UI');
+
   const clips = await cdp.evaluate(`
     const { harmony } = await import('./bridge.js');
     const server = ${JSON.stringify(BASE)};
@@ -422,7 +490,7 @@ async function run() {
   `);
   check(
     'soundpad clips appear with their reorder arrows for an admin',
-    pad.shown === true && pad.cells === 2,
+    pad.shown === true && pad.cells === 3,
     `${pad.cells} clips: ${pad.names.join(', ')}${clips?.error ? ` (${clips.error})` : ''}`,
   );
 
@@ -439,7 +507,7 @@ async function run() {
   );
   check(
     'an admin can reorder the soundpad',
-    padOrder[0] === 'second',
+    padOrder[0] === 'first',
     padOrder.join(', '),
   );
 

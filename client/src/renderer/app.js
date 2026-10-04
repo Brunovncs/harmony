@@ -132,6 +132,14 @@ const el = {
   soundpadAdd: $('soundpad-add'),
   soundpadFile: $('soundpad-file'),
   soundpadGrid: $('soundpad-grid'),
+  ask: $('ask'),
+  askForm: $('ask-form'),
+  askTitle: $('ask-title'),
+  askText: $('ask-text'),
+  askFields: $('ask-fields'),
+  askError: $('ask-error'),
+  askCancel: $('ask-cancel'),
+  askOk: $('ask-ok'),
   channelVideo: $('channel-video'),
   voiceInput: $('voice-input'),
   voiceOutput: $('voice-output'),
@@ -866,6 +874,92 @@ function showChannelsError(message) {
 
 const isAdmin = () => state.auth.user?.role === 'owner' || state.auth.user?.role === 'admin';
 
+/* Asking the person something ------------------------------------------
+ *
+ * Electron does not implement window.prompt(). Not discouraged -- absent,
+ * and it throws. So every prompt() in this file was code that could never
+ * run, and the features behind them (naming a channel, naming a soundpad
+ * clip, entering a channel password, renaming) were all unreachable the
+ * moment anybody pressed the button.
+ *
+ * They survived every test because the UI suite STUBBED window.prompt
+ * before clicking. Replacing a platform function in a test is how you end
+ * up proving your code works against a platform you do not have. Nothing is
+ * stubbed now; the test drives this dialog.
+ *
+ * One dialog, reused: a title, some fields, OK and Cancel. It resolves with
+ * the values, or null if they backed out.
+ */
+
+/** @type {null | ((value: object | null) => void)} */
+let askResolve = null;
+
+function closeAsk(value) {
+  const resolve = askResolve;
+  askResolve = null;
+  try { el.ask.close(); } catch { /* already closed */ }
+  el.askFields.replaceChildren();
+  el.askError.hidden = true;
+  resolve?.(value);
+}
+
+/**
+ * @param {{title: string, text?: string, okLabel?: string,
+ *          fields?: Array<{name: string, label: string, type?: string,
+ *                          value?: string, placeholder?: string,
+ *                          options?: Array<{value: string, label: string}>,
+ *                          required?: boolean}>}} spec
+ * @returns {Promise<Record<string, string> | null>}
+ */
+function ask(spec) {
+  // A second question while one is open would orphan the first promise.
+  if (askResolve) closeAsk(null);
+
+  el.askTitle.textContent = spec.title;
+  el.askText.textContent = spec.text ?? '';
+  el.askText.hidden = !spec.text;
+  el.askOk.textContent = spec.okLabel ?? 'OK';
+
+  el.askFields.replaceChildren(...(spec.fields ?? []).map((field) => {
+    const label = document.createElement('label');
+    label.className = 'field';
+
+    const caption = document.createElement('span');
+    caption.textContent = field.label;
+    label.append(caption);
+
+    let input;
+    if (field.options) {
+      input = document.createElement('select');
+      input.append(...field.options.map((o) => new Option(o.label, o.value)));
+    } else {
+      input = document.createElement('input');
+      input.type = field.type ?? 'text';
+      input.placeholder = field.placeholder ?? '';
+      input.autocomplete = 'off';
+    }
+    input.name = field.name;
+    input.value = field.value ?? '';
+    if (field.required) input.required = true;
+    label.append(input);
+    return label;
+  }));
+
+  el.ask.showModal();
+  // Focus the first field: answering without reaching for the mouse is most
+  // of why a prompt was reached for in the first place.
+  el.askFields.querySelector('input, select')?.focus();
+
+  return new Promise((resolve) => {
+    askResolve = resolve;
+  });
+}
+
+/** Yes or no, in the same dialog, so nothing depends on window.confirm. */
+async function askConfirm(title, { text, okLabel = 'Delete' } = {}) {
+  return (await ask({ title, text, okLabel, fields: [] })) !== null;
+}
+
 /** Profile pictures ------------------------------------------------------ */
 
 /** Square side we store an avatar at, and the ceiling the server enforces. */
@@ -1039,16 +1133,20 @@ async function nudgeChannel(id, delta) {
 }
 
 async function editChannel(channel) {
-  const name = window.prompt(`Rename "${channel.name}" to:`, channel.name);
-  if (name === null) return;
-  const password = window.prompt(
-    'Password (empty removes it, Cancel leaves it alone):',
-    '',
-  );
+  const answer = await ask({
+    title: `Edit #${channel.name}`,
+    text: 'Leave the password empty to remove it.',
+    okLabel: 'Save',
+    fields: [
+      { name: 'name', label: 'Name', value: channel.name, required: true },
+      { name: 'password', label: 'Password', type: 'password', placeholder: 'No password' },
+    ],
+  });
+  if (!answer) return;
   try {
     await harmony.api.updateChannel(state.server, channel.id, {
-      ...(name.trim() ? { name } : {}),
-      ...(password === null ? {} : { password }),
+      name: answer.name,
+      password: answer.password,
     });
   } catch (err) {
     showChannelsError(err.message);
@@ -1113,7 +1211,9 @@ function renderChannels() {
         down,
         rowButton('\u270E', 'Rename or set a password', () => editChannel(channel)),
         rowButton('\u2715', 'Delete this channel', async () => {
-          if (!window.confirm(`Delete "${channel.name}" and everything in it?`)) return;
+          if (!await askConfirm(`Delete #${channel.name}?`, {
+            text: 'Everything written in it goes too. This cannot be undone.',
+          })) return;
           try {
             await harmony.api.deleteChannel(state.server, channel.id);
           } catch (err) {
@@ -1187,13 +1287,14 @@ async function joinVoice(channel, password) {
 
     if (reply.type !== 'voice:joined') {
       if (reply.error === 'password_required' || reply.error === 'bad_password') {
-        const typed = window.prompt(
-          reply.error === 'bad_password'
-            ? `Wrong password for ${channel.name}. Try again:`
-            : `${channel.name} needs a password:`,
-        );
         state.channels.joining = false;
-        if (typed) return joinVoice(channel, typed);
+        const answer = await ask({
+          title: `${channel.name} needs a password`,
+          text: reply.error === 'bad_password' ? 'That one was not right.' : '',
+          okLabel: 'Join',
+          fields: [{ name: 'password', label: 'Password', type: 'password', required: true }],
+        });
+        if (answer?.password) return joinVoice(channel, answer.password);
         return;
       }
       if (reply.error === 'channel_full') {
@@ -1546,10 +1647,23 @@ function renderVoiceRoster(roster) {
       mute.className = 'ghost small force-mute';
       mute.textContent = member.forceMuted ? 'Unmute' : 'Force mute';
       mute.addEventListener('click', () => {
+        /*
+         * Read the state off the CURRENT roster, not off the member object
+         * this row was built from.
+         *
+         * Rows are reused across pushes, so that object is frozen at the
+         * moment the row first appeared -- when nobody was force-muted. So
+         * `!member.forceMuted` was permanently true and the button could
+         * only ever mute: pressing it again sent another mute, and there
+         * was no way to undo one. The label updated correctly, which made
+         * it look like the button simply did nothing.
+         */
+        const mid = Number(li.dataset.mid);
+        const now = state.channels.roster.find((m) => m.mid === mid);
         harmony.realtime.request('admin:force-mute', {
           channelId: state.voice.channelId,
-          mid: member.mid,
-          muted: !member.forceMuted,
+          mid,
+          muted: !now?.forceMuted,
         }).catch((err) => showChannelsError(err.message));
       });
 
@@ -1575,7 +1689,11 @@ function renderVoiceRoster(roster) {
         move.value = '';
         if (!choice) return;
         harmony.realtime.request('admin:move', {
-          userId: member.userId,
+          // Off the row, for the same reason as the force-mute above.
+          // Read inline: voiceRow's owner() helper is a different function's
+          // local, and reaching for it here is a ReferenceError at click
+          // time that no syntax check can see.
+          userId: Number(li.dataset.userId),
           toChannelId: choice === 'none' ? null : Number(choice),
         }).catch((err) => showChannelsError(err.message));
       });
@@ -1803,13 +1921,14 @@ function renderChannelVideo() {
     [...el.channelVideo.children].map((node) => [node.dataset.key, node]),
   );
 
-  el.channelVideo.replaceChildren(...tiles.map(({ mid, kind, stream, own }) => {
-    const key = `${own ? 'me' : mid}:${kind}`;
+  el.channelVideo.replaceChildren(...tiles.map((tile) => {
+    const { mid, kind, stream, own } = tile;
+    const key = own ? `me:${kind}` : tile.key;
     const caption = `${own ? 'you' : nameOfMid(mid)} \u00B7 ${KIND_LABEL[kind] ?? kind}`;
 
     const kept = existing.get(key);
     if (kept) {
-      kept.querySelector('figcaption').textContent = caption;
+      kept.querySelector('figcaption .tile-name').textContent = caption;
       return kept;
     }
 
@@ -1828,15 +1947,102 @@ function renderChannelVideo() {
     video.srcObject = stream;
 
     const label = document.createElement('figcaption');
-    label.textContent = caption;
+    const name = document.createElement('span');
+    name.className = 'tile-name';
+    name.textContent = caption;
+    label.append(name);
 
-    // Click to blow one tile up, click again to put it back. Cheaper than a
-    // layout engine and it is what people reach for.
-    figure.addEventListener('click', () => {
+    /*
+     * The same controls the flat mosaic has, because this IS a mosaic --
+     * it just happens to be the channel's rather than the server's, and
+     * somebody sharing a screen into a voice channel wants to make it big
+     * and turn the game audio down exactly as they would anywhere else.
+     */
+    const controls = document.createElement('span');
+    controls.className = 'tile-controls';
+
+    // Volume only where there is something to turn down: a camera has no
+    // audio, and your own tiles are local, never played back.
+    if (!own && kind === 's') {
+      const muteBtn = document.createElement('button');
+      muteBtn.className = 'tile-btn';
+      muteBtn.type = 'button';
+      muteBtn.dataset.role = 'mute';
+      muteBtn.innerHTML = '&#128266;';
+      muteBtn.title = 'Mute this share';
+
+      const volume = document.createElement('input');
+      volume.type = 'range';
+      volume.className = 'tile-volume';
+      volume.min = '0';
+      volume.max = String(asPercent(MAX_GAIN));
+      volume.value = String(asPercent(tile.gain ?? 1));
+      volume.title = 'Volume for this share';
+
+      const apply = (percent) => {
+        state.voice.setTileGain(key, percent / 100);
+        volume.toggleAttribute('data-boosted', percent > 100);
+        muteBtn.innerHTML = percent === 0 ? '&#128263;' : '&#128266;';
+      };
+      volume.addEventListener('input', (event) => {
+        event.stopPropagation();
+        apply(Number(volume.value));
+      });
+      muteBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        const next = Number(volume.value) === 0 ? 100 : 0;
+        volume.value = String(next);
+        apply(next);
+      });
+
+      controls.append(muteBtn, volume);
+    }
+
+    const bigBtn = document.createElement('button');
+    bigBtn.className = 'tile-btn';
+    bigBtn.type = 'button';
+    bigBtn.dataset.role = 'maximize';
+    bigBtn.innerHTML = '&#10530;';
+    bigBtn.title = 'Maximize, without leaving the channel';
+
+    const fsBtn = document.createElement('button');
+    fsBtn.className = 'tile-btn';
+    fsBtn.type = 'button';
+    fsBtn.dataset.role = 'fullscreen';
+    fsBtn.innerHTML = '&#9974;';
+    fsBtn.title = 'Fullscreen';
+
+    const hideBtn = document.createElement('button');
+    hideBtn.className = 'tile-btn';
+    hideBtn.type = 'button';
+    hideBtn.dataset.role = 'minimize';
+    hideBtn.innerHTML = '&#8211;';
+    hideBtn.title = 'Minimize to a strip';
+
+    const maximize = () => {
       const wasBig = figure.hasAttribute('data-big');
       for (const node of el.channelVideo.children) node.removeAttribute('data-big');
       if (!wasBig) figure.setAttribute('data-big', '');
+      bigBtn.title = wasBig ? 'Maximize, without leaving the channel' : 'Back to the grid';
+    };
+
+    bigBtn.addEventListener('click', (event) => { event.stopPropagation(); maximize(); });
+    fsBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      toggleFullscreen(figure);
     });
+    hideBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      figure.toggleAttribute('data-small');
+      figure.removeAttribute('data-big');
+    });
+
+    controls.append(bigBtn, fsBtn, hideBtn);
+    label.append(controls);
+
+    // The whole tile is still a maximize target: it is what people reach
+    // for before they find the button.
+    figure.addEventListener('click', maximize);
 
     figure.append(video, label);
     return figure;
@@ -1952,7 +2158,7 @@ function messageRow(message) {
     remove.className = 'ghost small danger';
     remove.textContent = 'Delete';
     remove.addEventListener('click', async () => {
-      if (!window.confirm('Delete this message?')) return;
+      if (!await askConfirm('Delete this message?')) return;
       try {
         await harmony.api.deleteMessage(state.server, message.id);
         // The server pushes message:deleted to everyone, including us.
@@ -2091,7 +2297,7 @@ function renderSoundpad() {
 
     button.addEventListener('contextmenu', async (event) => {
       event.preventDefault();
-      if (!window.confirm(`Delete the clip "${clip.name}"?`)) return;
+      if (!await askConfirm(`Delete the clip "${clip.name}"?`)) return;
       try {
         await harmony.api.deleteClip(state.server, clip.id);
       } catch (err) {
@@ -2148,9 +2354,18 @@ async function addSoundpadClip(file) {
     }
     const bytes = new Uint8Array(await file.arrayBuffer());
     const upload = await harmony.media.upload(state.server, bytes, file.type);
-    const name = window.prompt('Name for this clip:', file.name.replace(/\.[^.]+$/, ''));
-    if (!name) return;
-    await harmony.api.addClip(state.server, { name, hash: upload.hash });
+    const answer = await ask({
+      title: 'Name this clip',
+      okLabel: 'Add',
+      fields: [{
+        name: 'name',
+        label: 'Name',
+        value: file.name.replace(/\.[^.]+$/, '').slice(0, 32),
+        required: true,
+      }],
+    });
+    if (!answer?.name) return;
+    await harmony.api.addClip(state.server, { name: answer.name, hash: upload.hash });
   } catch (err) {
     showChannelsError(err.message);
   }
@@ -4172,6 +4387,29 @@ el.voiceDeafen.addEventListener('click', () => {
 
 el.voiceLeave.addEventListener('click', () => leaveVoice());
 
+el.askForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const missing = [...el.askFields.querySelectorAll('[required]')]
+    .find((input) => !input.value.trim());
+  if (missing) {
+    el.askError.textContent = 'That one cannot be empty.';
+    el.askError.hidden = false;
+    missing.focus();
+    return;
+  }
+  const values = {};
+  for (const input of el.askFields.querySelectorAll('input, select')) {
+    values[input.name] = input.value;
+  }
+  closeAsk(values);
+});
+el.askCancel.addEventListener('click', () => closeAsk(null));
+// Esc closes a <dialog> without submitting, and the promise must still settle.
+el.ask.addEventListener('cancel', (event) => {
+  event.preventDefault();
+  closeAsk(null);
+});
+
 el.avatarButton.addEventListener('click', () => el.avatarFile.click());
 el.avatarFile.addEventListener('change', () => {
   const file = el.avatarFile.files?.[0];
@@ -4237,10 +4475,24 @@ el.chatSearchClear.addEventListener('click', () => {
 });
 
 el.channelAdd.addEventListener('click', async () => {
-  const name = window.prompt('Name for the new channel:');
-  if (!name) return;
-  const kind = window.confirm('OK for a voice channel, Cancel for text.') ? 'voice' : 'text';
-  const password = window.prompt('Password (leave empty for an open channel):') || undefined;
+  // One dialog with three fields, rather than three questions in a row and
+  // a confirm box asking somebody to remember that "OK means voice".
+  const answer = await ask({
+    title: 'New channel',
+    okLabel: 'Create',
+    fields: [
+      { name: 'name', label: 'Name', placeholder: 'Game Night', required: true },
+      {
+        name: 'kind',
+        label: 'Kind',
+        options: [{ value: 'voice', label: 'Voice' }, { value: 'text', label: 'Text' }],
+      },
+      { name: 'password', label: 'Password', type: 'password', placeholder: 'Open to everyone' },
+    ],
+  });
+  if (!answer?.name) return;
+  const { name, kind } = answer;
+  const password = answer.password || undefined;
   try {
     await harmony.api.createChannel(state.server, { kind, name, password });
     // The server broadcasts the new list to everyone, including us.

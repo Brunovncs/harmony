@@ -753,9 +753,61 @@ button.danger {
   padding: 0.15rem 0.4rem;
   font-size: 0.75rem;
   background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+.channel-tile .tile-name {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
+}
+/*
+ * The controls appear on hover, and whenever the tile is maximized.
+ *
+ * A grid of eight tiles each wearing a permanent row of buttons is mostly
+ * buttons; a maximized one is being looked at deliberately, so its controls
+ * should not need hunting for.
+ */
+.channel-tile .tile-controls {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+.channel-tile:hover .tile-controls,
+.channel-tile:focus-within .tile-controls,
+.channel-tile[data-big] .tile-controls {
+  opacity: 1;
+}
+.channel-tile .tile-btn {
+  background: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.75rem;
+  line-height: 1;
+  padding: 0.1rem 0.2rem;
+  border-radius: 4px;
+}
+.channel-tile .tile-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+.channel-tile .tile-volume {
+  width: 4.5rem;
+  accent-color: var(--accent, #6ea8fe);
+}
+.channel-tile .tile-volume[data-boosted] {
+  accent-color: #e3a008;
+}
+/* Minimized: still there, still live, out of the way. */
+.channel-tile[data-small] video {
+  max-height: 3.2rem;
+  object-fit: cover;
 }
 /* Your own tiles read as a preview, not as somebody else's camera. */
 .channel-tile[data-own] {
@@ -776,6 +828,59 @@ button.danger {
 }
 .channel-tile[data-big] video {
   max-height: 42vh;
+}
+
+/* ---------- the one dialog ---------- */
+
+/*
+ * Electron has no window.prompt(), so everything the app needs to ask goes
+ * through this. See the comment above ask() for how that was discovered.
+ */
+.ask {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: #1b1d22;
+  color: inherit;
+  padding: 1.1rem 1.2rem;
+  min-width: min(22rem, 90vw);
+  max-width: 90vw;
+  font: inherit;
+}
+.ask::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+.ask h2 {
+  margin: 0 0 0.3rem;
+  font-size: 1rem;
+}
+.ask p {
+  margin: 0 0 0.7rem;
+  font-size: 0.85rem;
+}
+.ask .field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-bottom: 0.6rem;
+}
+.ask .field > span {
+  font-size: 0.78rem;
+  opacity: 0.7;
+}
+.ask input,
+.ask select {
+  font: inherit;
+  padding: 0.35rem 0.45rem;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: #121419;
+  color: inherit;
+}
+.ask-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.8rem;
 }
 
 /* ---------- small admin controls ---------- */
