@@ -574,6 +574,7 @@ async function probeServer() {
 
     // An empty server has nobody to log in as, so offer registration first.
     if (state.auth.supported && !state.auth.hasAccounts) state.auth.mode = 'register';
+    await restoreSession();
     applyAuthMode();
   } catch {
     // Unreachable, or an older server with no passwordRequired field. Either
@@ -590,10 +591,48 @@ async function probeServer() {
  * That means the user has to say which they meant, and auto-creating an account
  * on a mistyped password would be the worst possible guess.
  */
+/**
+ * Turn a saved session token back into a signed-in user.
+ *
+ * "Stay signed in" has always SAVED the token -- boot() restores it and hands
+ * it to main for every request. What it never did was tell the client who
+ * that token belongs to, and the connect screen gates on `state.auth.user`,
+ * which only authenticate() ever set. So a saved session still demanded the
+ * password, and the setting looked like it was not saving anything.
+ *
+ * One call to /api/accounts/me closes that. A token the server no longer
+ * accepts is dropped here rather than left to fail later with something
+ * confusing.
+ */
+async function restoreSession() {
+  if (!state.auth.token || !state.auth.supported || state.auth.user) return;
+  try {
+    const { user } = await harmony.api.me(el.serverUrl.value.trim());
+    state.auth.user = user;
+    el.username.value = user.nickname;
+  } catch (err) {
+    // 401 means expired or revoked -- an ordinary thing, not an error worth
+    // showing. Anything else (server down) leaves the token alone so a
+    // reachable server can still honour it later.
+    if (err.status === 401 || err.code === 'login_required') await adoptSession('');
+  }
+}
+
 function applyAuthMode() {
   const on = state.auth.supported;
-  el.accountFields.hidden = !on;
+  // Nothing to type when we are already signed in: the fields would only
+  // invite somebody to re-enter a password they do not need.
+  const signedIn = Boolean(state.auth.user);
+  el.accountFields.hidden = !on || signedIn;
   document.body.dataset.authMode = on ? state.auth.mode : 'none';
+
+  if (signedIn) {
+    el.usernameHint.textContent = `Signed in as ${state.auth.user.nickname}.`;
+    el.authModeText.textContent = 'Not you?';
+    el.authModeToggle.textContent = 'Sign out';
+    el.continue.textContent = 'Continue';
+    return;
+  }
 
   if (!on) {
     el.usernameHint.textContent =
@@ -756,7 +795,10 @@ async function startSession() {
     const mustSignIn = state.auth.supported && state.auth.hasAccounts;
     const wantsSignIn = state.auth.supported && el.accountPassword.value.length > 0;
 
-    if (mustSignIn && !el.accountPassword.value) {
+    // `state.auth.user` is set either by a sign-in just now or by a saved
+    // session restored in probeServer. Checking the password box instead of
+    // this is what made "stay signed in" useless.
+    if (mustSignIn && !state.auth.user && !el.accountPassword.value) {
       el.accountPassword.focus();
       throw new Error('This server has accounts. Enter your password, or create an account.');
     }
@@ -1201,6 +1243,14 @@ async function joinVoice(channel, password) {
     // for something nobody can perceive.
     addTimer(setInterval(renderSpeaking, SPEAKING_POLL_MS), 'voice');
 
+    // Renew the media tokens at half their life, so a missed tick still
+    // leaves a wide margin and neither side has to trust the other's clock.
+    const life = Number(reply.expiresInMs) || 10 * 60 * 1000;
+    addTimer(
+      setInterval(refreshVoiceTokens, Math.max(5_000, Math.floor(life / 2))),
+      'voice',
+    );
+
     // Reconcile subscriptions on a slow timer as well as on roster pushes.
     //
     // A publisher's path is not readable for a moment after its WHIP returns
@@ -1211,7 +1261,17 @@ async function joinVoice(channel, password) {
     addTimer(setInterval(() => {
       if (!state.voice.channelId) return;
       if (state.voice.hasMissingPeers) {
-        state.voice.syncPeers().catch(() => { /* retried on the next tick */ });
+        state.voice.syncPeers()
+          .then((result) => {
+            // A refused subscription is not the warm-up window: retrying it
+            // with the same token would fail forever. Get a new one first.
+            const refused = result?.missed?.some(
+              (m) => m.reason === 'unauthorized' || m.reason === 'media_error',
+            );
+            if (refused) return refreshVoiceTokens();
+            return undefined;
+          })
+          .catch(() => { /* retried on the next tick */ });
       }
       // Video has exactly the same warm-up window, and a camera turned on in
       // a settled channel produces one roster push -- which arrives before
@@ -1227,6 +1287,37 @@ async function joinVoice(channel, password) {
     await leaveVoice({ silent: true }).catch(() => {});
   } finally {
     state.channels.joining = false;
+  }
+}
+
+/**
+ * Re-issue the channel's media tokens before they expire.
+ *
+ * A channel token lasts ten minutes by default and MediaMTX only consults
+ * the auth hook when a session is SET UP. So an expired token never
+ * interrupts anything already running -- it stops anything NEW. Ten minutes
+ * into a call that means: you cannot hear anybody who joins or unmutes from
+ * then on, you cannot start your camera, and a screen share fails with a
+ * 401 that the client used to report as "the username reservation may have
+ * expired".
+ *
+ * All three were the same missing timer. The server has always had the
+ * handler and the client has always had retoken(); nothing called either.
+ *
+ * @returns {Promise<boolean>} whether the tokens are now fresh
+ */
+async function refreshVoiceTokens() {
+  const channelId = state.voice.channelId;
+  if (!channelId) return false;
+  try {
+    const reply = await harmony.realtime.request('voice:refresh', { channelId });
+    if (reply.type !== 'voice:tokens') return false;
+    state.voice.retoken(reply);
+    return true;
+  } catch {
+    // The socket is down, which the reconnect path already handles by
+    // rejoining -- and a rejoin issues fresh tokens anyway.
+    return false;
   }
 }
 
@@ -2073,6 +2164,9 @@ async function startCamera() {
      * channels.
      */
     if (state.voice.channelId) {
+      // A camera is usually started well into a call, which is exactly when
+      // the join-time token has gone stale.
+      await refreshVoiceTokens();
       await state.voice.startCam(stream, {
         bitrate: CAMERA.bitrate,
         framerate: CAMERA.frameRate,
@@ -2342,6 +2436,11 @@ async function shareScreenHere() {
     showChannelsError('This channel did not give out a screen path. Rejoin it.');
     return undefined;
   }
+  // Before reading publishUrls, not after: the picker is where somebody
+  // spends thirty seconds choosing a window, and the URL captured here is
+  // the one that gets published with.
+  await refreshVoiceTokens();
+
   const channel = state.channels.list.find((c) => c.id === state.voice.channelId);
   state.share.target = {
     channelId: state.voice.channelId,
@@ -2755,6 +2854,13 @@ async function startBroadcast() {
 
     // Stopping the share from the OS overlay ends the track, not the session.
     videoTrack.addEventListener('ended', () => stopBroadcast());
+
+    // Choosing a source can take a while, and a channel token minted before
+    // the picker opened may have expired while a window was being chosen.
+    if (state.share.target) {
+      await refreshVoiceTokens();
+      state.share.target.url = state.voice.publishUrls.screen || state.share.target.url;
+    }
 
     const { pc, resourceUrl } = await publish({
       url: state.share.target ? state.share.target.url : state.session.whipUrl,
@@ -4077,7 +4183,19 @@ el.username.addEventListener('blur', () => {
   if (folded !== el.username.value) el.username.value = folded;
 });
 
-el.authModeToggle.addEventListener('click', () => {
+el.authModeToggle.addEventListener('click', async () => {
+  // While a saved session is in force this button is the only way out of it,
+  // because the account fields are hidden. Signing out puts the form back.
+  if (state.auth.user) {
+    await harmony.api.logout(state.server || el.serverUrl.value.trim()).catch(() => {});
+    state.auth.user = null;
+    await adoptSession('');
+    state.auth.mode = 'login';
+    showError('');
+    applyAuthMode();
+    el.accountPassword.focus();
+    return;
+  }
   state.auth.mode = state.auth.mode === 'register' ? 'login' : 'register';
   showError('');
   applyAuthMode();

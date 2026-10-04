@@ -12,16 +12,31 @@
 export const MAX_GAIN = 3.5;
 
 /**
- * Speaking detection, in two thresholds rather than one.
+ * Speaking detection.
  *
- * A single threshold makes the ring strobe: speech crosses any given level
- * dozens of times a second, because the gaps between syllables really are
- * silence. So it takes a louder sound to start than to keep going, and a
- * short hold carries it across those gaps.
+ * Three mechanisms, and all three turned out to be necessary once this met
+ * a real voice rather than a test tone.
+ *
+ * 1. TWO THRESHOLDS. A single one makes the ring strobe, because the gaps
+ *    between syllables genuinely are silence.
+ * 2. AN ENVELOPE with a fast attack and a slow release. A 43 ms window lands
+ *    inside one of those gaps often enough that instantaneous RMS flickers
+ *    even well above the threshold.
+ * 3. A HOLD, to carry across the longer gaps between words.
+ *
+ * The thresholds are deliberately low. The first version used 0.02, which is
+ * about -34 dBFS: fine for Chromium's fake microphone, which is a full-scale
+ * tone, and far too high for somebody speaking normally into a headset after
+ * Opus at 32 kbps has been through it. The reported symptom was a ring that
+ * "blinked twice" during a sentence, which is exactly what a threshold
+ * sitting near the peaks of speech rather than its body looks like.
  */
-const SPEAK_ON = 0.02;
-const SPEAK_OFF = 0.01;
-const SPEAK_HOLD_MS = 280;
+const SPEAK_ON = 0.0075;
+const SPEAK_OFF = 0.0035;
+const SPEAK_HOLD_MS = 400;
+
+/** How fast the envelope falls when the sound stops. Per read, at ~100 ms. */
+const ENVELOPE_RELEASE = 0.65;
 
 /**
  * Root-mean-square of what an analyser is hearing right now, 0..1.
@@ -36,21 +51,27 @@ function rms(analyser, buffer) {
   return Math.sqrt(sum / buffer.length);
 }
 
-/** Wrap an analyser in the hysteresis above. */
+/** Wrap an analyser in the envelope and hysteresis above. */
 function speechGate(analyser) {
   const buffer = new Float32Array(analyser.fftSize);
   let speaking = false;
   let until = 0;
+  let envelope = 0;
+
   return () => {
     const level = rms(analyser, buffer);
+    // Instant attack, gradual release: the envelope follows the loudest
+    // thing heard recently rather than whatever this 43 ms happens to hold.
+    envelope = level > envelope ? level : envelope * ENVELOPE_RELEASE;
+
     const now = performance.now();
-    if (level > SPEAK_ON) {
+    if (envelope > SPEAK_ON) {
       speaking = true;
       until = now + SPEAK_HOLD_MS;
-    } else if (speaking && level < SPEAK_OFF && now > until) {
+    } else if (speaking && envelope < SPEAK_OFF && now > until) {
       speaking = false;
     }
-    return { speaking, level };
+    return { speaking, level: envelope };
   };
 }
 
@@ -65,7 +86,7 @@ function speechGate(analyser) {
  */
 export function createMeter(stream) {
   const analyser = context().createAnalyser();
-  analyser.fftSize = 1024;
+  analyser.fftSize = 2048;
   analyser.smoothingTimeConstant = 0.2;
 
   let source = null;
@@ -126,7 +147,7 @@ export function createSink(stream) {
    * know about somebody you have muted.
    */
   const analyser = context().createAnalyser();
-  analyser.fftSize = 1024;
+  analyser.fftSize = 2048;
   analyser.smoothingTimeConstant = 0.2;
   analyser.connect(node);
   const read = speechGate(analyser);

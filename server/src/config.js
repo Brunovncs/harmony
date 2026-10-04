@@ -72,6 +72,15 @@ export const config = {
   // gap between "user picked a name" and "MediaMTX sees their publisher" --
   // source picking, permission prompts and the ICE handshake.
   claimTtlMs: num(process.env.HARMONY_CLAIM_TTL_MS, 30_000),
+  /*
+   * How long a channel media token is good for.
+   *
+   * Settable only so the renewal can be tested in seconds rather than in ten
+   * minutes. MediaMTX consults the auth hook at session SETUP and never
+   * again, so this does not cut anybody off mid-stream -- it decides how
+   * stale a URL may be when it is first used.
+   */
+  channelTokenTtlMs: num(process.env.HARMONY_CHANNEL_TOKEN_TTL_MS, 10 * 60 * 1000),
 
   // Where accounts, channels and uploads live. The one writable path Harmony
   // needs; see db.js for what happens when it is not writable.

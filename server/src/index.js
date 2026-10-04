@@ -932,7 +932,9 @@ app.post('/mediamtx/auth', (req, res) => {
  * WHIP URLs from the paths here.
  */
 function issueTokens(channelId, userId, mid) {
-  const token = mintChannelToken(mediaSecret, { cid: channelId, mid });
+  const token = mintChannelToken(mediaSecret, {
+    cid: channelId, mid, ttlMs: config.channelTokenTtlMs,
+  });
   const url = (kind) =>
     `${config.signalingBase}/${channelPath(channelId, mid, kind)}`;
   return {
@@ -945,11 +947,20 @@ function issueTokens(channelId, userId, mid) {
     // A template rather than a list: the roster changes constantly and the
     // client already knows every member's slot from it.
     whepBase: config.signalingBase,
-    expiresInMs: TOKEN_LIFETIME_HINT_MS,
+    /*
+     * How long this token lasts, so the client can come back before it does
+     * not. It is a HINT and not a contract -- the client halves it and the
+     * server re-issues on request, so neither side has to agree on a clock.
+     *
+     * Sending this and never acting on it is precisely the bug that shipped:
+     * a channel's tokens were minted once at join and never renewed, so
+     * after ten minutes no new subscription, camera or screen share in that
+     * channel could be authorised. Nothing in flight broke, which is what
+     * made it look like "sometimes I cannot hear someone".
+     */
+    expiresInMs: config.channelTokenTtlMs,
   };
 }
-
-const TOKEN_LIFETIME_HINT_MS = 10 * 60 * 1000;
 
 monitor.start();
 

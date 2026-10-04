@@ -448,6 +448,66 @@ async function run() {
     "return document.getElementById('channels-error').textContent;",
   );
   check('the channels view reports no error after all of that', errors === '', `"${errors}"`);
+
+  // --- "stay signed in" ---------------------------------------------------
+  //
+  // Restart the app against the SAME profile directory and it must come back
+  // signed in, with nothing to type.
+  //
+  // This shipped broken in a way no test could see, because no test had ever
+  // restarted the app: the token was saved and restored and handed to every
+  // request, but the connect screen gates on `state.auth.user`, which only a
+  // fresh sign-in ever set. So a saved session still demanded the password
+  // and the setting looked like it simply was not saving.
+  cdp.close();
+  app.kill();
+  await sleep(1500);
+
+  const again = launchApp({ port: DEBUG_PORT + 1, userDataDir });
+  procs.push(again);
+  const cdp2 = await attach(await findPage(DEBUG_PORT + 1));
+  await sleep(2500);
+
+  const restored = await cdp2.evaluate(`
+    return {
+      view: document.querySelector('.view[data-active]')?.id,
+      server: document.getElementById('server-url').value,
+      username: document.getElementById('username').value,
+      accountFieldsHidden: document.getElementById('account-fields').hidden,
+      hint: document.getElementById('username-hint').textContent,
+      toggle: document.getElementById('auth-mode-toggle').textContent,
+      passwordTyped: document.getElementById('account-password').value,
+    };
+  `);
+  check(
+    'a restarted client comes back knowing who it is, with no password to type',
+    restored.hint.includes('Signed in as pedrolucas') && restored.accountFieldsHidden === true
+      && restored.passwordTyped === '',
+    `hint="${restored.hint}", fields hidden=${restored.accountFieldsHidden}`,
+  );
+  check(
+    'the server address and nickname come back too',
+    restored.server === BASE && restored.username === 'pedrolucas',
+    `${restored.server} as ${restored.username}`,
+  );
+  check(
+    'and it offers a way out, since the fields are hidden',
+    restored.toggle === 'Sign out',
+    `toggle reads "${restored.toggle}"`,
+  );
+
+  // Pressing Continue has to get straight in, which is the whole point.
+  await cdp2.evaluate("document.getElementById('continue').click(); return true;");
+  const backIn = await waitFor(
+    cdp2,
+    "document.querySelector('.view[data-active]')?.id === 'view-channels'",
+    { label: 'getting back in without a password' },
+  ).catch(() => false);
+  check(
+    'Continue goes straight back into the channels, no password asked',
+    Boolean(backIn),
+    backIn ? 'signed in from the saved session' : 'was asked to log in again',
+  );
 }
 
 run()

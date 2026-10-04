@@ -84,7 +84,7 @@ docker run -d --name harmony --restart unless-stopped \
   -p 8080:8080 -p 8889:8889 -p 8189:8189/udp -p 8189:8189/tcp \
   -e MTX_WEBRTCADDITIONALHOSTS=stream.example.com \
   -e HARMONY_SIGNALING_URL=https://stream.example.com:8444 \
-  pedrolucasmiguel/harmony-server:2.2.0
+  pedrolucasmiguel/harmony-server:2.2.1
 ```
 
 Published for `linux/amd64` and `linux/arm64`. Compose and shell examples, plus

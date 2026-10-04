@@ -99,6 +99,18 @@ function startHarmonyServer() {
         HARMONY_MEDIAMTX_API: `http://127.0.0.1:${MTX_API_PORT}`,
         HARMONY_SIGNALING_URL: SIGNALING,
         HARMONY_POLL_INTERVAL_MS: '400',
+        /*
+         * Six seconds instead of ten minutes.
+         *
+         * The bug this guards against only appeared after the token's whole
+         * lifetime had passed, which is why it survived every suite and was
+         * found by somebody using the app: ten minutes into a call you could
+         * no longer hear anybody who joined, start a camera, or share a
+         * screen -- and nothing already running broke, so it looked
+         * intermittent. At six seconds the same window is reachable in a
+         * test.
+         */
+        HARMONY_CHANNEL_TOKEN_TTL_MS: '6000',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -692,6 +704,56 @@ async function run() {
     unmutedAgain.localMuted === false && unmutedAgain.volume === 80,
     `${unmutedAgain.label}, slider=${unmutedAgain.volume}`,
   );
+
+  // --- the token outliving the call --------------------------------------
+  //
+  // The server in this run mints tokens that live six seconds, and the run
+  // has taken far longer than that, so the token each client joined with is
+  // long dead. Everything below is authorised by a renewed one.
+  //
+  // This is the bug a person found and six suites did not: ten minutes into
+  // a call you could no longer hear anybody who joined, start a camera, or
+  // share a screen, and nothing already running broke -- so it read as
+  // "sometimes I cannot hear my friend" rather than as an expiry.
+  //
+  // It must run while BOTH are still in the channel, which is why it sits
+  // here and not after the admin-move tests.
+  await a.evaluate("document.getElementById('voice-cam').click(); return true;");
+  const lateCam = await waitFor(
+    a,
+    "document.getElementById('voice-cam').textContent === 'Stop camera'",
+    { label: 'a camera started long after joining', timeoutMs: 25_000 },
+  ).catch(() => false);
+  check(
+    'a camera can still be started long after the join token expired',
+    Boolean(lateCam),
+    lateCam ? 'published on a renewed token' : 'refused',
+  );
+
+  // The half that showed up as not hearing somebody: the OTHER member has to
+  // be able to open a new subscription on their own renewed token.
+  const lateTile = await waitFor(
+    b,
+    "document.querySelectorAll('#channel-video .channel-tile').length > 0",
+    { label: 'the late camera reaching the other member', timeoutMs: 45_000 },
+  ).catch(() => false);
+  check(
+    'the other member can still subscribe long after their own token expired',
+    Boolean(lateTile),
+    lateTile ? 'subscribed on a renewed token' : 'never arrived',
+  );
+
+  const expiryError = await a.evaluate(
+    "return document.getElementById('channels-error').textContent;",
+  );
+  check(
+    'none of that produced an expired-reservation error',
+    !expiryError.includes('expired') && !expiryError.includes('refused'),
+    `"${expiryError}"`,
+  );
+
+  await a.evaluate("document.getElementById('voice-cam').click(); return true;");
+  await sleep(800);
 
   // --- force-mute -------------------------------------------------------
   //
