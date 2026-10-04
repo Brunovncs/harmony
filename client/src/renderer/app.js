@@ -273,6 +273,17 @@ const el = {
 function freshMosaic() {
   return {
     tiles: new Map(),
+    /*
+     * Closed streams that are still live, as empty squares.
+     *
+     * Closing a tile tears the connection down -- that is the point, it is
+     * how you stop paying for a decoder and a 1080p downstream -- but the
+     * square stays where it was so you can click it to come back. Before,
+     * the tile simply vanished and the only way back was + Add stream,
+     * which meant closing something to glance away cost you your place in
+     * the grid.
+     */
+    ghosts: new Map(),
     selection: null,
     closed: new Set(),
     maximized: null,
@@ -2314,6 +2325,61 @@ function ownChannelTiles() {
 }
 
 /**
+ * Draw a stream into a canvas a few times a second.
+ *
+ * A <video> showing your own screen is composited every frame, on the same
+ * GPU as the game you are sharing -- which is exactly what
+ * DUAL_GPU_WEIRDNESS.md is about, and it is the one cost in the app that is
+ * pure self-indulgence: nobody but you can see your own preview, and you
+ * are already looking at the thing it is a picture of.
+ *
+ * So the element is hidden and a canvas is painted from it instead, at
+ * PREVIEW_FPS. Two frames a second is plenty to answer "is it still the
+ * right window and is it moving", which is the only question a self-preview
+ * ever gets asked.
+ *
+ * The <video> still has to exist and still has to be playing -- a canvas
+ * cannot pull frames from a paused element -- but a hidden one is decoded
+ * without being composited into the page, which is where the saving is.
+ *
+ * @returns {{stop: () => void}}
+ */
+const PREVIEW_FPS = 2;
+
+function throttledPreview(video, canvas) {
+  const paint = () => {
+    const w = video.videoWidth;
+    const h = video.videoHeight;
+    if (!w || !h) return;
+    // Resized only when it changes: assigning width/height clears the
+    // canvas and reallocates its backing store, every frame, for nothing.
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    canvas.getContext('2d')?.drawImage(video, 0, 0, w, h);
+  };
+
+  paint();
+  // Self-terminating. Tiles are rebuilt on every roster push and the old
+  // nodes are simply dropped, so a timer that only stopped when its button
+  // was pressed would go on painting into a detached canvas for the rest of
+  // the session -- once per rebuild, forever.
+  const timer = setInterval(() => {
+    if (!canvas.isConnected) {
+      clearInterval(timer);
+      return;
+    }
+    paint();
+  }, Math.round(1000 / PREVIEW_FPS));
+  return {
+    stop() {
+      clearInterval(timer);
+    },
+  };
+}
+
+/**
  * The handle on your own share, while you are listening to it.
  *
  * Module scope rather than per tile: tiles are rebuilt whenever the roster
@@ -2365,6 +2431,66 @@ function renderChannelVideo() {
     video.srcObject = stream;
 
     /*
+     * Your own tiles start HIDDEN.
+     *
+     * Everyone else's tile is the reason the mosaic exists. Your own is a
+     * picture of the screen you are already looking at, composited every
+     * frame on the same GPU as the game you are sharing. It is the one
+     * thing here that costs something and shows you nothing new.
+     *
+     * The eye button brings it back at two frames a second, which answers
+     * "is it still the right window and is it moving" and nothing else --
+     * which is all anybody asks their own preview.
+     */
+    let preview = null;
+    if (own) {
+      const canvas = document.createElement('canvas');
+      canvas.className = 'tile-canvas';
+      canvas.hidden = true;
+      /*
+       * Shrunk, not `hidden`.
+       *
+       * A canvas cannot pull frames from an element the browser has stopped
+       * rendering, and display:none is exactly the condition under which
+       * Chromium is entitled to stop. One pixel in the corner costs nothing
+       * to composite and keeps the element unambiguously live, which is
+       * worth more than the tidiness of hiding it properly.
+       */
+      video.classList.add('tile-video-source');
+      figure.setAttribute('data-preview-off', '');
+      figure.append(canvas);
+
+      const eye = document.createElement('button');
+      eye.className = 'tile-btn';
+      eye.type = 'button';
+      eye.dataset.role = 'preview';
+      eye.innerHTML = '&#128065;';
+      eye.title = 'Show a slow preview of what you are sharing';
+      eye.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (preview) {
+          preview.stop();
+          preview = null;
+          canvas.hidden = true;
+          figure.setAttribute('data-preview-off', '');
+          eye.removeAttribute('data-on');
+          eye.title = 'Show a slow preview of what you are sharing';
+        } else {
+          canvas.hidden = false;
+          figure.removeAttribute('data-preview-off');
+          preview = throttledPreview(video, canvas);
+          eye.setAttribute('data-on', '');
+          eye.title = `Hide the preview (it is drawn at ${PREVIEW_FPS} fps)`;
+        }
+      });
+
+      const cornerEye = document.createElement('span');
+      cornerEye.className = 'tile-corner';
+      cornerEye.append(eye);
+      figure.append(cornerEye);
+    }
+
+    /*
      * Hear your own screen share.
      *
      * Top right, away from the controls in the caption, because this one
@@ -2378,8 +2504,8 @@ function renderChannelVideo() {
      * else, so the output picker and deafen both reach it.
      */
     if (own && kind === 's') {
-      const corner = document.createElement('span');
-      corner.className = 'tile-corner';
+      const corner = figure.querySelector('.tile-corner')
+        ?? Object.assign(document.createElement('span'), { className: 'tile-corner' });
       const listen = document.createElement('button');
       listen.className = 'tile-btn';
       listen.type = 'button';
@@ -2398,7 +2524,7 @@ function renderChannelVideo() {
         listen.title = ownMonitor ? 'Stop hearing your own stream' : 'Hear your own stream';
       });
       corner.append(listen);
-      figure.append(corner);
+      if (!corner.isConnected) figure.append(corner);
     }
 
     const label = document.createElement('figcaption');
@@ -4183,7 +4309,12 @@ function layoutMosaic() {
     entry.el.hidden = Boolean(maximized) && username !== maximized;
   }
 
-  const count = maximized && tiles.has(maximized) ? 1 : tiles.size;
+  const { ghosts } = state.mosaic;
+  for (const node of ghosts.values()) node.hidden = Boolean(maximized);
+
+  // Squares count. They occupy a cell, so leaving them out of the fit would
+  // size every real tile as though the grid had more room than it has.
+  const count = maximized && tiles.has(maximized) ? 1 : tiles.size + ghosts.size;
   if (!count) return;
 
   // clientWidth includes the grid's own padding, but the tiles are laid out in
@@ -4223,6 +4354,9 @@ function layoutMosaic() {
 
   for (const entry of state.mosaic.tiles.values()) {
     entry.el.classList.toggle('compact', best.tileW < COMPACT_TILE_WIDTH);
+  }
+  for (const node of state.mosaic.ghosts.values()) {
+    node.classList.toggle('compact', best.tileW < COMPACT_TILE_WIDTH);
   }
 }
 
@@ -4323,12 +4457,35 @@ async function syncMosaic({ streams: pushed } = {}) {
     if (!state.mosaic.tiles.has(stream.username)) openTile(stream);
   }
 
+  /*
+   * A square for every stream that is closed but still live.
+   *
+   * Driven from the same stream list as the tiles, so a closed stream whose
+   * owner stops sharing loses its square too -- a permanent placeholder for
+   * something nobody is broadcasting any more is an invitation to click on
+   * nothing.
+   */
+  const live = new Set(streams.map((x) => x.username));
+  for (const [username, node] of [...state.mosaic.ghosts]) {
+    if (closed.has(username) && live.has(username)) continue;
+    node.remove();
+    state.mosaic.ghosts.delete(username);
+  }
+  for (const username of closed) {
+    if (!live.has(username) || state.mosaic.ghosts.has(username)) continue;
+    const node = ghostTile(username);
+    state.mosaic.ghosts.set(username, node);
+    el.mosaicGrid.append(node);
+  }
+
   const count = state.mosaic.tiles.size;
   el.mosaicCount.textContent = `${count} ${count === 1 ? 'stream' : 'streams'}`;
   layoutMosaic();
 
   const empty = el.mosaicGrid.querySelector('.empty');
-  if (!count && !empty) {
+  if (!count && state.mosaic.ghosts.size) {
+    empty?.remove();
+  } else if (!count && !empty) {
     el.mosaicGrid.replaceChildren(
       message(
         closed.size
@@ -4543,13 +4700,41 @@ function openTile({ username, whepUrl }) {
     });
 }
 
+/** The empty square a closed stream leaves behind. Click it to come back. */
+function ghostTile(username) {
+  const node = document.createElement('div');
+  // `tile` as well, so it inherits the 16:9 box, the border and the grid
+  // sizing. A square that is not the same shape as the tiles around it
+  // does not hold a place; it makes the grid jump, which is the thing
+  // this exists to prevent.
+  node.className = 'tile ghost-tile';
+  node.dataset.username = username;
+  node.title = `Reopen ${username}`;
+
+  const name = document.createElement('span');
+  name.className = 'ghost-name';
+  name.textContent = username;
+
+  const hint = document.createElement('span');
+  hint.className = 'ghost-hint';
+  hint.textContent = 'Closed \u00B7 click to watch again';
+
+  node.append(name, hint);
+  node.addEventListener('click', () => reopenTile(username));
+  return node;
+}
+
 /**
  * Dismiss one stream from the mosaic.
  *
- * The connection is torn down, not just hidden -- a tile you cannot see should
- * not still be costing you a decoder and the bandwidth of a 1080p stream. The
- * name is remembered so the periodic sync does not reopen it; + Add stream is
- * the way back.
+ * The CONNECTION is torn down, not just hidden -- a tile you cannot see
+ * should not still cost you a decoder and the bandwidth of a 1080p stream --
+ * but the square stays where it was. Closing something to glance past it
+ * used to cost you your place in the grid, with + Add stream the only way
+ * back.
+ *
+ * The name is remembered so the periodic sync does not simply reopen it
+ * three seconds later.
  */
 function closeTile(username) {
   const { mosaic } = state;
@@ -4558,15 +4743,28 @@ function closeTile(username) {
   if (mosaic.maximized === username) mosaic.maximized = null;
   removeTile(username);
 
+  if (!mosaic.ghosts.has(username)) {
+    const node = ghostTile(username);
+    mosaic.ghosts.set(username, node);
+    el.mosaicGrid.append(node);
+  }
+
   const count = mosaic.tiles.size;
   el.mosaicCount.textContent = `${count} ${count === 1 ? 'stream' : 'streams'}`;
   layoutMosaic();
+}
 
-  if (!count) {
-    el.mosaicGrid.replaceChildren(
-      message('No streams open. Use + Add stream to bring one back.'),
-    );
-  }
+/** Put a closed stream back, from its own square. */
+function reopenTile(username) {
+  const { mosaic } = state;
+  mosaic.closed.delete(username);
+  // Into the selection too, where there is one: a mosaic opened on a chosen
+  // set filters by it, so forgetting this would reopen the tile and have the
+  // next sync close it again, which reads as a button that does not work.
+  mosaic.selection?.add(username);
+  mosaic.ghosts.get(username)?.remove();
+  mosaic.ghosts.delete(username);
+  syncMosaic().catch(() => { /* the periodic tick retries */ });
 }
 
 /** Fill the grid with one stream, without leaving the window. */

@@ -1173,6 +1173,47 @@ button.danger {
   align-items: center;
 }
 
+/* ---------- a closed stream's square ---------- */
+
+/*
+ * Deliberately inert-looking: a dashed outline and no picture, so it reads
+ * as a gap that is holding a place rather than as a tile that has failed to
+ * load. Same box as a real tile, because its whole job is to keep the grid
+ * from reshuffling when you close something.
+ */
+.ghost-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  /* Dashed over .tile's solid border, and no picture, so it reads as a gap
+     holding a place rather than as a tile that failed to load. */
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.03);
+  text-align: center;
+  padding: 0.5rem;
+}
+.ghost-tile:hover {
+  border-color: var(--accent, #6ea8fe);
+  background: rgba(110, 168, 254, 0.1);
+}
+.ghost-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.ghost-hint {
+  font-size: 0.78rem;
+  opacity: 0.6;
+}
+.ghost-tile.compact .ghost-hint {
+  display: none;
+}
+
 /* ---------- the channel mosaic ---------- */
 
 /*
@@ -1289,6 +1330,52 @@ button.danger {
   max-height: 3.2rem;
   object-fit: cover;
 }
+/* The <video> the canvas is painted from. One pixel, invisible, and still
+   unambiguously being rendered -- see the comment at its creation. */
+.channel-tile video.tile-video-source {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  min-height: 0;
+  opacity: 0;
+  pointer-events: none;
+  aspect-ratio: auto;
+}
+
+/* The throttled self-preview is painted here. */
+.channel-tile .tile-canvas {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+  display: block;
+  background: #000;
+}
+.channel-tile[data-own] .tile-canvas {
+  transform: scaleX(-1);
+}
+.channel-tile[data-own][data-key$=':s'] .tile-canvas {
+  transform: none;
+}
+/*
+ * With the preview off there is no picture at all, so the tile needs a
+ * height of its own or it collapses to the caption and stops looking like
+ * a tile.
+ */
+.channel-tile[data-preview-off] {
+  min-height: 4.5rem;
+  background:
+    repeating-linear-gradient(
+      -45deg,
+      rgba(255, 255, 255, 0.03) 0 10px,
+      transparent 10px 20px
+    );
+}
+/* The eye is the only control on a tile with nothing to show, so it does
+   not hide until there is something behind it. */
+.channel-tile[data-preview-off] .tile-corner {
+  opacity: 1;
+}
+
 /* Your own tiles read as a preview, not as somebody else's camera. */
 .channel-tile[data-own] {
   outline: 1px solid var(--accent, #6ea8fe);

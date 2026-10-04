@@ -335,11 +335,28 @@ describe('roles', () => {
     let carolId;
 
     before(async () => {
-      // alice was made an admin by the first test in the outer block.
-      adminToken = (await api('/api/accounts/login', {
-        method: 'POST', body: { nickname: 'alice', password: 'hunter22' },
-      })).body.token;
+      /*
+       * A FRESH account, not alice -- who the first test in this block
+       * promoted to admin and would be the obvious choice.
+       *
+       * "locks out after repeated failures, keyed by nickname" deliberately
+       * burns alice's login attempts earlier in this file, and the lockout
+       * is keyed by nickname and outlives the suite that caused it. Logging
+       * in as her here returns 429 with no token, and every request that
+       * followed came back 401 -- which reads as a permissions bug in the
+       * route rather than as a test that rate-limited its own fixture.
+       */
+      await api('/api/accounts/register', {
+        method: 'POST', body: { nickname: 'dave', password: 'hunter22' },
+      });
       const roster = await api('/api/accounts', { token: ownerToken });
+      const daveId = roster.body.users.find((u) => u.nickname === 'dave').id;
+      await api(`/api/accounts/${daveId}/role`, {
+        method: 'POST', body: { role: 'admin' }, token: ownerToken,
+      });
+      adminToken = (await api('/api/accounts/login', {
+        method: 'POST', body: { nickname: 'dave', password: 'hunter22' },
+      })).body.token;
       carolId = roster.body.users.find((u) => u.nickname === 'carol').id;
     });
 
