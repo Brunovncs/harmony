@@ -51,6 +51,15 @@ const DEFAULTS = {
   // requirement, so unplugging it falls back to the default and plugging it
   // back in restores it.
   voiceCameraId: '',
+  /*
+   * How loudly soundpad clips play, as a percentage.
+   *
+   * A number rather than a gain so that what is stored is what the slider
+   * shows, and 0 is a genuine value -- `?? 100` would quietly turn a muted
+   * soundpad back on, which is the one thing somebody who muted it does not
+   * want to happen on the next launch.
+   */
+  soundpadVolume: 100,
   // Rolling clip buffer. Off by default: it is memory the user did not ask for.
   clipsEnabled: false,
   // GPU video encoding (NVENC / AMF / Quick Sync). 'auto' leaves Chromium to

@@ -240,6 +240,30 @@
                 <h3>Soundpad</h3>
                 <button class="ghost small" id="soundpad-add" hidden>+ Add clip</button>
                 <input id="soundpad-file" type="file" accept="audio/*" hidden />
+                <!--
+                  How loudly clips play FOR YOU. Local, like every other
+                  volume in the app: the server sends the event and each
+                  client plays its own cached copy, so there is nothing to
+                  broadcast and turning an airhorn down is about your ears.
+                -->
+                <span class="peer-audio soundpad-volume-wrap">
+                  <button
+                    class="ghost tiny peer-mute"
+                    id="soundpad-mute"
+                    type="button"
+                  >&#128266;</button>
+                  <input
+                    id="soundpad-volume"
+                    class="peer-volume"
+                    type="range"
+                    min="0"
+                    max="350"
+                    step="5"
+                    value="100"
+                    title="How loudly soundpad clips play for you"
+                  />
+                  <span class="peer-volume-label" id="soundpad-volume-label">100%</span>
+                </span>
               </div>
               <div class="soundpad-grid" id="soundpad-grid"></div>
             </div>

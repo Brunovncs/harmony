@@ -877,6 +877,12 @@ button.danger {
   align-items: center;
   gap: 0.5rem;
 }
+/* Pushed to the far end of the header, away from "+ Add clip" -- one of
+   them is used constantly and the other about twice ever. */
+.soundpad-volume-wrap {
+  margin-left: auto;
+  max-width: 12rem;
+}
 .soundpad-head h3 {
   font-size: 0.8rem;
   margin: 0;

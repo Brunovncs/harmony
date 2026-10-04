@@ -134,6 +134,9 @@ const el = {
   soundpadAdd: $('soundpad-add'),
   soundpadFile: $('soundpad-file'),
   soundpadGrid: $('soundpad-grid'),
+  soundpadVolume: $('soundpad-volume'),
+  soundpadVolumeLabel: $('soundpad-volume-label'),
+  soundpadMute: $('soundpad-mute'),
   ask: $('ask'),
   askForm: $('ask-form'),
   askTitle: $('ask-title'),
@@ -2452,8 +2455,36 @@ async function loadSoundpad() {
   }
 }
 
+/**
+ * How loudly clips play here, as a gain.
+ *
+ * Read from settings every time rather than cached, for the same reason the
+ * device pickers re-read them: a second window, or a previous run, can have
+ * changed it, and the only thing worse than a volume that does not persist
+ * is one that persists differently in two places.
+ */
+function soundpadGain() {
+  const percent = state.settings.soundpadVolume;
+  return Math.max(0, Math.min(MAX_GAIN, (typeof percent === 'number' ? percent : 100) / 100));
+}
+
+/** Paint the soundpad's own volume control from the saved setting. */
+function applySoundpadVolume() {
+  const percent = typeof state.settings.soundpadVolume === 'number'
+    ? state.settings.soundpadVolume
+    : 100;
+  // Reuses the per-person treatment, including the amber warning past 100%:
+  // a clip amplified three and a half times is exactly as likely to distort
+  // as a person is, and it is the same slider doing the same thing.
+  applyPeerVolumeLook(el.soundpadVolume, el.soundpadVolumeLabel, percent, false);
+  el.soundpadMute.innerHTML = percent === 0 ? '&#128263;' : '&#128266;';
+  el.soundpadMute.title = percent === 0 ? 'Unmute the soundpad' : 'Mute the soundpad';
+  el.soundpadMute.toggleAttribute('data-on', percent === 0);
+}
+
 function renderSoundpad() {
   el.soundpadAdd.hidden = !isAdmin();
+  applySoundpadVolume();
   // Shown unless the panel's soundboard button has been used to put it
   // away. Default-on rather than default-off: a clip you cannot find is a
   // clip nobody plays, and the button is there to reclaim the space in a
@@ -2782,8 +2813,13 @@ function onRealtimeEvent(msg) {
       break;
 
     case 'soundpad:play':
+      // Deafened means deafened. The soundpad goes to the context's
+      // destination directly rather than through a peer sink, so nothing
+      // else would have silenced it -- which would make "Deafen" a button
+      // that silences people but not airhorns.
+      if (state.voice.deafened) break;
       // Into the PLAYBACK context, never the outgoing mix. See playSample().
-      playSample(harmony.mediaUrl(msg.hash)).catch((err) =>
+      playSample(harmony.mediaUrl(msg.hash), { gain: soundpadGain() }).catch((err) =>
         showChannelsError(`Could not play "${msg.name}": ${err.message}`));
       break;
 
@@ -4639,6 +4675,32 @@ el.voiceOutput.addEventListener('change', async () => {
 });
 
 el.voiceScreen.addEventListener('click', () => shareScreenHere());
+
+/*
+ * The soundpad's volume.
+ *
+ * Written on 'change' rather than 'input' -- dragging a slider fires input
+ * for every pixel, and each one is a settings file write. The label follows
+ * 'input' so it still moves under the finger.
+ */
+el.soundpadVolume.addEventListener('input', () => {
+  applyPeerVolumeLook(
+    el.soundpadVolume, el.soundpadVolumeLabel, Number(el.soundpadVolume.value), false,
+  );
+});
+el.soundpadVolume.addEventListener('change', async () => {
+  await harmony.settings.set({ soundpadVolume: Number(el.soundpadVolume.value) });
+  state.settings = await harmony.settings.get();
+  applySoundpadVolume();
+});
+el.soundpadMute.addEventListener('click', async () => {
+  const now = Number(el.soundpadVolume.value);
+  // Unmuting from zero goes back to 100, not to zero-but-not-muted, which
+  // is a button that does nothing.
+  await harmony.settings.set({ soundpadVolume: now === 0 ? 100 : 0 });
+  state.settings = await harmony.settings.get();
+  applySoundpadVolume();
+});
 
 el.voiceSoundboard.addEventListener('click', () => {
   el.soundpad.dataset.shown = el.soundpad.dataset.shown === '0' ? '1' : '0';
