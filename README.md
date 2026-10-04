@@ -269,7 +269,7 @@ docker run -d --name harmony \
   -p 8080:8080 -p 8889:8889 -p 8189:8189/udp -p 8189:8189/tcp \
   -e MTX_WEBRTCADDITIONALHOSTS=stream.example.com \
   -e HARMONY_SIGNALING_URL=https://stream.example.com:8444 \
-  pedrolucasmiguel/harmony-server:2.2.1
+  pedrolucasmiguel/harmony-server:2.2.2
 ```
 
 `linux/amd64` and `linux/arm64`, so the same tag runs on a mini-PC or a
@@ -283,7 +283,7 @@ perfectly and then play nothing.
 architecture.
 
 **Client:** `cd client && npm install && npm run build` gives you
-`dist/Harmony-2.2.1-portable.exe`.
+`dist/Harmony-2.2.2-portable.exe`.
 
 The full procedure — TLS on a line whose ISP blocks 80 and 443, dynamic IPs,
 packaging, tests and a troubleshooting table — is in

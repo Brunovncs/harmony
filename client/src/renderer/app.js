@@ -2365,13 +2365,22 @@ function onRealtimeEvent(msg) {
 
     case 'realtime:up':
       showChannelsError('');
-      if (msg.channels) {
-        state.channels.list = msg.channels;
-        renderChannels();
-      }
+      // Everything the hello carries, not just the channel list: a client
+      // that was away has missed every roster broadcast in between, and the
+      // hello is the one message that brings the whole picture back.
+      if (msg.channels) state.channels.list = msg.channels;
+      if (msg.rosters) state.channels.rosters = msg.rosters;
+      if (msg.occupancy) state.channels.occupancy = msg.occupancy;
+      renderChannels();
+
       // A reconnect means the server has forgotten our presence, because
       // presence IS the socket. Rejoin rather than appearing to be in a channel
       // nobody else can see us in.
+      //
+      // This had never once run: the event was emitted with its type
+      // overwritten by the hello's own, so it arrived as 'hello-ok' and fell
+      // through to default. A client that dropped came back connected but
+      // silently out of its voice channel, still showing "Reconnecting...".
       if (state.voice.channelId) {
         const channel = state.channels.list.find((c) => c.id === state.voice.channelId);
         if (channel) joinVoice(channel);

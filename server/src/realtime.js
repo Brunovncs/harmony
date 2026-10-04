@@ -72,6 +72,18 @@ export class Realtime {
     });
 
     ws.on('message', (data) => {
+      /*
+       * Any frame at all proves this client is alive.
+       *
+       * The sweep below relies on pong frames, which assumes the client's
+       * WebSocket answers protocol pings. Every browser-shaped one does, but
+       * leaning on it is an unnecessary bet: a client that talks to us is
+       * plainly not dead, whatever its ping handling looks like. Without
+       * this a quiet-but-chatty client could be terminated on a technicality.
+       */
+      const alive = this.#clients.get(ws);
+      if (alive) alive.alive = true;
+
       let msg;
       try {
         msg = JSON.parse(String(data));
@@ -134,6 +146,21 @@ export class Realtime {
   async #onMessage(ws, msg) {
     const client = this.#clients.get(ws);
     if (!client) return;
+
+    /*
+     * An application-level liveness check, answered before the hello gate.
+     *
+     * The client cannot feed its own watchdog from protocol pings -- those
+     * are answered by the WebSocket implementation and never surface as a
+     * message -- and a quiet server sends nothing for minutes at a time,
+     * because rosters and channel lists are only pushed on change. So the
+     * client asks, and this is the answer. It is deliberately the cheapest
+     * handler here and deliberately needs no session: proving the socket
+     * works is not privileged.
+     */
+    if (msg.type === 'ping') {
+      return this.#send(ws, { type: 'pong', rid: msg.rid });
+    }
 
     if (msg.type === 'hello') {
       const user = this.#deps.accounts.resolveSession(msg.token);
