@@ -584,6 +584,41 @@ export class VoiceSession {
     if (cam.resourceUrl) await harmony.api.hangup(cam.resourceUrl).catch(() => {});
   }
 
+  /**
+   * Switch camera mid-call.
+   *
+   * replaceTrack, exactly as switchMic does, and for the same reason: the
+   * WHIP session stays up, so nobody watching has to tear their subscription
+   * down and rebuild it. Swapping a track of the same kind needs no
+   * renegotiation, which is the one thing MediaMTX's WHIP cannot do.
+   *
+   * Takes an already-open stream rather than a device id, because deciding
+   * what to do when a camera will not open is the caller's business -- it is
+   * the only one that can say so.
+   *
+   * @returns {Promise<boolean>} false if the stream had no video track or
+   *   there is no camera running, in which case nothing has changed.
+   */
+  async switchCam(stream) {
+    if (!this.#cam) return false;
+    const track = stream.getVideoTracks()[0];
+    if (!track) return false;
+
+    const sender = this.#cam.pc.getSenders().find((s) => s.track?.kind === 'video');
+    if (!sender) return false;
+    track.contentHint = 'motion';
+    await sender.replaceTrack(track);
+
+    this.#camStream?.getTracks().forEach((t) => t.stop());
+    this.#camStream = stream;
+    return true;
+  }
+
+  /** The device the camera is actually on, as the browser reports it. */
+  get camDeviceId() {
+    return this.#camStream?.getVideoTracks()[0]?.getSettings?.().deviceId ?? '';
+  }
+
   get camLive() {
     return Boolean(this.#cam);
   }

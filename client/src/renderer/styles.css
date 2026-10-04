@@ -280,17 +280,50 @@ select:focus {
 
 /* ---------- channels ---------- */
 
+/*
+ * Three columns: the channel list, the call, and the stage.
+ *
+ * The stage is whatever you are looking at -- the screens and cameras in
+ * your voice channel, or a text channel, never both at once. They used to be
+ * stacked in the middle column, which meant opening #general while somebody
+ * was sharing produced a chat log, a roster, a mosaic, a soundpad and a row
+ * of controls in one scrolling strip with no height limit on any of them.
+ *
+ * Which columns exist depends on what there is to show, because an empty
+ * grid track still reserves its width: a permanently-present stage column is
+ * a third of the window left black whenever nobody is sharing.
+ */
 .channels-layout {
   display: grid;
-  grid-template-columns: minmax(180px, 240px) 1fr;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
   gap: 1rem;
   padding: 1rem;
   height: calc(100% - 3.5rem);
   box-sizing: border-box;
 }
 
+/* In a call, with something on the stage: all three. 2fr for the stage,
+   because what is on it is the thing the window is for, and a 16:9 tile at a
+   third of the width is a postage stamp. */
+.channels-layout[data-voice][data-stage] {
+  grid-template-columns: minmax(170px, 210px) minmax(240px, 1fr) minmax(0, 2fr);
+}
+
+/* On the stage but not in a call -- reading a text channel. The call column
+   would be an empty "pick a voice channel" panel, so it goes away. */
+.channels-layout[data-stage]:not([data-voice]) .channel-main {
+  display: none;
+}
+
+@media (max-width: 1100px) {
+  .channels-layout[data-voice][data-stage] {
+    grid-template-columns: minmax(150px, 190px) minmax(210px, 1fr) minmax(0, 1.3fr);
+  }
+}
+
 @media (max-width: 720px) {
-  .channels-layout {
+  .channels-layout,
+  .channels-layout[data-voice][data-stage] {
     grid-template-columns: 1fr;
     grid-template-rows: auto 1fr;
   }
@@ -399,6 +432,25 @@ select:focus {
   display: flex;
   flex-direction: column;
 }
+
+/*
+ * The roster scrolls; the panel does not.
+ *
+ * Without this the panel is pushed off the bottom by a long roster, and
+ * "Disconnect" becomes something you have to scroll to find while twelve
+ * people are talking over you.
+ */
+#voice-active {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+#voice-roster {
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
 .empty-pane {
   margin: auto;
   opacity: 0.6;
@@ -480,21 +532,80 @@ select:focus {
   opacity: 0.6;
 }
 
+/* ---------- right-click somebody ---------- */
+
+/*
+ * Positioned by script against the pointer, so it is fixed rather than
+ * absolute: a roster that scrolls would otherwise carry the menu away from
+ * the cursor it was opened at.
+ */
+.peer-menu {
+  position: fixed;
+  z-index: 40;
+  min-width: 15rem;
+  max-width: 20rem;
+  padding: 0.5rem;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: #1b1d22;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+  font-size: 0.85rem;
+}
+.peer-menu-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.15rem 0.3rem 0.45rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  margin-bottom: 0.4rem;
+}
+.peer-menu-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.peer-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.peer-menu-row > span:first-child {
+  font-size: 0.75rem;
+  opacity: 0.65;
+}
+/* Full-width rather than inline: a menu entry is a target, and a 2rem-wide
+   one beside three others is how you force-mute somebody by accident. */
+.peer-menu button.menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.35rem 0.45rem;
+}
+.peer-menu select {
+  width: 100%;
+}
+.peer-menu hr {
+  border: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  margin: 0.25rem 0;
+}
+
 /* ---------- per-person volume ---------- */
 
 .peer-audio {
-  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 0.3rem;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .peer-mute {
   font-variant-emoji: text;
   line-height: 1.3;
 }
 .peer-volume {
-  width: 6.5rem;
+  flex: 1 1 auto;
+  min-width: 5rem;
   accent-color: var(--accent, #6ea8fe);
 }
 .peer-volume-label {
@@ -542,12 +653,142 @@ select:focus {
   display: none;
 }
 
-.voice-controls {
+/* ---------- the voice panel ---------- */
+
+/*
+ * Pinned to the bottom of the middle column: where you are, and everything
+ * you can do about it, in one block that does not move when the roster
+ * grows.
+ */
+.voice-panel {
   margin-top: auto;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 0.6rem;
+  margin-bottom: 0.2rem;
+}
+.voice-panel-head {
   display: flex;
+  align-items: center;
   gap: 0.5rem;
-  padding-top: 1rem;
-  flex-wrap: wrap;
+}
+.voice-panel-where {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+.voice-panel-where strong {
+  font-size: 0.85rem;
+  color: #3fc77a;
+}
+.voice-panel-where .muted {
+  font-size: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Amber while reconnecting, because a green "connected" that is lying is
+   worse than no indicator at all. */
+.voice-panel[data-state='connecting'] .voice-panel-where strong {
+  color: #e3a008;
+}
+
+/* Three bars, drawn rather than imported: it is three divs' worth of CSS and
+   the alternative is an icon font for one glyph. */
+.voice-signal {
+  flex: 0 0 auto;
+  width: 0.95rem;
+  height: 0.8rem;
+  background:
+    linear-gradient(#3fc77a, #3fc77a) 0 100% / 0.22rem 40% no-repeat,
+    linear-gradient(#3fc77a, #3fc77a) 50% 100% / 0.22rem 70% no-repeat,
+    linear-gradient(#3fc77a, #3fc77a) 100% 100% / 0.22rem 100% no-repeat;
+}
+.voice-panel[data-state='connecting'] .voice-signal {
+  background-image:
+    linear-gradient(#e3a008, #e3a008),
+    linear-gradient(rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.2)),
+    linear-gradient(rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.2));
+}
+
+.icon-btn {
+  margin-left: auto;
+  flex: 0 0 auto;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  border-radius: 6px;
+  padding: 0.3rem 0.45rem;
+  /* The label is for screen readers and for tests; the glyph is the button. */
+  font-size: 0;
+}
+.icon-btn::before {
+  content: '\260E';
+  font-size: 1rem;
+  line-height: 1;
+  font-variant-emoji: text;
+}
+.icon-btn.hangup {
+  color: #ff8c8c;
+}
+.icon-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.voice-panel-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(4.2rem, 1fr));
+  gap: 0.35rem;
+  margin-top: 0.55rem;
+}
+.voice-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.45rem 0.25rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+  font: inherit;
+  font-size: 0.68rem;
+  line-height: 1.2;
+  cursor: pointer;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* From the attribute, so the button's textContent stays exactly its label. */
+.voice-action::before {
+  content: attr(data-glyph);
+  font-size: 1.05rem;
+  line-height: 1;
+  font-variant-emoji: text;
+}
+.voice-action:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+/* On reads as "this is doing something", which for a mute means the red of a
+   thing that is off and for a camera the blue of a thing that is on. */
+.voice-action[data-on] {
+  background: rgba(110, 168, 254, 0.22);
+  border-color: rgba(110, 168, 254, 0.5);
+}
+.voice-action[data-on][data-off-state] {
+  background: rgba(255, 140, 140, 0.18);
+  border-color: rgba(255, 140, 140, 0.45);
+  color: #ffbcbc;
+}
+.voice-action:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 button.danger {
   color: #ff8c8c;
@@ -717,18 +958,39 @@ button.danger {
 /* ---------- the channel mosaic ---------- */
 
 /*
- * Everyone's camera and screen inside the voice channel. auto-fill rather
- * than a fixed column count so the grid reflows with the window instead of
- * squeezing eight tiles into a strip; max-height keeps it from pushing the
- * soundpad and the controls off the bottom of the pane.
+ * Everyone's camera and screen inside the voice channel, in the right-hand
+ * column. auto-fill rather than a fixed column count so the grid reflows
+ * with the window instead of squeezing eight tiles into a strip.
+ *
+ * No max-height any more: the column is its own scroll container, so the
+ * grid can be as tall as it likes without reaching the roster or the panel.
  */
+.channel-stage {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+/* Both children fill the column and scroll inside it. Neither can push the
+   other anywhere, because only one of them is ever shown. */
+.channel-stage > * {
+  flex: 1 1 auto;
+  min-height: 0;
+}
 .channel-video {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-auto-rows: min-content;
+  align-content: start;
   gap: 0.5rem;
-  margin-top: 0.75rem;
-  max-height: 46vh;
   overflow-y: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+/* One share, which is the usual case, should fill the column rather than
+   sit as a small square in the top-left of an empty third of the window. */
+.channel-video:has(> .channel-tile:only-child) {
+  grid-template-columns: 1fr;
 }
 .channel-tile {
   margin: 0;
@@ -827,7 +1089,7 @@ button.danger {
   grid-column: 1 / -1;
 }
 .channel-tile[data-big] video {
-  max-height: 42vh;
+  max-height: 72vh;
 }
 
 /* ---------- the one dialog ---------- */

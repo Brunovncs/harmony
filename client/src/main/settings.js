@@ -47,6 +47,10 @@ const DEFAULTS = {
    */
   voiceInputId: '',
   voiceOutputId: '',
+  // The webcam used inside a voice channel. Same rule: a preference, not a
+  // requirement, so unplugging it falls back to the default and plugging it
+  // back in restores it.
+  voiceCameraId: '',
   // Rolling clip buffer. Off by default: it is memory the user did not ask for.
   clipsEnabled: false,
   // GPU video encoding (NVENC / AMF / Quick Sync). 'auto' leaves Chromium to

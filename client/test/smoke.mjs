@@ -702,9 +702,20 @@ async function run() {
   const controls = await cdp.evaluate(`
     const ids = [
       'avatar-button', 'avatar-file', 'channels-avatar',
-      'channel-video', 'voice-screen', 'voice-cam',
+      'channel-video', 'voice-screen', 'voice-cam', 'voice-camera',
+      'channel-stage', 'peer-menu', 'voice-panel', 'voice-soundboard',
     ];
-    return ids.filter((id) => !document.getElementById(id));
+    const missing = ids.filter((id) => !document.getElementById(id));
+    // An id that appears twice is worse than one that is missing:
+    // getElementById silently returns the first, so the second copy is a
+    // control nothing is ever wired to. index.html carried two #ask
+    // dialogs for a release this way.
+    const seen = new Map();
+    for (const node of document.querySelectorAll('[id]')) {
+      seen.set(node.id, (seen.get(node.id) ?? 0) + 1);
+    }
+    const duplicated = [...seen].filter(([, n]) => n > 1).map(([id]) => id);
+    return [...missing, ...duplicated.map((id) => id + ' (duplicated)')];
   `);
   check(
     'the channels view has an avatar control, a video grid and a screen button',

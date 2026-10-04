@@ -111,6 +111,8 @@ const el = {
   channelsSignout: $('channels-signout'),
   channelAdd: $('channel-add'),
   channelItems: $('channel-items'),
+  channelsLayout: document.querySelector('.channels-layout'),
+  channelStage: $('channel-stage'),
   channelsError: $('channels-error'),
   voiceIdle: $('voice-idle'),
   voiceActive: $('voice-active'),
@@ -144,11 +146,20 @@ const el = {
   voiceInput: $('voice-input'),
   voiceOutput: $('voice-output'),
   voiceDeviceNote: $('voice-device-note'),
+  voiceCamera: $('voice-camera'),
   voiceCam: $('voice-cam'),
   voiceScreen: $('voice-screen'),
   voiceMute: $('voice-mute'),
   voiceDeafen: $('voice-deafen'),
+  voiceSoundboard: $('voice-soundboard'),
   voiceLeave: $('voice-leave'),
+  voicePanel: $('voice-panel'),
+  voiceState: $('voice-state'),
+  voiceWhere: $('voice-where'),
+  peerMenu: $('peer-menu'),
+  peerMenuAvatar: $('peer-menu-avatar'),
+  peerMenuName: $('peer-menu-name'),
+  peerMenuBody: $('peer-menu-body'),
 
   pickerUsername: $('picker-username'),
   pickerBack: $('picker-back'),
@@ -1257,6 +1268,16 @@ function renderChannels() {
       status.className = 'status';
       renderStatus(status, member);
       row.append(status);
+
+      // The same menu as the roster. Right-clicking somebody in the sidebar
+      // is the natural thing to try, and an admin muting someone in a
+      // channel they are not in is the main reason to want it.
+      row.title = 'Right-click for volume and controls';
+      row.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openPeerMenu(channel.id, member.mid, event);
+      });
       return row;
     }));
 
@@ -1268,8 +1289,43 @@ function renderChannels() {
 
 async function onChannelClick(channel) {
   if (channel.kind !== 'voice') return openTextChannel(channel);
-  if (channel.id === state.voice.channelId) return undefined;
+  // Clicking the channel you are already in is how you get back to the
+  // streams after reading a text channel. It used to do nothing at all,
+  // which left the chat covering the thing you were trying to watch with no
+  // obvious way to put it away.
+  if (channel.id === state.voice.channelId) {
+    closeChat();
+    return undefined;
+  }
   return joinVoice(channel);
+}
+
+/**
+ * Decide what the right-hand column is showing, and whether it exists.
+ *
+ * ONE function, called from everywhere that could change the answer, rather
+ * than each caller toggling the two or three `hidden` flags it happens to
+ * know about. The previous arrangement had joinVoice, closeChat,
+ * openTextChannel and renderChannelVideo each setting a subset, which is why
+ * opening a text channel during a screen share showed both.
+ *
+ * The stage holds the chat OR the mosaic, never both: they are two things
+ * you look at, and the window is not big enough to look at two things.
+ */
+function applyStage() {
+  const chatting = Boolean(state.chat.channelId);
+  const tiles = el.channelVideo.childElementCount > 0;
+
+  el.chatActive.hidden = !chatting;
+  el.channelVideo.hidden = chatting || !tiles;
+
+  const stage = chatting || tiles;
+  el.channelStage.hidden = !stage;
+
+  // The grid's column count comes off these, because an empty track still
+  // reserves its width -- see the comment on .channels-layout.
+  el.channelsLayout.toggleAttribute('data-stage', stage);
+  el.channelsLayout.toggleAttribute('data-voice', !el.voiceActive.hidden);
 }
 
 async function joinVoice(channel, password) {
@@ -1315,9 +1371,16 @@ async function joinVoice(channel, password) {
       iceServers: state.session?.iceServers ?? state.mosaic?.iceServers ?? [],
     });
 
+    // Joining a voice channel puts the streams back on the stage. Clicking a
+    // voice channel is the only way back from a text channel, so leaving the
+    // chat up here would make the stage a one-way door again.
+    closeChat();
+
     el.voiceName.textContent = channel.name;
     el.voiceIdle.hidden = true;
     el.voiceActive.hidden = false;
+    applyVoiceConnection(true);
+    applyStage();
 
     await state.voice.startMic(
       reply.publish.voice,
@@ -1445,8 +1508,9 @@ async function leaveVoice({ silent = false } = {}) {
     await harmony.realtime.request('voice:leave', { channelId }).catch(() => {});
   }
   state.channels.roster = [];
+  closePeerMenu();
   el.voiceActive.hidden = true;
-  el.voiceIdle.hidden = false;
+  el.voiceIdle.hidden = state.chat.channelId !== null;
   renderChannelVideo();
   applyVoiceButtons();
   renderChannels();
@@ -1460,10 +1524,38 @@ function applyVoiceButtons() {
   el.voiceCam.textContent = state.voice.camLive ? 'Stop camera' : 'Start camera';
   el.voiceCam.toggleAttribute('data-on', state.voice.camLive);
 
+  // Mute and deafen light up red rather than blue: they are the two that
+  // mean something is NOT happening, and a lit button that means "off" is
+  // how you end up talking to a room that cannot hear you.
+  el.voiceMute.toggleAttribute('data-off-state', true);
+  el.voiceDeafen.toggleAttribute('data-off-state', true);
+
   const sharing = state.share.target?.channelId === state.voice.channelId
     && Boolean(state.voice.channelId);
   el.voiceScreen.textContent = sharing ? 'Stop sharing' : 'Share screen here';
   el.voiceScreen.toggleAttribute('data-on', sharing);
+
+  el.voiceSoundboard.toggleAttribute('data-on', !el.soundpad.hidden);
+
+  const channel = state.channels.list.find((c) => c.id === state.voice.channelId);
+  el.voiceWhere.textContent = channel ? channel.name : '';
+
+  /*
+   * The top-right share button goes away while you are in a call.
+   *
+   * It publishes to the FLAT namespace -- the one an old client watches
+   * through the mosaic -- and the panel's button publishes into the channel.
+   * Having both reachable at once meant picking the wrong one shared your
+   * screen to a place the people you were talking to could not see, with no
+   * feedback that anything was wrong except that nobody said anything.
+   */
+  el.channelsShare.hidden = Boolean(state.voice.channelId);
+}
+
+/** Connected, or trying to be. Driven by the socket, never by guesswork. */
+function applyVoiceConnection(up) {
+  el.voicePanel.dataset.state = up ? 'connected' : 'connecting';
+  el.voiceState.textContent = up ? 'Voice connected' : 'Reconnecting\u2026';
 }
 
 /**
@@ -1520,18 +1612,6 @@ function voiceRow(member) {
   const li = document.createElement('li');
   li.dataset.mid = String(member.mid);
 
-  /*
-   * Which person this row is for, read off the ROW at click time rather than
-   * captured in the handlers.
-   *
-   * Rows are reused across roster pushes, so a closure here holds whichever
-   * member object happened to be current when the row was first built. A slot
-   * is also reused -- the lowest free number goes to the next person to join
-   * -- so that stale object can end up describing somebody else entirely, and
-   * a volume set on one person silently lands on another.
-   */
-  const owner = () => Number(li.dataset.userId);
-
   li.append(avatarEl(knownUser(member.userId) ?? { nickname: member.nickname }));
 
   const name = document.createElement('span');
@@ -1542,45 +1622,25 @@ function voiceRow(member) {
   status.className = 'status';
   li.append(status);
 
-  if (member.mid === state.voice.mid) return li;
-
-  // --- per-person audio, for everybody except yourself -------------------
-  //
-  // Local only: nothing here is sent anywhere. Turning somebody down is about
-  // your speakers, and broadcasting it would be both useless and rude.
-  const controls = document.createElement('span');
-  controls.className = 'peer-audio';
-
-  const mute = document.createElement('button');
-  mute.className = 'ghost tiny peer-mute';
-  mute.addEventListener('click', () => {
-    const id = owner();
-    const now = state.voice.setPeerMuted(id, !state.voice.peerMuted(id));
-    // Un-muting somebody who is still at zero would be a no-op that looks
-    // like a broken button.
-    if (!now && state.voice.peerGain(id) === 0) state.voice.setPeerGain(id, 1);
-    renderVoiceRoster(state.channels.roster);
+  /*
+   * Everything you can do TO somebody is behind a right-click.
+   *
+   * It used to be on the row: a local mute, a volume slider, a percentage, a
+   * force-mute button and a move dropdown, per person. Five controls and a
+   * name in a column that is now a third of the window is not a layout, and
+   * the slider in particular ended up about two centimetres wide.
+   *
+   * Nothing here captures the member object. Rows are reused across roster
+   * pushes and slots are reused across joins, so the menu reads whoever the
+   * row currently belongs to at the moment it is opened -- see the comment
+   * on openPeerMenu.
+   */
+  li.title = 'Right-click for volume and controls';
+  li.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    openPeerMenu(state.voice.channelId, Number(li.dataset.mid), event);
   });
 
-  const volume = document.createElement('input');
-  volume.type = 'range';
-  volume.className = 'peer-volume';
-  volume.min = '0';
-  volume.max = String(asPercent(MAX_GAIN));
-  volume.step = '5';
-  volume.title = 'How loudly you hear this person';
-
-  const label = document.createElement('span');
-  label.className = 'peer-volume-label';
-
-  volume.addEventListener('input', () => {
-    const percent = Number(volume.value);
-    state.voice.setPeerGain(owner(), percent / 100);
-    applyPeerVolumeLook(volume, label, percent, false);
-  });
-
-  controls.append(mute, volume, label);
-  li.append(controls);
   return li;
 }
 
@@ -1601,6 +1661,158 @@ function applyPeerVolumeLook(volume, label, percent, muted) {
   label.title = boosted && !muted
     ? 'Louder than the original. Amplified audio can distort.'
     : '';
+}
+
+/**
+ * The menu you get by right-clicking somebody.
+ *
+ * Takes a channel and a SLOT rather than a member object, and looks the
+ * person up when it opens. The roster arrives again on every mute, join and
+ * leave, and a slot is handed to the next person to join once its previous
+ * holder leaves, so a captured object can end up describing somebody else
+ * entirely -- which is exactly how a volume set on one person used to land
+ * on another.
+ */
+let peerMenuOpen = null;
+
+function closePeerMenu() {
+  el.peerMenu.hidden = true;
+  peerMenuOpen = null;
+}
+
+function openPeerMenu(channelId, mid, event) {
+  const roster = channelId === state.voice.channelId
+    ? state.channels.roster
+    : (state.channels.rosters[channelId] ?? []);
+  const member = roster.find((m) => m.mid === mid);
+  if (!member) return;
+  // Both halves, because slots are per channel: mid 1 in the channel you are
+  // in is you, and mid 1 in the one next door is somebody else entirely.
+  if (channelId === state.voice.channelId && mid === state.voice.mid) return;
+
+  peerMenuOpen = { channelId, mid };
+  const userId = member.userId;
+
+  el.peerMenuAvatar.replaceChildren(
+    ...avatarEl(knownUser(userId) ?? { nickname: member.nickname }).childNodes,
+  );
+  el.peerMenuName.textContent = member.nickname;
+
+  const rows = [];
+
+  // Local audio, and only where it can do anything: turning somebody in
+  // another channel down is a control that visibly does nothing.
+  if (channelId === state.voice.channelId) {
+    const mute = document.createElement('button');
+    mute.type = 'button';
+    mute.className = 'ghost menu-item peer-mute';
+
+    const row = document.createElement('div');
+    row.className = 'peer-menu-row peer-audio';
+    const volume = document.createElement('input');
+    volume.type = 'range';
+    volume.className = 'peer-volume';
+    volume.min = '0';
+    volume.max = String(asPercent(MAX_GAIN));
+    volume.step = '5';
+    volume.title = 'How loudly you hear this person';
+    const label = document.createElement('span');
+    label.className = 'peer-volume-label';
+    row.append(volume, label);
+
+    const paint = () => {
+      const muted = state.voice.peerMuted(userId);
+      applyPeerVolumeLook(volume, label, asPercent(state.voice.peerGain(userId)), muted);
+      mute.textContent = muted ? 'Unmute for me' : 'Mute for me';
+      mute.toggleAttribute('data-on', muted);
+    };
+
+    mute.addEventListener('click', () => {
+      const now = state.voice.setPeerMuted(userId, !state.voice.peerMuted(userId));
+      // Un-muting somebody who is still at zero would be a no-op that looks
+      // like a broken button.
+      if (!now && state.voice.peerGain(userId) === 0) state.voice.setPeerGain(userId, 1);
+      paint();
+      renderVoiceRoster(state.channels.roster);
+    });
+    volume.addEventListener('input', () => {
+      const percent = Number(volume.value);
+      state.voice.setPeerGain(userId, percent / 100);
+      applyPeerVolumeLook(volume, label, percent, false);
+    });
+
+    paint();
+    rows.push(mute, row);
+  }
+
+  if (isAdmin()) {
+    if (rows.length) rows.push(document.createElement('hr'));
+
+    const force = document.createElement('button');
+    force.type = 'button';
+    force.className = 'ghost menu-item force-mute';
+    force.textContent = member.forceMuted ? 'Unmute' : 'Force mute';
+    force.addEventListener('click', () => {
+      // Read the CURRENT roster rather than the member captured above: the
+      // menu can sit open while somebody else mutes them.
+      const live = (channelId === state.voice.channelId
+        ? state.channels.roster
+        : (state.channels.rosters[channelId] ?? [])).find((m) => m.mid === mid);
+      harmony.realtime.request('admin:force-mute', {
+        channelId, mid, muted: !live?.forceMuted,
+      }).catch((err) => showChannelsError(err.message));
+      closePeerMenu();
+    });
+
+    /**
+     * Move somebody into another channel.
+     *
+     * A select rather than a button per channel: the server already accepts
+     * any voice channel as a destination, and the list is as long as the
+     * server's. Disconnecting is the same request with a null destination,
+     * which is why it sits in the same control.
+     */
+    const move = document.createElement('select');
+    move.className = 'move-select';
+    move.title = 'Move this person';
+    move.append(new Option('Move\u2026', ''));
+    for (const channel of state.channels.list) {
+      if (channel.kind !== 'voice' || channel.id === channelId) continue;
+      move.append(new Option(channel.name, String(channel.id)));
+    }
+    move.append(new Option('Disconnect', 'none'));
+    move.addEventListener('change', () => {
+      const choice = move.value;
+      move.value = '';
+      if (!choice) return;
+      harmony.realtime.request('admin:move', {
+        userId,
+        toChannelId: choice === 'none' ? null : Number(choice),
+      }).catch((err) => showChannelsError(err.message));
+      closePeerMenu();
+    });
+
+    rows.push(force, move);
+  }
+
+  // Nothing on offer -- an ordinary member right-clicking somebody in a
+  // channel they are not in. A menu with no entries is worse than none.
+  if (rows.length === 0) {
+    peerMenuOpen = null;
+    return;
+  }
+  el.peerMenuBody.replaceChildren(...rows);
+
+  // Shown before measuring, off-screen, because a hidden element has no size
+  // and the whole point of the clamp below is to keep it on screen.
+  el.peerMenu.style.left = '-9999px';
+  el.peerMenu.style.top = '0px';
+  el.peerMenu.hidden = false;
+  const box = el.peerMenu.getBoundingClientRect();
+  const x = Math.min(event.clientX, window.innerWidth - box.width - 8);
+  const y = Math.min(event.clientY, window.innerHeight - box.height - 8);
+  el.peerMenu.style.left = `${Math.max(8, x)}px`;
+  el.peerMenu.style.top = `${Math.max(8, y)}px`;
 }
 
 function renderVoiceRoster(roster) {
@@ -1625,91 +1837,16 @@ function renderVoiceRoster(roster) {
       member.nickname + (member.mid === state.voice.mid ? ' (you)' : '');
     renderStatus(li.querySelector('.status'), member);
 
-    const volume = li.querySelector('.peer-volume');
-    if (volume) {
-      const muted = state.voice.peerMuted(member.userId);
-      const percent = asPercent(state.voice.peerGain(member.userId));
-      applyPeerVolumeLook(volume, li.querySelector('.peer-volume-label'), percent, muted);
-      // Greys their picture: you can still see them talking, which is the
-      // point, but it should not look like audio that is failing.
-      li.toggleAttribute('data-local-muted', muted);
-      const button = li.querySelector('.peer-mute');
-      button.textContent = muted ? '\u{1F507}' : '\u{1F509}';
-      button.title = muted ? `Unmute ${member.nickname} for yourself` : `Mute ${member.nickname} for yourself`;
-      button.toggleAttribute('data-on', muted);
-    }
-
-    // Admin controls are added once, on first build, and left alone after.
-    if (li.dataset.admin === '1' || !isAdmin() || member.mid === state.voice.mid) return li;
-    li.dataset.admin = '1';
-    {
-      const mute = document.createElement('button');
-      mute.className = 'ghost small force-mute';
-      mute.textContent = member.forceMuted ? 'Unmute' : 'Force mute';
-      mute.addEventListener('click', () => {
-        /*
-         * Read the state off the CURRENT roster, not off the member object
-         * this row was built from.
-         *
-         * Rows are reused across pushes, so that object is frozen at the
-         * moment the row first appeared -- when nobody was force-muted. So
-         * `!member.forceMuted` was permanently true and the button could
-         * only ever mute: pressing it again sent another mute, and there
-         * was no way to undo one. The label updated correctly, which made
-         * it look like the button simply did nothing.
-         */
-        const mid = Number(li.dataset.mid);
-        const now = state.channels.roster.find((m) => m.mid === mid);
-        harmony.realtime.request('admin:force-mute', {
-          channelId: state.voice.channelId,
-          mid,
-          muted: !now?.forceMuted,
-        }).catch((err) => showChannelsError(err.message));
-      });
-
-      /**
-       * Move somebody into another channel.
-       *
-       * A select rather than a button per channel: the server already accepts
-       * any voice channel as a destination, and the list is as long as the
-       * server's. Disconnecting is the same request with a null destination,
-       * which is why it sits in the same control.
-       */
-      const move = document.createElement('select');
-      move.className = 'move-select';
-      move.title = 'Move this person';
-      move.append(new Option('Move\u2026', ''));
-      for (const channel of state.channels.list) {
-        if (channel.kind !== 'voice' || channel.id === state.voice.channelId) continue;
-        move.append(new Option(channel.name, String(channel.id)));
-      }
-      move.append(new Option('Disconnect', 'none'));
-      move.addEventListener('change', () => {
-        const choice = move.value;
-        move.value = '';
-        if (!choice) return;
-        harmony.realtime.request('admin:move', {
-          // Off the row, for the same reason as the force-mute above.
-          // Read inline: voiceRow's owner() helper is a different function's
-          // local, and reaching for it here is a ReferenceError at click
-          // time that no syntax check can see.
-          userId: Number(li.dataset.userId),
-          toChannelId: choice === 'none' ? null : Number(choice),
-        }).catch((err) => showChannelsError(err.message));
-      });
-
-      li.append(mute, move);
-    }
+    // Greys their picture: you can still see them talking, which is the
+    // point, but it should not look like audio that is failing.
+    li.toggleAttribute('data-local-muted', state.voice.peerMuted(member.userId));
 
     return li;
   }));
 
-  // The force-mute button's own label is the one admin bit that changes.
-  for (const member of roster) {
-    const li = el.voiceRoster.querySelector(`li[data-mid="${member.mid}"]`);
-    const force = li?.querySelector('.force-mute');
-    if (force) force.textContent = member.forceMuted ? 'Unmute' : 'Force mute';
-  }
+  // An open menu follows the person it was opened on. Leaving it showing a
+  // force-mute for somebody who has left is how an admin mutes a stranger.
+  if (peerMenuOpen && !roster.some((m) => m.mid === peerMenuOpen.mid)) closePeerMenu();
 }
 
 /**
@@ -1755,7 +1892,7 @@ function renderSpeaking() {
 // ---------------------------------------------------------------------------
 
 /** Devices seen at the last enumeration, so a change can be compared. */
-let lastDevices = { inputs: [], outputs: [] };
+let lastDevices = { inputs: [], outputs: [], cameras: [] };
 
 const deviceNote = (text) => {
   el.voiceDeviceNote.textContent = text;
@@ -1813,18 +1950,29 @@ async function refreshVoiceDevices({ apply = true } = {}) {
   const outputs = devices.filter((d) => d.kind === 'audiooutput' && d.deviceId !== 'communications');
   lastDevices = { inputs, outputs };
 
+  // Cameras are listed here too, so that the device row is one place rather
+  // than a microphone here and a webcam buried in the source picker. Their
+  // labels stay blank until camera permission has been granted once, which
+  // is why the fallback name is "Camera 2" rather than nothing.
+  const cameras = devices.filter((d) => d.kind === 'videoinput');
+  lastDevices = { inputs, outputs, cameras };
+
   const wantedIn = state.settings.voiceInputId ?? '';
   const wantedOut = state.settings.voiceOutputId ?? '';
+  const wantedCam = state.settings.voiceCameraId ?? '';
   const chosenIn = fillDevicePicker(el.voiceInput, inputs, wantedIn, 'System default');
   const chosenOut = fillDevicePicker(el.voiceOutput, outputs, wantedOut, 'System default');
+  const chosenCam = fillDevicePicker(el.voiceCamera, cameras, wantedCam, 'Default camera');
 
   // Chromium only exposes audiooutput once microphone permission has been
   // granted, and never on some Linux setups. An empty list is not a fault.
   el.voiceOutput.disabled = outputs.length === 0;
+  el.voiceCamera.disabled = cameras.length === 0;
 
   const missing = [];
   if (wantedIn && chosenIn !== wantedIn) missing.push('microphone');
   if (wantedOut && chosenOut !== wantedOut) missing.push('output');
+  if (wantedCam && chosenCam !== wantedCam) missing.push('camera');
   deviceNote(missing.length
     ? `Your chosen ${missing.join(' and ')} ${missing.length > 1 ? 'are' : 'is'} unplugged. `
       + 'Using the system default until it is back.'
@@ -1833,6 +1981,7 @@ async function refreshVoiceDevices({ apply = true } = {}) {
   if (!apply) return;
   await applyVoiceInput(chosenIn);
   await applyVoiceOutput(chosenOut);
+  await applyVoiceCamera(chosenCam);
 }
 
 /** Point the microphone at a device, if we are publishing one. */
@@ -1852,6 +2001,31 @@ async function applyVoiceOutput(deviceId) {
   if (!ok && deviceId) {
     deviceNote('This build cannot choose an output device; using the system default.');
   }
+}
+
+/**
+ * Point the camera at a device, if one is running.
+ *
+ * Same shape as the microphone, and for the same reason: replaceTrack on the
+ * live sender rather than a fresh publish, so nobody watching has to tear
+ * their subscription down and rebuild it to see you switch webcam.
+ */
+async function applyVoiceCamera(deviceId) {
+  if (!state.voice.camLive) return;
+  if (state.voice.camDeviceId === deviceId) return;
+  if (!deviceId && !state.settings.voiceCameraId) return;
+
+  const stream = await openCamera(deviceId).catch(() => null);
+  if (!stream) {
+    deviceNote('That camera could not be opened. Still using the previous one.');
+    return;
+  }
+  if (!await state.voice.switchCam(stream)) {
+    stream.getTracks().forEach((t) => t.stop());
+    deviceNote('That camera could not be opened. Still using the previous one.');
+    return;
+  }
+  renderChannelVideo();
 }
 
 /**
@@ -1915,8 +2089,6 @@ function renderChannelVideo() {
   const tiles = state.voice.channelId
     ? [...ownChannelTiles(), ...state.voice.videoTiles]
     : [];
-  el.channelVideo.hidden = tiles.length === 0;
-
   const existing = new Map(
     [...el.channelVideo.children].map((node) => [node.dataset.key, node]),
   );
@@ -2047,6 +2219,10 @@ function renderChannelVideo() {
     figure.append(video, label);
     return figure;
   }));
+
+  // After the children exist, not before: applyStage counts them to decide
+  // whether there is a stage at all.
+  applyStage();
 }
 
 // ---------------------------------------------------------------------------
@@ -2062,7 +2238,7 @@ async function openTextChannel(channel) {
   el.chatSearchClear.hidden = true;
   el.chatNote.textContent = '';
   el.voiceIdle.hidden = true;
-  el.chatActive.hidden = false;
+  applyStage();
   renderChannels();
 
   try {
@@ -2080,8 +2256,8 @@ async function openTextChannel(channel) {
 
 function closeChat() {
   state.chat.channelId = null;
-  el.chatActive.hidden = true;
   if (el.voiceActive.hidden) el.voiceIdle.hidden = false;
+  applyStage();
 }
 
 /** One message row. Attachments are rendered from the local cache. */
@@ -2278,7 +2454,12 @@ async function loadSoundpad() {
 
 function renderSoundpad() {
   el.soundpadAdd.hidden = !isAdmin();
-  el.soundpad.hidden = !state.soundpad.clips.length && !isAdmin();
+  // Shown unless the panel's soundboard button has been used to put it
+  // away. Default-on rather than default-off: a clip you cannot find is a
+  // clip nobody plays, and the button is there to reclaim the space in a
+  // narrow window rather than to reveal a hidden feature.
+  el.soundpad.hidden = el.soundpad.dataset.shown === '0'
+    || (!state.soundpad.clips.length && !isAdmin());
 
   el.soundpadGrid.replaceChildren(...state.soundpad.clips.map((clip, index) => {
     const button = document.createElement('button');
@@ -2386,19 +2567,35 @@ async function addSoundpadClip(file) {
 
 const CAMERA = { width: 640, height: 360, frameRate: 24, bitrate: 400_000 };
 
+/**
+ * Open a camera, preferring the chosen one.
+ *
+ * `exact` rather than `ideal` so that a device which is gone FAILS instead of
+ * silently handing back a different webcam -- the caller falls back to the
+ * default itself, and says so. The preference is never rewritten, which is
+ * what lets a camera that is plugged back in be picked up again.
+ */
+const openCamera = (deviceId) => navigator.mediaDevices.getUserMedia({
+  video: {
+    width: { ideal: CAMERA.width },
+    height: { ideal: CAMERA.height },
+    frameRate: { ideal: CAMERA.frameRate },
+    ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+  },
+});
+
 async function startCamera() {
   if (state.camera.publication || state.voice.camLive) return;
   const nickname = state.auth.user?.nickname;
   if (!nickname) return showChannelsError('Sign in first.');
 
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        width: { ideal: CAMERA.width },
-        height: { ideal: CAMERA.height },
-        frameRate: { ideal: CAMERA.frameRate },
-      },
-    });
+    const wanted = state.settings.voiceCameraId ?? '';
+    let stream = wanted ? await openCamera(wanted).catch(() => null) : null;
+    if (!stream) {
+      if (wanted) deviceNote('Your chosen camera is unplugged. Using the default one.');
+      stream = await openCamera('');
+    }
 
     /*
      * Inside a voice channel the camera goes to the CHANNEL path.
@@ -2614,10 +2811,12 @@ function onRealtimeEvent(msg) {
 
     case 'realtime:down':
       showChannelsError('Reconnecting\u2026');
+      applyVoiceConnection(false);
       break;
 
     case 'realtime:up':
       showChannelsError('');
+      applyVoiceConnection(true);
       // Everything the hello carries, not just the channel list: a client
       // that was away has missed every roster broadcast in between, and the
       // hello is the one message that brings the whole picture back.
@@ -4351,7 +4550,14 @@ el.continue.addEventListener('click', startSession);
 
 harmony.realtime.onEvent(onRealtimeEvent);
 
-el.channelsShare.addEventListener('click', () => enterPicker());
+el.channelsShare.addEventListener('click', () => {
+  // Clear the channel target first. enterPicker() reads it to decide which
+  // WHIP URL the share publishes to, and it is left set after a channel
+  // share stops -- so the top-right button could re-enter the picker still
+  // pointed at a channel, which is most of why it behaved oddly.
+  state.share.target = null;
+  return enterPicker();
+});
 el.channelsWatch.addEventListener('click', () => enterMosaic());
 
 el.channelsSignout.addEventListener('click', async () => {
@@ -4433,6 +4639,39 @@ el.voiceOutput.addEventListener('change', async () => {
 });
 
 el.voiceScreen.addEventListener('click', () => shareScreenHere());
+
+el.voiceSoundboard.addEventListener('click', () => {
+  el.soundpad.dataset.shown = el.soundpad.dataset.shown === '0' ? '1' : '0';
+  renderSoundpad();
+  applyVoiceButtons();
+});
+
+el.voiceCamera.addEventListener('change', async () => {
+  await harmony.settings.set({ voiceCameraId: el.voiceCamera.value });
+  state.settings = await harmony.settings.get();
+  deviceNote('');
+  await applyVoiceCamera(el.voiceCamera.value);
+});
+
+/*
+ * Dismissing the right-click menu.
+ *
+ * pointerdown rather than click, so it closes on the way down like every
+ * other menu; capture, so it still closes when the press lands on something
+ * that stops propagation. The menu itself is excluded, or dragging its
+ * volume slider would close it on the first pixel.
+ */
+document.addEventListener('pointerdown', (event) => {
+  if (el.peerMenu.hidden) return;
+  if (el.peerMenu.contains(event.target)) return;
+  closePeerMenu();
+}, true);
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') closePeerMenu();
+});
+// Scrolling the roster out from under it would leave it pointing at nothing.
+el.voiceRoster.addEventListener('scroll', () => closePeerMenu());
+window.addEventListener('blur', () => closePeerMenu());
 
 el.voiceCam.addEventListener('click', () =>
   (state.camera.publication || state.voice.camLive ? stopCamera() : startCamera()));

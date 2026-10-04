@@ -208,44 +208,95 @@ const joined = (cdp, n, who) => waitFor(
   { label: `${who} seeing ${n} in the roster`, timeoutMs: 30_000 },
 );
 
-/** The indicators and audio controls on one person's roster row. */
-const rosterRow = (cdp, who) => cdp.evaluate(`
+/*
+ * Everything you can do TO somebody is behind a right-click now.
+ *
+ * The volume, the local mute, the force-mute and the move target used to sit
+ * on the roster row. Five controls and a name per person did not fit once
+ * the mosaic moved into its own column, so they live in #peer-menu and these
+ * helpers open it the way a person does -- by right-clicking the row.
+ *
+ * Every one of them closes any menu that is already open FIRST. Opening a
+ * second without closing the first would silently leave the previous
+ * person's controls on screen, and reading them would quietly pass.
+ */
+const OPEN = (who) => `
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   const li = [...document.querySelectorAll('#voice-roster li')]
     .find((x) => x.querySelector('.member-name').textContent.startsWith(${JSON.stringify(who)}));
   if (!li) return null;
-  const volume = li.querySelector('.peer-volume');
-  const label = li.querySelector('.peer-volume-label');
+  li.dispatchEvent(new MouseEvent('contextmenu', {
+    bubbles: true, cancelable: true, clientX: 60, clientY: 60,
+  }));
+  const menu = document.getElementById('peer-menu');
+  const open = !menu.hidden;
+`;
+
+/** The indicators on a row, plus whatever right-clicking it offers. */
+const rosterRow = (cdp, who) => cdp.evaluate(OPEN(who) + `
+  const volume = open ? menu.querySelector('.peer-volume') : null;
+  const label = open ? menu.querySelector('.peer-volume-label') : null;
+  const mute = open ? menu.querySelector('.peer-mute') : null;
   return {
     status: [...li.querySelectorAll('.status-dot')].map((d) => d.dataset.kind),
     speaking: li.hasAttribute('data-speaking'),
     localMuted: li.hasAttribute('data-local-muted'),
+    menuOpen: open,
+    menuName: open ? document.getElementById('peer-menu-name').textContent : null,
     hasVolume: Boolean(volume),
     volume: volume ? Number(volume.value) : null,
     volumeMax: volume ? Number(volume.max) : null,
     boosted: Boolean(volume && volume.hasAttribute('data-boosted')),
     labelBoosted: Boolean(label && label.hasAttribute('data-boosted')),
     label: label ? label.textContent : null,
-    muteTitle: li.querySelector('.peer-mute') ? li.querySelector('.peer-mute').title : null,
+    muteLabel: mute ? mute.textContent : null,
     rowUser: li.dataset.userId,
   };
 `);
 
+/** What the menu offers an admin: the buttons and the move destinations. */
+const peerMenu = (cdp, who) => cdp.evaluate(OPEN(who) + `
+  if (!open) return { open: false, buttons: [], moveOptions: [] };
+  return {
+    open: true,
+    buttons: [...menu.querySelectorAll('button')].map((b) => b.textContent.trim()),
+    moveOptions: [...(menu.querySelector('.move-select')?.options ?? [])]
+      .map((o) => o.textContent),
+  };
+`);
+
 /** Drag one person's volume slider to a value. */
-const setPeerVolume = (cdp, who, percent) => cdp.evaluate(`
-  const li = [...document.querySelectorAll('#voice-roster li')]
-    .find((x) => x.querySelector('.member-name').textContent.startsWith(${JSON.stringify(who)}));
-  const v = li.querySelector('.peer-volume');
+const setPeerVolume = (cdp, who, percent) => cdp.evaluate(OPEN(who) + `
+  const v = menu.querySelector('.peer-volume');
   v.value = '${percent}';
   v.dispatchEvent(new Event('input', { bubbles: true }));
   return true;
 `);
 
 /** Click one person's local mute button. */
-const clickPeerMute = (cdp, who) => cdp.evaluate(`
-  const li = [...document.querySelectorAll('#voice-roster li')]
-    .find((x) => x.querySelector('.member-name').textContent.startsWith(${JSON.stringify(who)}));
-  li.querySelector('.peer-mute').click();
+const clickPeerMute = (cdp, who) => cdp.evaluate(OPEN(who) + `
+  menu.querySelector('.peer-mute').click();
   return true;
+`);
+
+/** Press one of the admin controls in somebody's menu. */
+const clickPeerButton = (cdp, who, text) => cdp.evaluate(OPEN(who) + `
+  const button = [...menu.querySelectorAll('button')]
+    .find((b) => b.textContent.trim() === ${JSON.stringify(text)});
+  if (!button) {
+    return { ok: false, saw: [...menu.querySelectorAll('button')].map((b) => b.textContent.trim()) };
+  }
+  button.click();
+  return { ok: true };
+`);
+
+/** Pick a destination from somebody's move control. */
+const movePeer = (cdp, who, value) => cdp.evaluate(OPEN(who) + `
+  const sel = menu.querySelector('.move-select');
+  if (!sel) return { ok: false };
+  sel.value = ${JSON.stringify(value)};
+  sel.dispatchEvent(new Event('change', { bubbles: true }));
+  return { ok: true };
 `);
 
 /** The state of the two device pickers. */
@@ -293,16 +344,20 @@ const pane = (cdp) => cdp.evaluate(`
     tiles: [...document.querySelectorAll('#channel-video .channel-tile figcaption')]
       .map((f) => f.textContent),
     videoShown: !document.getElementById('channel-video').hidden,
+    stage: {
+      shown: !document.getElementById('channel-stage').hidden,
+      chat: !document.getElementById('chat-active').hidden,
+      columns: {
+        voice: document.querySelector('.channels-layout').hasAttribute('data-voice'),
+        stage: document.querySelector('.channels-layout').hasAttribute('data-stage'),
+      },
+    },
     roster: rows.map((li) => ({
-      // The avatar is first, then the name span.
+      // The avatar is first, then the name span. Nothing else: the controls
+      // are behind a right-click, which peerMenu() drives.
       name: li.querySelector('.member-name')?.textContent,
       status: [...li.querySelectorAll('.status-dot')].map((d) => d.dataset.kind),
-      // Admin controls only. Every row now carries a local mute button too,
-      // and that one is not a permission -- it is your own speakers.
-      buttons: [...li.querySelectorAll('button')]
-        .filter((b) => !b.closest('.peer-audio'))
-        .map((b) => b.textContent),
-      moveOptions: [...(li.querySelector('.move-select')?.options ?? [])].map((o) => o.textContent),
+      buttons: [...li.querySelectorAll('button')].map((b) => b.textContent),
     })),
   };
 `);
@@ -502,28 +557,35 @@ async function run() {
     bobIdle.status.join(', ') || '(none)',
   );
   check(
-    'every row but your own carries a local mute and a volume slider',
-    bobIdle.hasVolume === true && bobIdle.volume === 100 && bobIdle.volumeMax === 350,
-    `${bobIdle.volume}% of max ${bobIdle.volumeMax}%`,
+    'right-clicking somebody offers a local mute and a volume slider',
+    bobIdle.menuOpen === true && bobIdle.hasVolume === true
+      && bobIdle.volume === 100 && bobIdle.volumeMax === 350,
+    `${bobIdle.menuName}: ${bobIdle.volume}% of max ${bobIdle.volumeMax}%`,
+  );
+  check(
+    'the roster row itself is just a person, with no controls on it',
+    aBoth.roster.every((r) => r.buttons.length === 0),
+    aBoth.roster.map((r) => `${r.name}:${r.buttons.length}`).join(', '),
   );
   const selfRow = await rosterRow(a, 'alice');
   check(
-    'you are not offered a volume slider for yourself',
-    selfRow.hasVolume === false,
-    'no slider on your own row',
+    'right-clicking yourself offers nothing, because none of it applies',
+    selfRow.menuOpen === false,
+    'no menu on your own row',
   );
 
-  const bobRow = aBoth.roster.find((r) => r.name.startsWith('bob'));
+  const bobMenu = await peerMenu(a, 'bob');
   check(
     'an admin gets a force-mute button and a move target on other people',
-    bobRow?.buttons.includes('Force mute') === true && bobRow.moveOptions.length >= 2,
-    `${bobRow?.buttons.join(', ')} + [${bobRow?.moveOptions.join(', ')}]`,
+    bobMenu.buttons.includes('Force mute') === true && bobMenu.moveOptions.length >= 2,
+    `${bobMenu.buttons.join(', ')} + [${bobMenu.moveOptions.join(', ')}]`,
   );
-  const aliceRowOnB = bBoth.roster.find((r) => r.name.startsWith('alice'));
+  const aliceMenuOnB = await peerMenu(b, 'alice');
   check(
     'a member gets no admin controls on anybody',
-    aliceRowOnB?.buttons.length === 0 && aliceRowOnB?.moveOptions.length === 0,
-    `${aliceRowOnB?.buttons.length ?? '?'} buttons`,
+    aliceMenuOnB.buttons.includes('Force mute') === false
+      && aliceMenuOnB.moveOptions.length === 0,
+    `${aliceMenuOnB.buttons.join(', ') || '(only their own speakers)'}`,
   );
 
   // --- mute and deafen --------------------------------------------------
@@ -721,7 +783,7 @@ async function run() {
     return {
       rows: document.querySelectorAll('#voice-roster li').length,
       aliceStatus: li ? [...li.querySelectorAll('.status-dot')].map((d) => d.dataset.kind) : null,
-      aliceVolume: li?.querySelector('.peer-volume')?.value ?? null,
+      aliceVolume: document.querySelector('#peer-menu .peer-volume')?.value ?? null,
       aliceLocalMuted: li?.hasAttribute('data-local-muted') ?? null,
       myMute: document.getElementById('voice-mute').textContent,
       myDeafen: document.getElementById('voice-deafen').textContent,
@@ -774,10 +836,8 @@ async function run() {
     `slider=${loud.boosted}, label=${loud.labelBoosted}`,
   );
 
-  const warn = await a.evaluate(`
-    const li = [...document.querySelectorAll('#voice-roster li')]
-      .find((x) => x.querySelector('.member-name').textContent.startsWith('bob'));
-    const label = li.querySelector('.peer-volume-label');
+  const warn = await a.evaluate(OPEN('bob') + `
+    const label = menu.querySelector('.peer-volume-label');
     return {
       colour: getComputedStyle(label).color,
       after: getComputedStyle(label, '::after').content,
@@ -1001,15 +1061,11 @@ async function run() {
     `forced=${forcedSide?.forced} muted=${forcedSide?.muted}`,
   );
 
-  const toggled = await a.evaluate(`
-    const row = [...document.querySelectorAll('#voice-roster li')]
-      .find((li) => li.textContent.includes('bob'));
-    return [...row.querySelectorAll('button')].map((x) => x.textContent);
-  `);
+  const toggled = await peerMenu(a, 'bob');
   check(
     'the button offers to undo it',
-    toggled.includes('Unmute'),
-    toggled.join(', '),
+    toggled.buttons.includes('Unmute'),
+    toggled.buttons.join(', '),
   );
 
   /*
@@ -1021,12 +1077,7 @@ async function run() {
    * every time and a force-mute could never be lifted. The label flipped
    * correctly, which made it look as though the button did nothing at all.
    */
-  await a.evaluate(`
-    const row = [...document.querySelectorAll('#voice-roster li')]
-      .find((li) => li.textContent.includes('bob'));
-    [...row.querySelectorAll('button')].find((x) => x.textContent === 'Unmute').click();
-    return true;
-  `);
+  const undo = await clickPeerButton(a, 'bob', 'Unmute');
   const lifted = await waitFor(
     b,
     "(() => { const li = [...document.querySelectorAll('#voice-roster li')]"
@@ -1037,18 +1088,11 @@ async function run() {
   check(
     'and a force-mute can actually be lifted again',
     Boolean(lifted),
-    lifted ? 'the admin mute cleared on the muted person' : 'stuck muted',
+    lifted ? 'the admin mute cleared on the muted person' : `stuck muted (${JSON.stringify(undo)})`,
   );
 
   // --- moving somebody out ----------------------------------------------
-  await a.evaluate(`
-    const row = [...document.querySelectorAll('#voice-roster li')]
-      .find((li) => li.textContent.includes('bob'));
-    const sel = row.querySelector('.move-select');
-    sel.value = 'none';
-    sel.dispatchEvent(new Event('change', { bubbles: true }));
-    return true;
-  `);
+  await movePeer(a, 'bob', 'none');
   const bLeft = await waitFor(b, "document.getElementById('voice-active').hidden === true", {
     label: 'Bob being disconnected',
   }).catch(() => false);
