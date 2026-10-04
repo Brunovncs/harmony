@@ -106,7 +106,6 @@ const el = {
   avatarButton: $('avatar-button'),
   avatarFile: $('avatar-file'),
   channelsRole: $('channels-role'),
-  channelsShare: $('channels-share'),
   channelsWatch: $('channels-watch'),
   channelsSignout: $('channels-signout'),
   channelAdd: $('channel-add'),
@@ -155,6 +154,8 @@ const el = {
   voiceMute: $('voice-mute'),
   voiceDeafen: $('voice-deafen'),
   voiceSoundboard: $('voice-soundboard'),
+  voiceConfig: $('voice-config'),
+  devicesDialog: $('devices'),
   voiceLeave: $('voice-leave'),
   voicePanel: $('voice-panel'),
   voiceState: $('voice-state'),
@@ -1325,10 +1326,16 @@ function applyStage() {
   const stage = chatting || tiles;
   el.channelStage.hidden = !stage;
 
-  // The grid's column count comes off these, because an empty track still
-  // reserves its width -- see the comment on .channels-layout.
+  // Whether the middle column exists at all comes off these -- see the
+  // comment on .channels-layout.
   el.channelsLayout.toggleAttribute('data-stage', stage);
   el.channelsLayout.toggleAttribute('data-voice', !el.voiceActive.hidden);
+
+  // The panel lives in the sidebar now, which is on screen whether or not
+  // you are in a call -- so it has to hide itself. It did not need to when
+  // it sat inside #voice-active.
+  el.voicePanel.hidden = el.voiceActive.hidden;
+  if (el.voiceActive.hidden) el.soundpad.hidden = true;
 }
 
 async function joinVoice(channel, password) {
@@ -1543,27 +1550,6 @@ function applyVoiceButtons() {
   const channel = state.channels.list.find((c) => c.id === state.voice.channelId);
   el.voiceWhere.textContent = channel ? channel.name : '';
 
-  /*
-   * The top-right share button follows you into the call.
-   *
-   * It used to publish to the FLAT namespace -- the one an old client
-   * watches through the mosaic -- while the panel's button published into
-   * the channel. Two buttons, almost the same label, genuinely different
-   * destinations: pressing the wrong one put your screen somewhere the
-   * people you were talking to could not see it, and the only feedback was
-   * that nobody said anything.
-   *
-   * Hiding it while in a call was the first attempt and it was the wrong
-   * one. The button you reach for should work, not vanish. So in a channel
-   * it IS the channel's share button, and it says where it is going.
-   */
-  if (state.voice.channelId) {
-    el.channelsShare.textContent = sharing
-      ? 'Stop sharing'
-      : `Share to ${channel?.name ?? 'this channel'}`;
-  } else {
-    el.channelsShare.textContent = 'Share my screen';
-  }
 }
 
 /** Connected, or trying to be. Driven by the socket, never by guesswork. */
@@ -2500,7 +2486,8 @@ function renderSoundpad() {
   // away. Default-on rather than default-off: a clip you cannot find is a
   // clip nobody plays, and the button is there to reclaim the space in a
   // narrow window rather than to reveal a hidden feature.
-  el.soundpad.hidden = el.soundpad.dataset.shown === '0'
+  el.soundpad.hidden = !state.voice.channelId
+    || el.soundpad.dataset.shown === '0'
     || (!state.soundpad.clips.length && !isAdmin());
 
   el.soundpadGrid.replaceChildren(...state.soundpad.clips.map((clip, index) => {
@@ -4597,18 +4584,6 @@ el.continue.addEventListener('click', startSession);
 
 harmony.realtime.onEvent(onRealtimeEvent);
 
-el.channelsShare.addEventListener('click', () => {
-  // In a channel this is the channel's share button, exactly as the one in
-  // the panel is. Same function, so the two can never drift.
-  if (state.voice.channelId) return shareScreenHere();
-
-  // Outside one, clear the channel target first. enterPicker() reads it to
-  // decide which WHIP URL to publish to, and it is left set after a channel
-  // share stops -- so this button could re-enter the picker still pointed at
-  // a channel, which is most of why it behaved oddly.
-  state.share.target = null;
-  return enterPicker();
-});
 el.channelsWatch.addEventListener('click', () => enterMosaic());
 
 el.channelsSignout.addEventListener('click', async () => {
@@ -4715,6 +4690,23 @@ el.soundpadMute.addEventListener('click', async () => {
   await harmony.settings.set({ soundpadVolume: now === 0 ? 100 : 0 });
   state.settings = await harmony.settings.get();
   applySoundpadVolume();
+});
+
+/*
+ * The device pickers.
+ *
+ * A plain <dialog> rather than ask(): the three selects already exist, they
+ * are already wired, and they apply as you change them. There is nothing to
+ * collect and nothing to answer -- the only thing the dialog adds is
+ * somewhere to put them.
+ *
+ * Re-enumerated on open rather than only on devicechange, because a device
+ * can have appeared while the app was in the background and this is the
+ * exact moment somebody wants to see it.
+ */
+el.voiceConfig.addEventListener('click', () => {
+  el.devicesDialog.showModal();
+  refreshVoiceDevices().catch((err) => deviceNote(err.message));
 });
 
 el.voiceSoundboard.addEventListener('click', () => {

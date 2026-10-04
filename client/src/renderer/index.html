@@ -206,7 +206,14 @@
           <span class="muted" id="channels-role"></span>
         </div>
         <div class="bar-right">
-          <button class="ghost small" id="channels-share">Share my screen</button>
+          <!--
+            No share button up here.
+
+            It published to the FLAT namespace while the panel's published
+            into the channel, and routing it into the channel instead still
+            left two buttons for one action. The panel is where everything
+            the call can do lives.
+          -->
           <button class="ghost small" id="channels-watch">Watch everyone</button>
           <button class="ghost small" id="channels-signout">Sign out</button>
         </div>
@@ -220,6 +227,94 @@
           </div>
           <ul id="channel-items"></ul>
           <p class="error" id="channels-error" hidden></p>
+
+          <!--
+            The call lives at the bottom of the channel list, where it is in
+            every other app of this shape. It was in the middle column, which
+            meant the controls moved -- and sometimes vanished -- depending on
+            whether somebody happened to be sharing a screen.
+          -->
+          <div class="soundpad" id="soundpad" hidden>
+            <div class="soundpad-head">
+              <h3>Soundpad</h3>
+              <button class="ghost small" id="soundpad-add" hidden>+ Add clip</button>
+              <input id="soundpad-file" type="file" accept="audio/*" hidden />
+              <!--
+                How loudly clips play FOR YOU. Local, like every other
+                volume in the app: the server sends the event and each
+                client plays its own cached copy, so there is nothing to
+                broadcast and turning an airhorn down is about your ears.
+              -->
+              <span class="peer-audio soundpad-volume-wrap">
+                <button
+                  class="ghost tiny peer-mute"
+                  id="soundpad-mute"
+                  type="button"
+                >&#128266;</button>
+                <input
+                  id="soundpad-volume"
+                  class="peer-volume"
+                  type="range"
+                  min="0"
+                  max="350"
+                  step="5"
+                  value="100"
+                  title="How loudly soundpad clips play for you"
+                />
+                <span class="peer-volume-label" id="soundpad-volume-label">100%</span>
+              </span>
+            </div>
+            <div class="soundpad-grid" id="soundpad-grid"></div>
+          </div>
+
+          <!--
+            The voice panel.
+
+            One place that says you are connected, where, and what you are
+            sending. There used to be a "Share my screen" in the title bar
+            as well, publishing to the FLAT namespace while this one
+            published into the channel -- two buttons with almost the same
+            label and genuinely different destinations, which is how a share
+            ended up somewhere nobody in the channel could see it. There is
+            one now, and it is this one.
+
+            The glyphs come from data-glyph through CSS ::before, not from
+            the markup, so each button's textContent stays exactly its
+            label. Several things read those labels to know what state the
+            call is in.
+          -->
+          <div class="voice-panel" id="voice-panel">
+            <div class="voice-panel-head">
+              <span class="voice-signal" id="voice-signal" aria-hidden="true"></span>
+              <span class="voice-panel-where">
+                <strong id="voice-state">Voice connected</strong>
+                <span class="muted" id="voice-where"></span>
+              </span>
+              <button class="icon-btn hangup" id="voice-leave" title="Disconnect">
+                Disconnect
+              </button>
+            </div>
+            <div class="voice-panel-actions">
+              <button class="voice-action" id="voice-cam" data-glyph="&#128247;">
+                Start camera
+              </button>
+              <button class="voice-action" id="voice-screen" data-glyph="&#128421;">
+                Share screen here
+              </button>
+              <button class="voice-action" id="voice-mute" data-glyph="&#127897;">
+                Mute mic
+              </button>
+              <button class="voice-action" id="voice-deafen" data-glyph="&#127911;">
+                Deafen
+              </button>
+              <button class="voice-action" id="voice-soundboard" data-glyph="&#127928;">
+                Soundboard
+              </button>
+              <button class="voice-action" id="voice-config" data-glyph="&#9881;">
+                Devices
+              </button>
+            </div>
+          </div>
         </aside>
 
         <section class="channel-main">
@@ -235,100 +330,6 @@
             </header>
             <ul id="voice-roster"></ul>
 
-            <div class="soundpad" id="soundpad" hidden>
-              <div class="soundpad-head">
-                <h3>Soundpad</h3>
-                <button class="ghost small" id="soundpad-add" hidden>+ Add clip</button>
-                <input id="soundpad-file" type="file" accept="audio/*" hidden />
-                <!--
-                  How loudly clips play FOR YOU. Local, like every other
-                  volume in the app: the server sends the event and each
-                  client plays its own cached copy, so there is nothing to
-                  broadcast and turning an airhorn down is about your ears.
-                -->
-                <span class="peer-audio soundpad-volume-wrap">
-                  <button
-                    class="ghost tiny peer-mute"
-                    id="soundpad-mute"
-                    type="button"
-                  >&#128266;</button>
-                  <input
-                    id="soundpad-volume"
-                    class="peer-volume"
-                    type="range"
-                    min="0"
-                    max="350"
-                    step="5"
-                    value="100"
-                    title="How loudly soundpad clips play for you"
-                  />
-                  <span class="peer-volume-label" id="soundpad-volume-label">100%</span>
-                </span>
-              </div>
-              <div class="soundpad-grid" id="soundpad-grid"></div>
-            </div>
-
-            <div class="voice-devices">
-              <label class="field inline">
-                <span>Microphone</span>
-                <select id="voice-input"></select>
-              </label>
-              <label class="field inline">
-                <span>Output</span>
-                <select id="voice-output"></select>
-              </label>
-              <label class="field inline">
-                <span>Camera</span>
-                <select id="voice-camera"></select>
-              </label>
-              <span class="muted" id="voice-device-note"></span>
-            </div>
-
-            <!--
-              The voice panel.
-
-              One place that says you are connected, where, and what you are
-              sending -- rather than a "Share my screen" in the title bar that
-              publishes to the FLAT namespace and a "Share screen here" down
-              here that publishes to the channel. Those were two buttons with
-              almost the same label doing genuinely different things, and the
-              top one was reachable while in a channel, which is how a share
-              ended up somewhere nobody in the channel could see it.
-
-              The glyphs come from data-glyph through CSS ::before, not from
-              the markup, so each button's textContent stays exactly its
-              label. Several things read those labels to know what state the
-              call is in.
-            -->
-            <div class="voice-panel" id="voice-panel">
-              <div class="voice-panel-head">
-                <span class="voice-signal" id="voice-signal" aria-hidden="true"></span>
-                <span class="voice-panel-where">
-                  <strong id="voice-state">Voice connected</strong>
-                  <span class="muted" id="voice-where"></span>
-                </span>
-                <button class="icon-btn hangup" id="voice-leave" title="Disconnect">
-                  Disconnect
-                </button>
-              </div>
-              <div class="voice-panel-actions">
-                <button class="voice-action" id="voice-cam" data-glyph="&#128247;">
-                  Start camera
-                </button>
-                <button class="voice-action" id="voice-screen" data-glyph="&#128421;">
-                  Share screen here
-                </button>
-                <button class="voice-action" id="voice-mute" data-glyph="&#127897;">
-                  Mute mic
-                </button>
-                <button class="voice-action" id="voice-deafen" data-glyph="&#127911;">
-                  Deafen
-                </button>
-                <button class="voice-action" id="voice-soundboard" data-glyph="&#127928;">
-                  Soundboard
-                </button>
-              </div>
-            </div>
           </div>
         </section>
 
@@ -566,6 +567,37 @@
       </div>
       <div class="peer-menu-body" id="peer-menu-body"></div>
     </div>
+
+    <!--
+      Microphone, output and camera.
+
+      Behind a button rather than three selects under the roster: they are
+      set once and then never again, and permanently on screen they took up
+      more room than the list of people in the call.
+    -->
+    <dialog id="devices" class="ask">
+      <form method="dialog">
+        <h2>Audio and video devices</h2>
+          <div class="voice-devices">
+            <label class="field inline">
+              <span>Microphone</span>
+              <select id="voice-input"></select>
+            </label>
+            <label class="field inline">
+              <span>Output</span>
+              <select id="voice-output"></select>
+            </label>
+            <label class="field inline">
+              <span>Camera</span>
+              <select id="voice-camera"></select>
+            </label>
+            <span class="muted" id="voice-device-note"></span>
+          </div>
+        <div class="ask-buttons">
+          <button type="submit" class="primary" id="devices-close">Done</button>
+        </div>
+      </form>
+    </dialog>
 
     <!-- ================= Add-stream picker ================= -->
     <div class="modal" id="add-stream" hidden>
