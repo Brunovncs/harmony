@@ -160,6 +160,7 @@ const el = {
   micMeterFill: $('mic-meter-fill'),
   micMeterMark: $('mic-meter-mark'),
   voiceSounds: $('voice-sounds'),
+  themeGrid: $('theme-grid'),
   voiceCamera: $('voice-camera'),
   voiceCam: $('voice-cam'),
   voiceScreen: $('voice-screen'),
@@ -449,6 +450,9 @@ function showError(message) {
 
 async function boot() {
   state.settings = await harmony.settings.get();
+  // First, before anything is drawn. Applying it later means the window
+  // opens in the default palette and flashes into the chosen one.
+  applyTheme(state.settings.theme);
   el.serverUrl.value = state.settings.serverUrl;
   el.username.value = state.settings.username;
   el.password.value = state.settings.password ?? '';
@@ -2170,6 +2174,86 @@ function renderSpeaking() {
 // work", and the opposite of what storing "whatever is selected right now"
 // would do.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Colour palettes
+//
+// Client side only. The whole mechanism is one attribute on <html>: the
+// stylesheet defines each palette as a block of custom properties under
+// :root[data-theme='x'], so switching is a single attribute write and
+// nothing re-renders.
+//
+// The names and the three preview bands are duplicated here rather than
+// read back out of the stylesheet. getComputedStyle could fetch them, but
+// only for the palette currently applied -- showing a swatch means painting
+// colours that are NOT in effect, and there is no way to ask the cascade
+// for those.
+// ---------------------------------------------------------------------------
+
+const THEMES = [
+  { id: 'midnight', name: 'Midnight', bands: ['#0f1116', '#1f232c', '#5b8cff'] },
+  { id: 'dark', name: 'Dark', bands: ['#1e1f22', '#313338', '#5865f2'] },
+  { id: 'onyx', name: 'Onyx', bands: ['#000000', '#141418', '#7c6cff'] },
+  { id: 'ocean', name: 'Ocean', bands: ['#0b141c', '#172836', '#38bdf8'] },
+  { id: 'forest', name: 'Forest', bands: ['#0e1512', '#1c2a23', '#3fb984'] },
+  { id: 'ember', name: 'Ember', bands: ['#17100e', '#2c1f1a', '#ff7a4d'] },
+  { id: 'lavender', name: 'Lavender', bands: ['#14111d', '#252036', '#a78bfa'] },
+  { id: 'daylight', name: 'Daylight', bands: ['#f2f3f5', '#ebedef', '#3a6df0'] },
+];
+
+const DEFAULT_THEME = 'midnight';
+
+/**
+ * Put a palette on.
+ *
+ * Tolerant of a name it does not know -- a settings file written by a later
+ * build, or edited by hand -- because the alternative is an app that opens
+ * with no colours at all over a spelling mistake.
+ */
+function applyTheme(id) {
+  const theme = THEMES.some((t) => t.id === id) ? id : DEFAULT_THEME;
+  document.documentElement.dataset.theme = theme;
+  return theme;
+}
+
+function renderThemes() {
+  const current = applyTheme(state.settings?.theme ?? DEFAULT_THEME);
+
+  el.themeGrid.replaceChildren(...THEMES.map((theme) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'theme-swatch';
+    button.dataset.theme = theme.id;
+    button.toggleAttribute('data-on', theme.id === current);
+
+    const bands = document.createElement('span');
+    bands.className = 'theme-bands';
+    for (const colour of theme.bands) {
+      const band = document.createElement('span');
+      // Inline, and deliberately: these are the colours of a palette that
+      // is NOT applied, so they cannot come from the cascade.
+      band.style.background = colour;
+      bands.append(band);
+    }
+
+    const name = document.createElement('span');
+    name.textContent = theme.name;
+
+    button.append(bands, name);
+    button.addEventListener('click', async () => {
+      // Applied before it is saved. Writing settings is a round trip
+      // through the main process, and a palette that takes a beat to appear
+      // feels like a click that missed.
+      applyTheme(theme.id);
+      for (const other of el.themeGrid.children) {
+        other.toggleAttribute('data-on', other.dataset.theme === theme.id);
+      }
+      await harmony.settings.set({ theme: theme.id });
+      state.settings = await harmony.settings.get();
+    });
+    return button;
+  }));
+}
 
 /** Devices seen at the last enumeration, so a change can be compared. */
 let lastDevices = { inputs: [], outputs: [], cameras: [] };
@@ -5502,6 +5586,7 @@ el.voiceSounds.addEventListener('change', async () => {
 
 el.voiceConfig.addEventListener('click', () => {
   el.devicesDialog.showModal();
+  renderThemes();
   el.voiceSounds.checked = state.settings?.voiceSounds !== false;
   applyMicTuning();
   startMicMeter();

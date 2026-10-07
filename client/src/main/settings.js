@@ -67,6 +67,16 @@ const DEFAULTS = {
   // them is to tell you about something you were not looking at.
   voiceSounds: true,
   /*
+   * The colour palette, by name. Purely local: it is never sent anywhere
+   * and is not per server, so two people in the same channel can be
+   * looking at different colours.
+   *
+   * A name rather than the colours themselves, so that adjusting a palette
+   * in a later build reaches everybody already using it instead of leaving
+   * them on a snapshot of how it looked the day they picked it.
+   */
+  theme: 'midnight',
+  /*
    * How loudly soundpad clips play, as a percentage.
    *
    * A number rather than a gain so that what is stored is what the slider

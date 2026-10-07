@@ -619,7 +619,23 @@
     -->
     <dialog id="devices" class="ask">
       <form method="dialog">
-        <h2>Audio and video devices</h2>
+        <h2>Settings</h2>
+
+        <!--
+          Colour, first, because it is the one people come looking for and
+          the only one here that is not about hardware.
+        -->
+        <section class="settings-section">
+          <h3>Colour palette</h3>
+          <p class="muted">
+            Yours alone. Nothing is sent to the server, and two people in the
+            same channel can be looking at different colours.
+          </p>
+          <div class="theme-grid" id="theme-grid"></div>
+        </section>
+
+        <section class="settings-section">
+          <h3>Devices</h3>
           <div class="voice-devices">
             <label class="field inline">
               <span>Microphone</span>
@@ -697,6 +713,7 @@
               </span>
             </label>
           </div>
+        </section>
         <div class="ask-buttons">
           <button type="submit" class="primary" id="devices-close">Done</button>
         </div>
