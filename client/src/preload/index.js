@@ -99,6 +99,7 @@ contextBridge.exposeInMainWorld('harmony', {
     roster: invoke('api:roster'),
     setRole: invoke('api:set-role'),
     setDisplayName: invoke('api:set-display-name'),
+    renameClip: invoke('api:rename-clip'),
     channels: invoke('api:channels'),
     createChannel: invoke('api:create-channel'),
     updateChannel: invoke('api:update-channel'),

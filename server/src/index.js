@@ -829,6 +829,7 @@ app.get('/api/soundpad', requireLogin, (_req, res) => {
 app.post('/api/soundpad', requireAdmin, (req, res) => {
   const result = soundpad.add({
     name: req.body?.name,
+    emoji: req.body?.emoji,
     fileHash: req.body?.hash,
     userId: req.user.id,
   });
@@ -861,6 +862,21 @@ app.post('/api/soundpad/reorder', requireAdmin, (req, res) => {
   const clips = result.clips.map(publicClip);
   realtime?.broadcast({ type: 'soundpad', clips });
   return res.json({ clips });
+});
+
+app.post('/api/soundpad/:id/rename', requireAdmin, (req, res) => {
+  const result = soundpad.rename(
+    Number.parseInt(req.params.id, 10), req.body?.name, req.body?.emoji,
+  );
+  if (!result.ok) {
+    const messages = {
+      no_such_clip: 'No such clip.',
+      invalid_name: 'Give the clip a name.',
+    };
+    return res.status(400).json({ error: result.error, message: messages[result.error] });
+  }
+  realtime?.broadcast({ type: 'soundpad', clips: soundpad.list().map(publicClip) });
+  return res.json({ clip: publicClip(result.clip) });
 });
 
 app.post('/api/soundpad/:id/delete', requireAdmin, (req, res) => {

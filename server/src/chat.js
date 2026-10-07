@@ -368,9 +368,11 @@ export class Soundpad {
         WHERE c.id = ?
       `),
       insert: db.prepare(
-        'INSERT INTO soundpad_clips (name, file_hash, uploaded_by, position, created_at) '
-        + 'VALUES (?, ?, ?, ?, ?)',
+        'INSERT INTO soundpad_clips '
+        + '(name, emoji, file_hash, uploaded_by, position, created_at) '
+        + 'VALUES (?, ?, ?, ?, ?, ?)',
       ),
+      rename: db.prepare('UPDATE soundpad_clips SET name = ?, emoji = ? WHERE id = ?'),
       nextPosition: db.prepare('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM soundpad_clips'),
       setPosition: db.prepare('UPDATE soundpad_clips SET position = ? WHERE id = ?'),
       remove: db.prepare('DELETE FROM soundpad_clips WHERE id = ?'),
@@ -384,7 +386,37 @@ export class Soundpad {
     return this.#q.all.all();
   }
 
-  add({ name, fileHash, userId }) {
+  /** Change a clip's label. The audio behind it is not touched. */
+  rename(id, name, emoji) {
+    const clip = this.#q.byId.get(Number(id));
+    if (!clip) return { ok: false, error: 'no_such_clip' };
+    const clean = String(name ?? '').trim().slice(0, 32);
+    if (!clean) return { ok: false, error: 'invalid_name' };
+    this.#q.rename.run(clean, Soundpad.emojiOf(emoji), clip.id);
+    return { ok: true, clip: this.#q.byId.get(clip.id) };
+  }
+
+  /**
+   * One emoji, or nothing.
+   *
+   * Taken as the FIRST grapheme rather than validated as "an emoji": there
+   * is no cheap, correct test for that, every approximation refuses
+   * something somebody wanted, and the worst case here is a clip labelled
+   * with a letter -- which is fine, and is what several of them will be
+   * anyway.
+   *
+   * \p{C} is refused for the same reason it is on a display name: a
+   * right-to-left override in a grid of buttons reverses the labels around
+   * it.
+   */
+  static emojiOf(raw) {
+    const value = String(raw ?? '').trim();
+    if (!value) return null;
+    if (/\p{C}/u.test(value)) return null;
+    return [...value][0] ?? null;
+  }
+
+  add({ name, emoji, fileHash, userId }) {
     const clean = String(name ?? '').trim().slice(0, 32);
     if (!clean) return { ok: false, error: 'invalid_name' };
 
@@ -401,7 +433,12 @@ export class Soundpad {
     this.#db.exec('BEGIN');
     try {
       const info = this.#q.insert.run(
-        clean, fileHash, userId, this.#q.nextPosition.get().p, Date.now(),
+        clean,
+        Soundpad.emojiOf(emoji),
+        fileHash,
+        userId,
+        this.#q.nextPosition.get().p,
+        Date.now(),
       );
       // Referenced, so cache eviction and orphan cleanup both leave it alone.
       this.#q.addRef.run(fileHash);
@@ -460,6 +497,7 @@ export class Soundpad {
 export const publicClip = (c) => (c ? {
   id: c.id,
   name: c.name,
+  emoji: c.emoji ?? null,
   hash: c.file_hash,
   uploader: c.uploader ?? null,
   createdAt: c.created_at,

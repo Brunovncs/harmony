@@ -79,6 +79,7 @@ export const harmony = {
     roster: lift(raw.api.roster),
     setRole: lift(raw.api.setRole),
     setDisplayName: lift(raw.api.setDisplayName),
+    renameClip: lift(raw.api.renameClip),
 
     channels: lift(raw.api.channels),
     createChannel: lift(raw.api.createChannel),

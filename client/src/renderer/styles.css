@@ -1104,46 +1104,133 @@ button.danger {
   max-width: 18rem;
 }
 
-.soundpad {
-  flex: 0 0 auto;
-  margin-top: 0.75rem;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-  padding-top: 0.6rem;
-  max-height: 30vh;
-  overflow-y: auto;
+/* ---------- the soundboard ---------- */
+
+/*
+ * Anchored by script above the Soundboard button, so it is fixed rather
+ * than absolute: the sidebar scrolls, and an absolutely positioned panel
+ * would ride away from the button it belongs to.
+ */
+.soundpad-pop {
+  position: fixed;
+  z-index: 45;
+  width: min(30rem, calc(100vw - 2rem));
+  max-height: min(26rem, 70vh);
+  display: flex;
+  flex-direction: column;
+  padding: 0.6rem;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: #1b1d22;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
 }
 .soundpad-head {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-}
-/* Its own line in a narrow column: at sidebar width a slider sharing a row
-   with "+ Add clip" is about a centimetre long. */
-.soundpad-volume-wrap {
-  flex: 1 0 100%;
-}
-.soundpad-head h3 {
-  font-size: 0.8rem;
-  margin: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  opacity: 0.7;
-}
-.soundpad-grid {
-  display: flex;
-  flex-wrap: wrap;
   gap: 0.4rem;
-  margin-top: 0.5rem;
+  flex: 0 0 auto;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
-.soundpad-grid button {
-  min-width: 5rem;
+#soundpad-search {
+  flex: 1 1 auto;
+  min-width: 0;
 }
-/* An admin's clip carries its two reorder arrows; everyone else's is bare. */
+.soundpad-head .peer-volume {
+  flex: 0 0 5rem;
+  min-width: 0;
+}
+
+.soundpad-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+  gap: 0.4rem;
+  padding-top: 0.5rem;
+}
+.soundpad-empty {
+  margin: 0.8rem 0 0.2rem;
+  text-align: center;
+  font-size: 0.85rem;
+}
+
+/*
+ * One cell: the clip, with its admin controls layered on top rather than
+ * beside it. Beside, three buttons in a 8.5rem cell leave about two
+ * centimetres for the name -- and the arrows are used once, when the clip
+ * is added, while the clip itself is used constantly.
+ */
 .clip-cell {
-  display: inline-flex;
-  align-items: stretch;
-  gap: 0.15rem;
+  position: relative;
+  display: flex;
+}
+.clip-cell > .clip-play {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-align: left;
+}
+.clip-cell > .clip-play:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+/* A flash rather than a spinner: the clip is local and plays instantly, so
+   the only thing worth showing is that the press registered. */
+.clip-cell > .clip-play[data-playing] {
+  background: rgba(110, 168, 254, 0.3);
+  border-color: var(--accent, #6ea8fe);
+}
+.clip-emoji {
+  flex: 0 0 auto;
+  font-size: 1rem;
+  line-height: 1;
+}
+.clip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.clip-tools {
+  position: absolute;
+  top: 0.15rem;
+  right: 0.15rem;
+  display: flex;
+  gap: 0.1rem;
+  opacity: 0;
+  transition: opacity 110ms ease-out;
+}
+.clip-cell:hover .clip-tools,
+.clip-cell:focus-within .clip-tools {
+  opacity: 1;
+}
+.clip-tools button {
+  font-size: 0.65rem;
+  line-height: 1;
+  padding: 0.1rem 0.2rem;
+  border-radius: 4px;
+  border: 0;
+  background: rgba(0, 0, 0, 0.6);
+  color: inherit;
+  cursor: pointer;
+}
+.clip-tools button:hover:not(:disabled) {
+  background: var(--accent, #6ea8fe);
+}
+.clip-tools button:disabled {
+  opacity: 0.3;
+  cursor: default;
 }
 
 /* ---------- profile pictures ---------- */

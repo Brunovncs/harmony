@@ -135,6 +135,8 @@ const el = {
   soundpadAdd: $('soundpad-add'),
   soundpadFile: $('soundpad-file'),
   soundpadGrid: $('soundpad-grid'),
+  soundpadSearch: $('soundpad-search'),
+  soundpadEmpty: $('soundpad-empty'),
   soundpadVolume: $('soundpad-volume'),
   soundpadVolumeLabel: $('soundpad-volume-label'),
   soundpadMute: $('soundpad-mute'),
@@ -1387,7 +1389,6 @@ function applyStage() {
   // you are in a call -- so it has to hide itself. It did not need to when
   // it sat inside #voice-active.
   el.voicePanel.hidden = el.voiceActive.hidden;
-  if (el.voiceActive.hidden) el.soundpad.hidden = true;
 }
 
 async function joinVoice(channel, password) {
@@ -1613,6 +1614,7 @@ async function leaveVoice({ silent = false } = {}) {
   state.channels.roster = [];
   resetCues();
   closePeerMenu();
+  closeSoundpad();
   el.voiceActive.hidden = true;
   el.voiceIdle.hidden = state.chat.channelId !== null;
   renderChannelVideo();
@@ -1641,6 +1643,7 @@ function applyVoiceButtons() {
   el.voiceScreen.toggleAttribute('data-on', sharing);
 
   el.voiceSoundboard.toggleAttribute('data-on', !el.soundpad.hidden);
+  el.voiceSoundboard.disabled = !state.voice.channelId;
 
   /*
    * What the strip at the bottom says about you.
@@ -3048,79 +3051,160 @@ function applySoundpadVolume() {
   el.soundpadMute.toggleAttribute('data-on', percent === 0);
 }
 
+/** What is typed in the search box, lower-cased once rather than per clip. */
+let soundpadFilter = '';
+
+/**
+ * Open the soundboard above the button that opened it.
+ *
+ * Measured and clamped rather than positioned by CSS, because the panel is
+ * fixed -- it has to be, since the sidebar it is anchored to scrolls -- and
+ * a fixed element has no idea where its button is.
+ */
+function openSoundpad() {
+  el.soundpad.hidden = false;
+  soundpadFilter = '';
+  el.soundpadSearch.value = '';
+  renderSoundpad();
+
+  const anchor = el.voiceSoundboard.getBoundingClientRect();
+  // Shown before measuring: a hidden element has no size, and the clamp
+  // below needs one.
+  const box = el.soundpad.getBoundingClientRect();
+  const left = Math.min(
+    Math.max(8, anchor.left),
+    Math.max(8, window.innerWidth - box.width - 8),
+  );
+  // Above the button where there is room, below it where there is not.
+  const above = anchor.top - box.height - 8;
+  el.soundpad.style.left = `${left}px`;
+  el.soundpad.style.top = `${above >= 8 ? above : Math.min(anchor.bottom + 8, window.innerHeight - box.height - 8)}px`;
+
+  el.soundpadSearch.focus();
+  applyVoiceButtons();
+}
+
+function closeSoundpad() {
+  el.soundpad.hidden = true;
+  applyVoiceButtons();
+}
+
 function renderSoundpad() {
   el.soundpadAdd.hidden = !isAdmin();
   applySoundpadVolume();
-  // Shown unless the panel's soundboard button has been used to put it
-  // away. Default-on rather than default-off: a clip you cannot find is a
-  // clip nobody plays, and the button is there to reclaim the space in a
-  // narrow window rather than to reveal a hidden feature.
-  el.soundpad.hidden = !state.voice.channelId
-    || el.soundpad.dataset.shown === '0'
-    || (!state.soundpad.clips.length && !isAdmin());
+  if (el.soundpad.hidden) return;
 
-  el.soundpadGrid.replaceChildren(...state.soundpad.clips.map((clip, index) => {
-    const button = document.createElement('button');
-    button.className = 'ghost small';
-    button.textContent = clip.name;
-    button.addEventListener('click', () => {
+  const clips = state.soundpad.clips;
+  const shown = soundpadFilter
+    ? clips.filter((c) => c.name.toLowerCase().includes(soundpadFilter))
+    : clips;
+
+  el.soundpadEmpty.hidden = shown.length > 0;
+  el.soundpadEmpty.textContent = clips.length === 0
+    ? (isAdmin() ? 'No clips yet. Add one.' : 'Nobody has added any clips.')
+    : `Nothing matching "${el.soundpadSearch.value}".`;
+
+  el.soundpadGrid.replaceChildren(...shown.map((clip) => {
+    const cell = document.createElement('span');
+    cell.className = 'clip-cell';
+
+    const play = document.createElement('button');
+    play.type = 'button';
+    play.className = 'clip-play';
+    if (clip.emoji) {
+      const emoji = document.createElement('span');
+      emoji.className = 'clip-emoji';
+      emoji.textContent = clip.emoji;
+      play.append(emoji);
+    }
+    const name = document.createElement('span');
+    name.className = 'clip-name';
+    name.textContent = clip.name;
+    play.append(name);
+    play.title = clip.name;
+
+    play.addEventListener('click', () => {
       if (!state.voice.channelId) return showChannelsError('Join a voice channel first.');
-      // Only the event is sent. Every client plays its own cached copy -- see
-      // the Soundpad comment in the server's chat.js for why.
+      // The press is acknowledged on the button rather than by closing the
+      // panel: people fire several in a row, and a soundboard that shuts
+      // after one is a soundboard you have to reopen to use.
+      play.setAttribute('data-playing', '');
+      setTimeout(() => play.removeAttribute('data-playing'), 350);
+      // Only the event is sent. Every client plays its own cached copy --
+      // see the Soundpad comment in the server's chat.js for why.
       return harmony.realtime
         .request('soundpad:play', { channelId: state.voice.channelId, clipId: clip.id })
         .catch((err) => showChannelsError(err.message));
     });
 
-    if (!isAdmin()) return button;
+    cell.append(play);
+    if (!isAdmin()) return cell;
 
-    button.addEventListener('contextmenu', async (event) => {
-      event.preventDefault();
-      if (!await askConfirm(`Delete the clip "${clip.name}"?`)) return;
-      try {
-        await harmony.api.deleteClip(state.server, clip.id);
-      } catch (err) {
-        showChannelsError(err.message);
-      }
-    });
-
-    // Wrapped only for admins, so everyone else gets a plain grid of buttons
-    // and the arrows do not take up room they do not earn.
-    const cell = document.createElement('span');
-    cell.className = 'clip-cell';
-    cell.append(
-      rowButton('\u25C0', 'Move left', () => nudgeClip(clip.id, -1)),
-      button,
-      rowButton('\u25B6', 'Move right', () => nudgeClip(clip.id, 1)),
+    /*
+     * Admin controls, layered on top of the clip rather than beside it.
+     *
+     * Beside, three buttons in an 8.5rem cell leave about two centimetres
+     * for the name -- and the arrows are used once, when the clip is added,
+     * while the clip itself is used constantly.
+     *
+     * Positions are read off the FULL list, not the filtered one: nudging a
+     * clip while a search is active has to move it past the clip that is
+     * really next, not past the next one you happen to be looking at.
+     */
+    const index = clips.indexOf(clip);
+    const tools = document.createElement('span');
+    tools.className = 'clip-tools';
+    const tool = (glyph, title, run, disabled = false) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = glyph;
+      b.title = title;
+      b.disabled = disabled;
+      b.addEventListener('click', (event) => {
+        event.stopPropagation();
+        run();
+      });
+      return b;
+    };
+    tools.append(
+      tool('\u25C0', 'Move left', () => nudgeClip(clip.id, -1), index === 0),
+      tool('\u25B6', 'Move right', () => nudgeClip(clip.id, 1), index === clips.length - 1),
+      tool('\u270E', 'Rename', () => editClip(clip)),
+      tool('\u2715', 'Delete', async () => {
+        if (!await askConfirm(`Delete the clip "${clip.name}"?`)) return;
+        try {
+          await harmony.api.deleteClip(state.server, clip.id);
+        } catch (err) {
+          showChannelsError(err.message);
+        }
+      }),
     );
-    cell.firstChild.disabled = index === 0;
-    cell.lastChild.disabled = index === state.soundpad.clips.length - 1;
+    cell.append(tools);
     return cell;
   }));
 }
 
-/** Same whole-list contract as the channels. See nudgeChannel. */
-async function nudgeClip(id, delta) {
-  const ids = state.soundpad.clips.map((c) => c.id);
-  const from = ids.indexOf(id);
-  const to = from + delta;
-  if (from < 0 || to < 0 || to >= ids.length) return;
-  ids.splice(to, 0, ...ids.splice(from, 1));
+/** Change a clip's label. The audio behind it is untouched. */
+async function editClip(clip) {
+  const answer = await ask({
+    title: `Rename "${clip.name}"`,
+    text: 'The emoji is optional, and is what makes a clip findable in a grid '
+      + 'of twenty identical buttons.',
+    okLabel: 'Save',
+    fields: [
+      { name: 'emoji', label: 'Emoji', value: clip.emoji ?? '', placeholder: '\u{1F4EF}' },
+      { name: 'name', label: 'Name', value: clip.name, required: true, maxlength: 32 },
+    ],
+  });
+  if (!answer?.name) return;
   try {
-    await harmony.api.reorderClips(state.server, ids);
+    await harmony.api.renameClip(state.server, clip.id, {
+      name: answer.name, emoji: answer.emoji,
+    });
   } catch (err) {
     showChannelsError(err.message);
   }
 }
-
-/**
- * The server's ceiling, mirrored here.
- *
- * Checked before the upload rather than after, because the upload is what
- * costs: a 20 MB file would be sent in full, stored, and only then refused by
- * the soundpad -- leaving an orphan behind for the next eviction to find.
- */
-const MAX_CLIP_BYTES = 2 * 1024 * 1024;
 
 async function addSoundpadClip(file) {
   try {
@@ -3135,16 +3219,24 @@ async function addSoundpadClip(file) {
     const upload = await harmony.media.upload(state.server, bytes, file.type);
     const answer = await ask({
       title: 'Name this clip',
+      text: 'The emoji is optional, and is what makes a clip findable in a grid '
+        + 'of twenty identical buttons.',
       okLabel: 'Add',
-      fields: [{
-        name: 'name',
-        label: 'Name',
-        value: file.name.replace(/\.[^.]+$/, '').slice(0, 32),
-        required: true,
-      }],
+      fields: [
+        { name: 'emoji', label: 'Emoji', value: '', placeholder: '\u{1F4EF}' },
+        {
+          name: 'name',
+          label: 'Name',
+          value: file.name.replace(/\.[^.]+$/, '').slice(0, 32),
+          required: true,
+          maxlength: 32,
+        },
+      ],
     });
     if (!answer?.name) return;
-    await harmony.api.addClip(state.server, { name: answer.name, hash: upload.hash });
+    await harmony.api.addClip(state.server, {
+      name: answer.name, emoji: answer.emoji, hash: upload.hash,
+    });
   } catch (err) {
     showChannelsError(err.message);
   }
@@ -5441,9 +5533,30 @@ el.micGain.addEventListener('change', micTuningSave);
 el.micGate.addEventListener('change', micTuningSave);
 
 el.voiceSoundboard.addEventListener('click', () => {
-  el.soundpad.dataset.shown = el.soundpad.dataset.shown === '0' ? '1' : '0';
+  if (el.soundpad.hidden) openSoundpad();
+  else closeSoundpad();
+});
+
+el.soundpadSearch.addEventListener('input', () => {
+  soundpadFilter = el.soundpadSearch.value.trim().toLowerCase();
   renderSoundpad();
-  applyVoiceButtons();
+});
+
+/*
+ * Dismissing it, the same way the right-click menu is dismissed.
+ *
+ * The button is excluded as well as the panel: without that, pressing it
+ * while the panel is open closes it here on the way down and the button's
+ * own handler reopens it on the way up, so it never shuts.
+ */
+document.addEventListener('pointerdown', (event) => {
+  if (el.soundpad.hidden) return;
+  if (el.soundpad.contains(event.target)) return;
+  if (el.voiceSoundboard.contains(event.target)) return;
+  closeSoundpad();
+}, true);
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !el.soundpad.hidden) closeSoundpad();
 });
 
 el.voiceCamera.addEventListener('change', async () => {

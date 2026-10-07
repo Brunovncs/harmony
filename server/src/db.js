@@ -171,6 +171,22 @@ const MIGRATIONS = [
   (db) => {
     db.exec('ALTER TABLE users ADD COLUMN display_name TEXT');
   },
+
+  /*
+   * v6 -- an emoji on a soundpad clip.
+   *
+   * A grid of twenty identically-shaped buttons is read by shape before it
+   * is read by text, and a name alone gives it nothing to be read by. One
+   * character in front of the name is the cheapest thing that makes a clip
+   * findable at a glance.
+   *
+   * NULL means none, and a clip without one is still perfectly usable --
+   * which is why this is a nullable column rather than a required field on
+   * every existing clip.
+   */
+  (db) => {
+    db.exec('ALTER TABLE soundpad_clips ADD COLUMN emoji TEXT');
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

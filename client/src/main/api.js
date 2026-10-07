@@ -255,6 +255,9 @@ module.exports = {
   setRole: (s, id, role) =>
     requestJson(s, `/api/accounts/${id}/role`, { method: 'POST', body: { role } }),
 
+  renameClip: (s, id, body) =>
+    requestJson(s, `/api/soundpad/${id}/rename`, { method: 'POST', body }),
+
   setDisplayName: (s, displayName) =>
     requestJson(s, '/api/accounts/display-name', { method: 'POST', body: { displayName } }),
   streams: (s) => requestJson(s, '/api/streams'),

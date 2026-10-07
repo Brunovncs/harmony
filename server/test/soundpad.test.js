@@ -215,6 +215,83 @@ describe('soundpad clips', () => {
     assert.equal(res.status, 200);
     assert.ok(res.body.clips.some((c) => c.id === clipId));
   });
+
+  /*
+   * The emoji is a label, not a validated type.
+   *
+   * There is no cheap correct test for "is this an emoji", every
+   * approximation refuses something somebody wanted, and the worst case is
+   * a clip labelled with a letter -- which is fine, and is what several of
+   * them will be. So: one grapheme, no control characters, or nothing.
+   */
+  describe('the emoji on a clip', () => {
+    it('is kept, and comes back on the clip', async () => {
+      const res = await api('/api/soundpad', {
+        method: 'POST',
+        body: { name: 'horn', emoji: '\u{1F4EF}', hash: audioHash },
+        token: ownerToken,
+      });
+      assert.equal(res.status, 201);
+      assert.equal(res.body.clip.emoji, '\u{1F4EF}');
+    });
+
+    it('is cut to one character, so one clip cannot take a whole row', async () => {
+      const res = await api('/api/soundpad', {
+        method: 'POST',
+        body: { name: 'many', emoji: '\u{1F4EF}\u{1F4EF}\u{1F4EF}', hash: audioHash },
+        token: ownerToken,
+      });
+      assert.equal(res.status, 201);
+      assert.equal(res.body.clip.emoji, '\u{1F4EF}');
+    });
+
+    it('is optional, and absent reads as null rather than empty', async () => {
+      const res = await api('/api/soundpad', {
+        method: 'POST', body: { name: 'bare', hash: audioHash }, token: ownerToken,
+      });
+      assert.equal(res.status, 201);
+      assert.equal(res.body.clip.emoji, null);
+    });
+
+    it('refuses control characters, which are invisible', async () => {
+      const res = await api('/api/soundpad', {
+        method: 'POST',
+        // A right-to-left override would reverse the labels either side of
+        // it in a grid of buttons.
+        body: { name: 'sneaky', emoji: '\u202E', hash: audioHash },
+        token: ownerToken,
+      });
+      assert.equal(res.status, 201);
+      assert.equal(res.body.clip.emoji, null);
+    });
+  });
+
+  describe('renaming a clip', () => {
+    it('changes the label and leaves the audio alone', async () => {
+      const res = await api(`/api/soundpad/${clipId}/rename`, {
+        method: 'POST', body: { name: 'AIR HORN', emoji: '\u{1F6A8}' }, token: ownerToken,
+      });
+      assert.equal(res.status, 200);
+      assert.equal(res.body.clip.name, 'AIR HORN');
+      assert.equal(res.body.clip.emoji, '\u{1F6A8}');
+      assert.equal(res.body.clip.hash, audioHash, 'the audio must not move');
+    });
+
+    it('is refused to non-admins', async () => {
+      const res = await api(`/api/soundpad/${clipId}/rename`, {
+        method: 'POST', body: { name: 'mine now' }, token: memberToken,
+      });
+      assert.equal(res.status, 403);
+    });
+
+    it('refuses an empty name', async () => {
+      const res = await api(`/api/soundpad/${clipId}/rename`, {
+        method: 'POST', body: { name: '   ' }, token: ownerToken,
+      });
+      assert.equal(res.status, 400);
+      assert.equal(res.body.error, 'invalid_name');
+    });
+  });
 });
 
 describe('playing a clip', () => {

@@ -232,39 +232,6 @@
             meant the controls moved -- and sometimes vanished -- depending on
             whether somebody happened to be sharing a screen.
           -->
-          <div class="soundpad" id="soundpad" hidden>
-            <div class="soundpad-head">
-              <h3>Soundpad</h3>
-              <button class="ghost small" id="soundpad-add" hidden>+ Add clip</button>
-              <input id="soundpad-file" type="file" accept="audio/*" hidden />
-              <!--
-                How loudly clips play FOR YOU. Local, like every other
-                volume in the app: the server sends the event and each
-                client plays its own cached copy, so there is nothing to
-                broadcast and turning an airhorn down is about your ears.
-              -->
-              <span class="peer-audio soundpad-volume-wrap">
-                <button
-                  class="ghost tiny peer-mute"
-                  id="soundpad-mute"
-                  type="button"
-                >&#128266;</button>
-                <input
-                  id="soundpad-volume"
-                  class="peer-volume"
-                  type="range"
-                  min="0"
-                  max="350"
-                  step="5"
-                  value="100"
-                  title="How loudly soundpad clips play for you"
-                />
-                <span class="peer-volume-label" id="soundpad-volume-label">100%</span>
-              </span>
-            </div>
-            <div class="soundpad-grid" id="soundpad-grid"></div>
-          </div>
-
           <!--
             The voice panel.
 
@@ -581,6 +548,50 @@
         </p>
       </footer>
     </section>
+
+    <!--
+      The soundboard.
+
+      A popover over everything rather than a strip in the sidebar: a grid
+      of clips needs more width than a 220px column has, and it is opened,
+      used once and dismissed rather than being something you keep on
+      screen.
+
+      Outside the layout entirely, like the right-click menu, so that
+      showing it cannot reflow the call it is being used in.
+    -->
+    <div class="soundpad-pop" id="soundpad" hidden>
+      <div class="soundpad-head">
+        <input
+          id="soundpad-search"
+          type="search"
+          placeholder="Find the perfect sound"
+          autocomplete="off"
+        />
+        <!--
+          How loudly clips play FOR YOU. Local, like every other volume in
+          the app: the server sends the event and each client plays its own
+          cached copy, so there is nothing to broadcast and turning an
+          airhorn down is about your ears.
+        -->
+        <button class="ghost tiny peer-mute" id="soundpad-mute" type="button">&#128266;</button>
+        <input
+          id="soundpad-volume"
+          class="peer-volume"
+          type="range"
+          min="0"
+          max="350"
+          step="5"
+          value="100"
+          title="How loudly soundpad clips play for you"
+        />
+        <span class="peer-volume-label" id="soundpad-volume-label">100%</span>
+        <button class="ghost small" id="soundpad-add" hidden>+ Add</button>
+        <input id="soundpad-file" type="file" accept="audio/*" hidden />
+      </div>
+      <div class="soundpad-grid" id="soundpad-grid"></div>
+      <p class="muted soundpad-empty" id="soundpad-empty" hidden></p>
+    </div>
 
     <!--
       What you get when you right-click somebody.

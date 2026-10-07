@@ -326,6 +326,7 @@ handle('api:set-avatar', (_e, s, hash) => api.setAvatar(s, hash));
 handle('api:roster', (_e, s) => api.roster(s));
 handle('api:set-role', (_e, s, id, role) => api.setRole(s, id, role));
 handle('api:set-display-name', (_e, s, name) => api.setDisplayName(s, name));
+handle('api:rename-clip', (_e, s, id, body) => api.renameClip(s, id, body));
 handle('api:channels', (_e, s) => api.channels(s));
 handle('api:create-channel', (_e, s, body) => api.createChannel(s, body));
 handle('api:update-channel', (_e, s, id, body) => api.updateChannel(s, id, body));
