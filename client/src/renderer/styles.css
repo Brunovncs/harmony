@@ -1275,11 +1275,60 @@ button.danger {
 .pinned-strip {
   border: 1px solid rgb(var(--tint-rgb) / 0.12);
   border-radius: 6px;
-  padding: 0.4rem 0.6rem;
+  padding: 0.25rem;
   margin-bottom: 0.5rem;
   font-size: 0.85rem;
   max-height: 6rem;
   overflow-y: auto;
+  flex: 0 0 auto;
+}
+/* A button, not a line of text: the whole point of a pin is that you can
+   get back to it. */
+.pinned-line {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  width: 100%;
+  padding: 0.25rem 0.4rem;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+.pinned-line::before {
+  content: '\1F4CC';
+  flex: 0 0 auto;
+  font-variant-emoji: text;
+  opacity: 0.7;
+}
+.pinned-line:hover {
+  background: rgb(var(--tint-rgb) / 0.08);
+}
+.pinned-line > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+
+/* Where a jump landed. Long enough to find with your eyes, short enough
+   not to go on shouting once you have. */
+.chat-msg[data-jumped] {
+  animation: jumped 1.6s ease-out;
+}
+@keyframes jumped {
+  0%,
+  60% {
+    background: rgb(var(--accent-rgb) / 0.22);
+  }
+  100% {
+    background: transparent;
+  }
 }
 .chat-form {
   display: flex;
@@ -1296,9 +1345,52 @@ button.danger {
   min-height: 0;
   height: 100%;
 }
+/*
+ * The two search boxes, which are the same control in two places and used
+ * to look like two different ones -- a bare input in the chat header and
+ * another bare input in the soundboard.
+ *
+ * A magnifying glass drawn as a background image rather than an element
+ * beside the field: it has to sit INSIDE the rounded box, and an icon in
+ * the flow would either push the text or need absolute positioning and a
+ * wrapper for every instance.
+ */
+.search-field {
+  appearance: none;
+  padding: 0.4rem 0.6rem 0.4rem 1.9rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background-color: var(--bg);
+  background-repeat: no-repeat;
+  background-position: 0.55rem center;
+  background-size: 0.85rem;
+  /* Inline SVG, so it is one colour that follows the palette and there is
+     nothing to load. currentColor cannot be used in a background image, so
+     the stroke is the muted grey spelled out. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%238b93a7' stroke-width='1.6'%3E%3Ccircle cx='7' cy='7' r='4.5'/%3E%3Cpath d='M10.5 10.5 L14 14'/%3E%3C/svg%3E");
+  color: inherit;
+  font: inherit;
+  font-size: 0.85rem;
+  min-width: 0;
+}
+.search-field:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgb(var(--accent-rgb) / 0.25);
+}
+.search-field::placeholder {
+  color: var(--muted);
+}
+/* Chromium's own clear button is a grey X that disappears against a dark
+   field; the app provides its own where it needs one. */
+.search-field::-webkit-search-cancel-button {
+  display: none;
+}
+
 #chat-search {
   margin-left: auto;
   max-width: 18rem;
+  flex: 1 1 12rem;
 }
 
 /* ---------- the soundboard ---------- */

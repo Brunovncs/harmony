@@ -384,6 +384,35 @@ async function run() {
     pinned.strip.trim(),
   );
 
+  /*
+   * And the strip has to be reachable, not just readable.
+   *
+   * A pin is pinned because it is worth coming back to, and the strip was
+   * a list of text you could read and not reach -- which is the less
+   * useful half of a pin. Clicking a line scrolls to the message and
+   * flashes it.
+   *
+   * This channel is short enough that the message is already loaded, so
+   * what is checked here is the control and the landing, not the paging
+   * back through older pages that a long channel would need.
+   */
+  const jumped = await cdp.evaluate(`
+    const line = document.querySelector('#chat-pinned .pinned-line');
+    if (!line) return { clicked: false };
+    line.click();
+    await new Promise((r) => setTimeout(r, 200));
+    const row = document.querySelector('#chat-log .chat-msg[data-jumped]');
+    return {
+      clicked: true,
+      landedOn: row ? row.textContent.slice(0, 40) : null,
+    };
+  `);
+  check(
+    'clicking a pinned message jumps to it',
+    jumped.clicked === true && jumped.landedOn !== null,
+    jumped.clicked ? `landed on "${jumped.landedOn}"` : 'the strip has no clickable line',
+  );
+
   // --- searching --------------------------------------------------------
   await cdp.evaluate(`${setInput('chat-search', 'hello')} return true;`);
   await sleep(900);

@@ -3045,9 +3045,18 @@ function renderChat({ scrollToBottom = false } = {}) {
     el.chatPinned.hidden = false;
     el.chatPinned.replaceChildren(
       ...state.chat.pinned.map((m) => {
-        const line = document.createElement('div');
-        line.textContent =
-          `\u{1F4CC} ${displayOf(m.userId, m.nickname)}: ${m.body || '(attachment)'}`;
+        const line = document.createElement('button');
+        line.type = 'button';
+        line.className = 'pinned-line';
+        line.title = 'Jump to this message';
+
+        const who = document.createElement('strong');
+        who.textContent = displayOf(m.userId, m.nickname);
+        const what = document.createElement('span');
+        what.textContent = m.body || '(attachment)';
+
+        line.append(who, what);
+        line.addEventListener('click', () => jumpToMessage(m.id));
         return line;
       }),
     );
@@ -3056,6 +3065,60 @@ function renderChat({ scrollToBottom = false } = {}) {
   }
 
   if (scrollToBottom || wasAtBottom) log.scrollTop = log.scrollHeight;
+}
+
+/**
+ * Scroll to a message, loading older pages until it is there.
+ *
+ * A pinned message is pinned precisely because it is worth coming back to,
+ * and by the time anybody comes back it is usually well above the page the
+ * channel opens on. The strip used to be a list of text you could read and
+ * not reach, which is the least useful half of a pin.
+ *
+ * The loop is bounded. `before` paging always makes progress -- each round
+ * asks for messages older than the oldest one held -- but a pin whose
+ * message has been deleted would otherwise page to the beginning of the
+ * channel before giving up, and on a long channel that is a lot of
+ * requests to discover there is nothing to show.
+ */
+const JUMP_MAX_PAGES = 20;
+
+async function jumpToMessage(id) {
+  const find = () => el.chatLog.querySelector(`.chat-msg[data-id="${id}"]`);
+  let row = find();
+
+  for (let page = 0; !row && page < JUMP_MAX_PAGES; page += 1) {
+    const oldest = state.chat.messages[0]?.id;
+    if (!oldest) break;
+    let older;
+    try {
+      ({ messages: older } = await harmony.api.messages(
+        state.server, state.chat.channelId, oldest,
+      ));
+    } catch (err) {
+      el.chatNote.textContent = err.message;
+      return;
+    }
+    if (!older?.length) break;
+    state.chat.messages = [...older, ...state.chat.messages];
+    // Without scrollToBottom: the whole point is to land somewhere that is
+    // not the bottom, and renderChat would otherwise keep us there because
+    // that is where we were when this started.
+    renderChat();
+    row = find();
+  }
+
+  if (!row) {
+    el.chatNote.textContent = 'That message is no longer in this channel.';
+    return;
+  }
+
+  el.chatNote.textContent = '';
+  row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  // A flash rather than a lasting highlight: it answers "which one" and
+  // then stops competing with the message for attention.
+  row.setAttribute('data-jumped', '');
+  setTimeout(() => row.removeAttribute('data-jumped'), 1600);
 }
 
 async function sendMessage() {
