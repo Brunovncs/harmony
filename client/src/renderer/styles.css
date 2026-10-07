@@ -1788,6 +1788,45 @@ button.danger {
   margin-top: 0.8rem;
 }
 
+/* ---------- the connect screen ---------- */
+
+/*
+ * Two columns on a window with room, one on a narrow one. The server and
+ * the account are two separate questions and reading them as one list of
+ * five boxes is what made the old form confusing.
+ */
+.connect-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0 1.2rem;
+  align-items: start;
+}
+.connect-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+/* The hint sits under both columns and speaks about the username, so it
+   should not look like it belongs to the Options button below it. */
+#username-hint {
+  display: block;
+  margin: -0.2rem 0 0.8rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+#continue {
+  width: 100%;
+}
+.switch-auth {
+  text-align: center;
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.options-body #test-connection {
+  align-self: flex-start;
+}
+
 /* ---------- the settings dialog ---------- */
 
 .settings-section {

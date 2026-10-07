@@ -125,12 +125,17 @@ async function run() {
     // password field this one had opened -- which looked fine for as long as
     // the machine happened to have a password-protected server saved, and
     // failed the moment the suite got its own empty profile.
+    //
+    // The two password fields are no longer in this list: they are always
+    // on screen now, so the worst case already includes them.
     const was = {
-      password: document.getElementById('password-field').hidden,
+      confirm: document.getElementById('account-confirm-field').hidden,
+      owner: document.getElementById('owner-key-field').hidden,
       gpu: document.getElementById('gpu-preference-field').hidden,
       options: document.querySelector('.options').open,
     };
-    document.getElementById('password-field').hidden = false;
+    document.getElementById('account-confirm-field').hidden = false;
+    document.getElementById('owner-key-field').hidden = false;
     document.getElementById('gpu-preference-field').hidden = false;
     document.querySelector('.options').open = false;
     await new Promise(r => setTimeout(r, 250));
@@ -145,19 +150,19 @@ async function run() {
       formHeight: Math.round(card.scrollHeight),
       available: card.clientHeight,
       continueVisible: inView('continue'),
-      testVisible: inView('test-connection'),
     };
-    document.getElementById('password-field').hidden = was.password;
+    document.getElementById('account-confirm-field').hidden = was.confirm;
+    document.getElementById('owner-key-field').hidden = was.owner;
     document.getElementById('gpu-preference-field').hidden = was.gpu;
     document.querySelector('.options').open = was.options;
     return result;
   `);
   check(
     'the connect form fits the real window without scrolling',
-    !natural.cardScrolls && natural.continueVisible && natural.testVisible,
+    !natural.cardScrolls && natural.continueVisible,
     `${natural.formHeight}px of form in ${natural.available}px at ${natural.size}` +
       (natural.cardScrolls ? ' — SCROLLS' : '') +
-      (natural.testVisible ? '' : ', "Test my connection" CLIPPED'),
+      (natural.continueVisible ? '' : ', Connect CLIPPED'),
   );
 
   // The live list used to grow the page instead of scrolling itself, pushing
@@ -219,20 +224,25 @@ async function run() {
     }
     return {
       hasField: !!document.getElementById('server-password'),
+      // Always on screen now. What the probe changes is the LABEL, not
+      // whether the box exists -- a field that appears a second after the
+      // window opens rearranges the form under the cursor, and one that is
+      // not there yet is one people assume is not wanted.
       hidden: document.getElementById('password-field').hidden,
+      label: document.querySelector('#password-field span').textContent,
       required,
       canSet: typeof harmony.api.setPassword === 'function',
       server: server || '(none configured)',
     };
   `);
   check(
-    'the password field follows what the server asks for',
-    passwordUi.hasField &&
-      passwordUi.canSet &&
-      (passwordUi.required === null || passwordUi.hidden === !passwordUi.required),
+    'the server password box is always there, and says whether it is needed',
+    passwordUi.hasField && passwordUi.canSet && passwordUi.hidden === false
+      && (passwordUi.required === null
+        || passwordUi.label.includes('not needed') === !passwordUi.required),
     passwordUi.required === null
-      ? `${passwordUi.server} unreachable, field left as-is`
-      : `${passwordUi.server} ${passwordUi.required ? 'requires a password -> field shown' : 'is open -> field hidden'}`,
+      ? `${passwordUi.server} unreachable, label left as-is: "${passwordUi.label}"`
+      : `${passwordUi.server} -> "${passwordUi.label}"`,
   );
 
   // Hardware H.264 encoding (NVENC / AMF / Quick Sync) is Chromium's default on
@@ -493,10 +503,12 @@ async function run() {
   // ---------------------------------------------------------------------
   // Accounts (Phase 1)
   //
-  // The account fields must stay invisible against a server that has no
-  // account system -- which is every 0.1.0 deployment, and is also what the
-  // app shows before it has reached any server at all. If this regresses,
-  // every existing user is asked for a password that does not exist.
+  // The account fields are ALWAYS on screen now -- a form that rearranges
+  // itself a second after the window opens is worse than a box somebody
+  // fills in for nothing. What must not regress is the MODE: against a
+  // server with no account system (every 0.1.0 deployment, and what the
+  // app shows before reaching any server) nothing may claim an account is
+  // required, and the typed password must be ignored rather than sent.
   // ---------------------------------------------------------------------
   const accountsHidden = await cdp.evaluate(`
     return {
@@ -504,12 +516,19 @@ async function run() {
       mode: document.body.dataset.authMode,
       button: document.getElementById('continue').textContent,
       hint: document.getElementById('username-hint').textContent,
+      signUp: document.getElementById('auth-mode-toggle').textContent,
     };
   `);
   check(
-    'the account fields stay hidden on a server with no accounts',
-    accountsHidden.hidden === true && accountsHidden.mode === 'none',
+    'a server with no accounts is in no auth mode, and asks for nothing',
+    accountsHidden.hidden === false && accountsHidden.mode === 'none',
     `hidden=${accountsHidden.hidden} mode=${accountsHidden.mode} button="${accountsHidden.button}"`,
+  );
+  // The way to make an account cannot be behind having one already.
+  check(
+    'the sign-up link is offered before any server has been reached',
+    accountsHidden.signUp.length > 0,
+    `"${accountsHidden.signUp}"`,
   );
   check(
     'the original single-box hint is unchanged without accounts',

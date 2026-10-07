@@ -549,7 +549,11 @@ async function run() {
   `);
   check(
     'a restarted client comes back knowing who it is, with no password to type',
-    restored.hint.includes('Signed in as pedrolucas') && restored.accountFieldsHidden === true
+    // The fields stay on screen -- they always do now -- but empty, and the
+    // hint says who you already are. An empty box you need not fill in is
+    // fine; one that vanishes and reappears is not.
+    restored.hint.includes('Signed in as pedrolucas')
+      && restored.accountFieldsHidden === false
       && restored.passwordTyped === '',
     `hint="${restored.hint}", fields hidden=${restored.accountFieldsHidden}`,
   );

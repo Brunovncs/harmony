@@ -613,7 +613,17 @@ async function probeServer() {
   if (!server) return;
   try {
     const health = await harmony.api.health(server);
-    el.passwordField.hidden = !health.passwordRequired;
+    /*
+     * The field STAYS. Only the hint changes.
+     *
+     * It used to appear and disappear as the server was probed, which meant
+     * the form you were filling in was not the form you had been looking at
+     * a second earlier -- and a box that is not there yet is one people
+     * assume is not wanted.
+     */
+    el.passwordField.querySelector('span').textContent = health.passwordRequired
+      ? 'Server password'
+      : 'Server password (not needed)';
     state.passwordRequired = Boolean(health.passwordRequired);
 
     // `hasAccounts` is absent on a pre-accounts server, which is exactly how we
@@ -673,44 +683,60 @@ async function restoreSession() {
 
 function applyAuthMode() {
   const on = state.auth.supported;
-  // Nothing to type when we are already signed in: the fields would only
-  // invite somebody to re-enter a password they do not need.
   const signedIn = Boolean(state.auth.user);
-  el.accountFields.hidden = !on || signedIn;
+  /*
+   * The account column is ALWAYS on screen, and so is the sign-up link.
+   *
+   * Both used to be hidden until a server had been probed and had reported
+   * that it has accounts. Two problems with that: the form rearranged
+   * itself under the cursor a second after the window opened, and the way
+   * to create an account was invisible to anybody who had not already got
+   * one -- which is everybody who needs it.
+   *
+   * There is nothing to lose by showing them. A server with no accounts
+   * ignores the password (see `wantsSignIn` in startSession, which is
+   * gated on auth.supported), so the worst case is a box somebody fills in
+   * for nothing rather than a box they cannot find.
+   */
+  el.accountFields.hidden = false;
   document.body.dataset.authMode = on ? state.auth.mode : 'none';
 
   if (signedIn) {
-    el.usernameHint.textContent = `Signed in as ${state.auth.user.nickname}.`;
+    // Nothing to type: the password box would only invite somebody to
+    // re-enter a password they do not need.
+    el.accountPassword.value = '';
+    el.accountPassword.placeholder = 'Already signed in';
+    el.accountPasswordLabel.textContent = 'Password';
+    el.accountConfirmField.hidden = true;
+    el.ownerKeyField.hidden = true;
+    el.usernameHint.textContent = `Signed in as ${displayOf(
+      state.auth.user.id, state.auth.user.nickname,
+    )}.`;
     el.authModeText.textContent = 'Not you?';
     el.authModeToggle.textContent = 'Sign out';
-    el.continue.textContent = 'Continue';
+    el.continue.textContent = 'Connect';
     return;
   }
 
-  if (!on) {
-    el.usernameHint.textContent =
-      'Free name \u2192 you start streaming. Name already live \u2192 you join and watch.';
-    // Deliberately no early return: the mode-dependent labels below are kept up
-    // to date even while the block is hidden, so the fields are already correct
-    // the moment a server reveals them.
-  }
-
   const registering = state.auth.mode === 'register';
-  el.accountPasswordLabel.textContent = registering ? 'Choose a password' : 'Your password';
+  el.accountPasswordLabel.textContent = registering ? 'Choose a password' : 'Password';
   el.accountPassword.placeholder = registering ? 'At least 6 characters' : '';
   el.accountConfirmField.hidden = !registering;
   el.ownerKeyField.hidden = !(registering && state.auth.needsOwner);
-  // Guarded, unlike everything else here: this hint sits OUTSIDE
-  // #account-fields and means something different on a server with no
-  // accounts, where the block above has already set it.
-  if (on) {
-    el.usernameHint.textContent = registering
+
+  el.usernameHint.textContent = (() => {
+    if (!on) {
+      return 'Free name \u2192 you start streaming. '
+        + 'Name already live \u2192 you join and watch.';
+    }
+    return registering
       ? 'This becomes your permanent name. 2-20 characters, and it is what your stream is called.'
       : 'The nickname you registered with.';
-  }
+  })();
+
   el.authModeText.textContent = registering ? 'Already registered?' : 'No account yet?';
   el.authModeToggle.textContent = registering ? 'Sign in' : 'Create one';
-  el.continue.textContent = registering ? 'Create account' : 'Continue';
+  el.continue.textContent = registering ? 'Create account' : 'Connect';
 }
 
 /** Hand the token to main, and persist it only if they asked us to. */
@@ -805,7 +831,6 @@ async function refreshLiveList() {
     // A password problem is the one failure here worth surfacing: without it
     // the list just silently stays empty and looks like "nobody is streaming".
     if (err.code === 'bad_password' || err.code === 'locked_out') {
-      el.passwordField.hidden = false;
       el.passwordField.classList.add('bad');
       showError(err.message);
     }
@@ -883,7 +908,6 @@ async function startSession() {
   } catch (err) {
     showError(err.message);
     if (err.code === 'bad_password' || err.code === 'locked_out') {
-      el.passwordField.hidden = false;
       el.passwordField.classList.add('bad');
       el.password.focus();
       el.password.select();
@@ -904,7 +928,7 @@ async function startSession() {
   } finally {
     el.continue.disabled = false;
     el.continue.textContent =
-      state.auth.supported && state.auth.mode === 'register' ? 'Create account' : 'Continue';
+      state.auth.supported && state.auth.mode === 'register' ? 'Create account' : 'Connect';
   }
 }
 

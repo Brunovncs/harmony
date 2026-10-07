@@ -19,92 +19,104 @@
           <p>Share a screen, or watch someone else's.</p>
         </header>
 
-        <label class="field">
-          <span>Server address</span>
-          <input
-            id="server-url"
-            type="text"
-            spellcheck="false"
-            autocomplete="off"
-            placeholder="https://stream.example.com or 192.168.1.50:8080"
-          />
-        </label>
+        <!--
+          Two columns, because there are two unrelated things being asked
+          for and stacking them made one list of five boxes with no clue
+          which belonged to what. The left is the SERVER -- where it is and
+          the key to the front door. The right is YOU.
 
-        <label class="field" id="password-field" hidden>
-          <span>Server password</span>
-          <input id="server-password" type="password" autocomplete="off" placeholder="Required by this server" />
-        </label>
+          Everything is present at all times, including both password
+          fields. They used to appear and disappear as the server was
+          probed, which meant the form you filled in was not the form you
+          were looking at a second earlier, and a password box that is not
+          there yet is one people assume is not wanted.
+        -->
+        <div class="connect-columns">
+          <div class="connect-col">
+            <label class="field">
+              <span>Server address</span>
+              <input
+                id="server-url"
+                type="text"
+                spellcheck="false"
+                autocomplete="off"
+                placeholder="https://stream.example.com or 192.168.1.50:8080"
+              />
+            </label>
 
-        <label class="field">
-          <span>Username</span>
-          <input
-            id="username"
-            type="text"
-            spellcheck="false"
-            autocomplete="off"
-            maxlength="24"
-            placeholder="your-name"
-          />
-          <small id="username-hint"
-            >Free name &rarr; you start streaming. Name already live &rarr; you join and
-            watch.</small
-          >
-        </label>
+            <label class="field" id="password-field">
+              <span>Server password</span>
+              <input
+                id="server-password"
+                type="password"
+                autocomplete="off"
+                placeholder="If this server has one"
+              />
+            </label>
+          </div>
 
-        <!-- Everything from here to #account-end appears only on a server that
-             has accounts. An older server never reports `hasAccounts`, so the
-             whole block stays hidden and the single-box flow is untouched. -->
-        <div id="account-fields" hidden>
-          <label class="field">
-            <span id="account-password-label">Your password</span>
-            <input
-              id="account-password"
-              type="password"
-              autocomplete="off"
-              placeholder="At least 6 characters"
-            />
-          </label>
+          <div class="connect-col" id="account-fields">
+            <label class="field">
+              <span>Username</span>
+              <input
+                id="username"
+                type="text"
+                spellcheck="false"
+                autocomplete="off"
+                maxlength="24"
+                placeholder="your-name"
+              />
+            </label>
 
-          <label class="field" id="account-confirm-field" hidden>
-            <span>Confirm password</span>
-            <input id="account-confirm" type="password" autocomplete="off" />
-          </label>
+            <label class="field">
+              <span id="account-password-label">Password</span>
+              <input
+                id="account-password"
+                type="password"
+                autocomplete="off"
+                placeholder="At least 6 characters"
+              />
+            </label>
 
-          <label class="field" id="owner-key-field" hidden>
-            <span>Owner key</span>
-            <input
-              id="owner-key"
-              type="text"
-              spellcheck="false"
-              autocomplete="off"
-              placeholder="Printed in the server log on first start"
-            />
-            <small
-              >This server has no owner yet. Paste the key from the server log to claim
-              it &mdash; or leave this empty to join as an ordinary member.</small
-            >
-          </label>
+            <label class="field" id="account-confirm-field" hidden>
+              <span>Confirm password</span>
+              <input id="account-confirm" type="password" autocomplete="off" />
+            </label>
 
-          <label class="check">
-            <input type="checkbox" id="remember-account" checked />
-            <span>
-              Stay signed in
-              <small
-                >Keeps a login token on this machine, not your password. It expires after
-                30 days unused, and signing out revokes it.</small
-              >
-            </span>
-          </label>
+            <label class="field" id="owner-key-field" hidden>
+              <span>Owner key</span>
+              <input
+                id="owner-key"
+                type="text"
+                spellcheck="false"
+                autocomplete="off"
+                placeholder="Printed in the server log on first start"
+              />
+            </label>
 
-          <p class="switch-auth">
-            <span id="auth-mode-text"></span>
-            <button type="button" class="linklike" id="auth-mode-toggle"></button>
-          </p>
+            <label class="check">
+              <input type="checkbox" id="remember-account" checked />
+              <span>Remember me</span>
+            </label>
+          </div>
         </div>
-        <!-- #account-end -->
 
-        <button class="primary" id="continue">Continue</button>
-        <button class="ghost small" id="test-connection">Test my connection</button>
+        <small id="username-hint"
+          >Free name &rarr; you start streaming. Name already live &rarr; you join and
+          watch.</small
+        >
+
+        <button class="primary" id="continue">Connect</button>
+
+        <!-- Always on screen, never behind a condition: somebody arriving at
+             a server for the first time needs it, and a link that appears
+             only once the server has been probed is one they will not find
+             because they were not looking when it arrived. -->
+        <p class="switch-auth">
+          <span id="auth-mode-text"></span>
+          <button type="button" class="linklike" id="auth-mode-toggle"></button>
+        </p>
+
         <p class="error" id="connect-error" hidden></p>
 
         <!-- Shown outside the collapsed section on purpose: nobody opens a
@@ -122,6 +134,8 @@
         <details class="options">
           <summary>Options</summary>
           <div class="options-body">
+            <button class="ghost small" id="test-connection">Test my connection</button>
+
             <label class="check">
               <input type="checkbox" id="clips-enabled" />
               <span>
