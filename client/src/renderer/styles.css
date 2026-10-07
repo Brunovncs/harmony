@@ -1828,7 +1828,9 @@ button.danger {
   border-radius: 8px;
   overflow: hidden;
   background: #000;
-  cursor: pointer;
+  /* Not a pointer: the tile is not clickable any more, and a hand cursor
+     over something that does nothing is a promise the tile cannot keep.
+     Its buttons carry their own. */
 }
 .channel-tile video {
   width: 100%;
@@ -1947,8 +1949,10 @@ button.danger {
   opacity: 1;
 }
 
-/* A closed channel tile. Same box, no picture, no connection. */
+/* A closed channel tile. Same box, no picture, no connection -- and the
+   one tile that IS clickable, since clicking is how you reopen it. */
 .channel-tile.ghost-tile {
+  cursor: pointer;
   display: flex;
   flex-direction: column;
   align-items: center;

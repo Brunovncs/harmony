@@ -3162,10 +3162,21 @@ function renderChannelVideo() {
     if (closeBtn) controls.append(closeBtn);
     label.append(controls);
 
-    // The whole tile is still a maximize target: it is what people reach
-    // for before they find the button.
-    figure.addEventListener('click', maximize);
-
+    /*
+     * The tile itself is NOT a maximize target.
+     *
+     * It was, on the reasoning that clicking the picture is what people
+     * reach for before they find the button. In use that is wrong twice
+     * over: the thing on the tile is a live screen somebody is watching,
+     * so resizing it is the last thing a stray click should do -- and the
+     * controls sit inside the tile, so every press of the volume slider
+     * bubbled up and resized the video underneath the finger.
+     *
+     * stopPropagation on the controls would have fixed the second half
+     * and left the first, and it is a rule that has to be remembered by
+     * every control added later. Not having the handler cannot be
+     * forgotten.
+     */
     figure.append(video, label);
     return figure;
   }));
