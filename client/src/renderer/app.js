@@ -1954,12 +1954,26 @@ async function leaveVoice({ silent = false } = {}) {
   renderChannels();
 }
 
+/**
+ * Name a button once, in both the places a button is named.
+ *
+ * The text is invisible -- font-size: 0 -- but it is still what the
+ * accessibility tree announces and what voice-ui.mjs reads to know whether
+ * the camera is on. The tooltip is the only one of the two a person sees.
+ * Writing them apart is how a button ends up offering to start a camera
+ * that is already running, so they are written together.
+ */
+function setButtonLabel(button, label) {
+  button.textContent = label;
+  button.title = label;
+}
+
 function applyVoiceButtons() {
-  el.voiceMute.textContent = state.voice.muted ? 'Unmute mic' : 'Mute mic';
+  setButtonLabel(el.voiceMute, state.voice.muted ? 'Unmute mic' : 'Mute mic');
   el.voiceMute.toggleAttribute('data-on', state.voice.muted);
-  el.voiceDeafen.textContent = state.voice.deafened ? 'Undeafen' : 'Deafen';
+  setButtonLabel(el.voiceDeafen, state.voice.deafened ? 'Undeafen' : 'Deafen');
   el.voiceDeafen.toggleAttribute('data-on', state.voice.deafened);
-  el.voiceCam.textContent = state.voice.camLive ? 'Stop camera' : 'Start camera';
+  setButtonLabel(el.voiceCam, state.voice.camLive ? 'Stop camera' : 'Start camera');
   el.voiceCam.toggleAttribute('data-on', state.voice.camLive);
 
   // Both live on the strip at the bottom now, and both mean something only
@@ -1971,7 +1985,7 @@ function applyVoiceButtons() {
 
   const sharing = state.share.target?.channelId === state.voice.channelId
     && Boolean(state.voice.channelId);
-  el.voiceScreen.textContent = sharing ? 'Stop sharing' : 'Share screen here';
+  setButtonLabel(el.voiceScreen, sharing ? 'Stop sharing' : 'Share screen here');
   el.voiceScreen.toggleAttribute('data-on', sharing);
 
   el.voiceSoundboard.toggleAttribute('data-on', !el.soundpad.hidden);
@@ -3859,7 +3873,7 @@ async function stopCamera() {
   state.camera.publication = null;
   state.camera.stream?.getTracks().forEach((t) => t.stop());
   state.camera.stream = null;
-  el.voiceCam.textContent = 'Start camera';
+  setButtonLabel(el.voiceCam, 'Start camera');
 
   if (publication) {
     publication.pc.close();

@@ -1103,12 +1103,22 @@ select:focus {
  * you can do about it, in one block that does not move when the roster
  * grows.
  */
+/*
+ * Built from --surface and --border rather than from a film of white.
+ *
+ * A tint of white over the background does change with the palette, but it
+ * changes by DESATURATING it: four per cent of white over lavender's
+ * #14111d lands on a grey that has lost a third of the hue, and the button
+ * faces stacked on top lost two thirds. The whole corner read as the stock
+ * grey of a themeless app while everything around it was purple. The
+ * palette already names the colour a raised surface should be; use it.
+ */
 .voice-panel {
   margin-top: auto;
   flex: 0 0 auto;
   border-radius: 10px;
-  background: rgb(var(--tint-rgb) / 0.04);
-  border: 1px solid rgb(var(--tint-rgb) / 0.08);
+  background: var(--surface);
+  border: 1px solid var(--border);
   padding: 0.6rem;
   margin-bottom: 0.2rem;
 }
@@ -1239,7 +1249,7 @@ select:focus {
   margin-left: auto;
 }
 .icon-btn:hover:not(:disabled) {
-  background: rgb(var(--tint-rgb) / 0.1);
+  background: var(--border);
 }
 .icon-btn:disabled {
   opacity: 0.35;
@@ -1274,7 +1284,7 @@ select:focus {
   margin-top: 0.5rem;
   padding: 0.35rem 0.4rem;
   border-radius: 8px;
-  background: rgb(var(--tint-rgb) / 0.05);
+  background: var(--surface);
 }
 .self-identity {
   display: flex;
@@ -1292,7 +1302,7 @@ select:focus {
   text-align: left;
 }
 .self-identity:hover {
-  background: rgb(var(--tint-rgb) / 0.07);
+  background: var(--surface-2);
 }
 .self-identity:hover .avatar {
   outline: 2px solid var(--accent);
@@ -1348,38 +1358,38 @@ select:focus {
 
 .voice-panel-actions {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(3.6rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(2.4rem, 1fr));
   gap: 0.3rem;
   margin-top: 0.55rem;
 }
 .voice-action {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 0.2rem;
-  padding: 0.45rem 0.25rem;
+  justify-content: center;
+  padding: 0.5rem 0.25rem;
   border-radius: 8px;
-  border: 1px solid rgb(var(--tint-rgb) / 0.1);
-  background: rgb(var(--tint-rgb) / 0.05);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
   color: inherit;
   font: inherit;
-  font-size: 0.68rem;
   line-height: 1.2;
   cursor: pointer;
-  text-align: center;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* Same trick as .icon-btn: the glyph is the button, and the words are
+     collapsed rather than deleted so the accessibility tree and the test
+     suites keep reading them. The tooltip is what a mouse gets. */
+  font-size: 0;
 }
 /* From the attribute, so the button's textContent stays exactly its label. */
 .voice-action::before {
   content: attr(data-glyph);
-  font-size: 1.05rem;
+  font-size: 1.15rem;
   line-height: 1;
   font-variant-emoji: text;
 }
-.voice-action:hover {
-  background: rgb(var(--tint-rgb) / 0.12);
+/* --border, not a tint: lighter than the face in every dark palette and
+   darker than it in the light one, which is what "hovered" means in both. */
+.voice-action:hover:not(:disabled) {
+  background: var(--border);
 }
 /* On reads as "this is doing something", which for a mute means the red of a
    thing that is off and for a camera the blue of a thing that is on. */
