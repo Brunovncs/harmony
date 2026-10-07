@@ -60,6 +60,22 @@ export const MAX_CLIP_BYTES = 2 * 1024 * 1024;
  */
 export const MAX_AVATAR_BYTES = 256 * 1024;
 
+/**
+ * Per-custom-emoji ceiling, and how many there may be.
+ *
+ * Both are paid by everyone: an emoji is downloaded by every client that
+ * opens the picker and kept out of cache eviction for as long as it exists,
+ * the same bargain the soundpad makes. 256 KB is generous for something
+ * drawn at 22 pixels, and the client downscales before it uploads anyway.
+ *
+ * The count cap exists because the name is a shared, server-wide namespace
+ * that any member may write to. Without it the backstop is the disk quota,
+ * which is the wrong place to discover that somebody scripted a thousand
+ * uploads.
+ */
+export const MAX_EMOJI_BYTES = 256 * 1024;
+export const MAX_EMOJIS = 200;
+
 /** Messages returned by one history request. */
 const PAGE_SIZE = 50;
 
@@ -124,6 +140,14 @@ export class Chat {
           AND (m.body LIKE ? OR u.nickname LIKE ? OR IFNULL(m.media_type, '') LIKE ?)
         ORDER BY m.id DESC LIMIT ?
       `),
+
+      react: db.prepare(
+        'INSERT OR IGNORE INTO message_reactions (message_id, user_id, emoji, created_at) '
+        + 'VALUES (?, ?, ?, ?)',
+      ),
+      unreact: db.prepare(
+        'DELETE FROM message_reactions WHERE message_id = ? AND user_id = ? AND emoji = ?',
+      ),
 
       upload: db.prepare('SELECT * FROM uploads WHERE hash = ?'),
       insertUpload: db.prepare(
@@ -288,6 +312,96 @@ export class Chat {
       throw err;
     }
     return { ok: true, message };
+  }
+
+  // ------------------------------------------------------------- reactions
+
+  /**
+   * Reactions for a page of messages, grouped and counted.
+   *
+   * One query for the whole page rather than one per message: a fifty-row
+   * history would otherwise be fifty-one trips into SQLite for something
+   * most messages do not have at all.
+   *
+   * Prepared on the spot because the id list varies in length and
+   * node:sqlite has no array binding. The tempting alternative -- a BETWEEN
+   * over the page's first and last id -- is wrong the moment somebody
+   * deletes a message, because a page stops being a contiguous id range.
+   *
+   * Grouped in insertion order (rowid), so the first reaction anybody chose
+   * stays leftmost as others pile onto it.
+   */
+  reactionsFor(ids) {
+    const out = new Map(ids.map((id) => [id, []]));
+    if (!ids.length) return out;
+
+    const rows = this.#db.prepare(
+      'SELECT message_id, emoji, user_id FROM message_reactions '
+      + `WHERE message_id IN (${ids.map(() => '?').join(',')}) ORDER BY rowid`,
+    ).all(...ids);
+
+    const groups = new Map();
+    for (const row of rows) {
+      const key = `${row.message_id}\u0000${row.emoji}`;
+      let group = groups.get(key);
+      if (!group) {
+        group = { emoji: row.emoji, count: 0, userIds: [] };
+        groups.set(key, group);
+        out.get(row.message_id)?.push(group);
+      }
+      group.count += 1;
+      group.userIds.push(row.user_id);
+    }
+    return out;
+  }
+
+  reactions(messageId) {
+    return this.reactionsFor([messageId]).get(messageId) ?? [];
+  }
+
+  /**
+   * Add or remove one person's reaction. Idempotent in both directions.
+   *
+   * INSERT OR IGNORE rather than a read-then-write: two clicks racing each
+   * other cannot produce two rows, because the primary key refuses the
+   * second regardless of what either one read first.
+   */
+  react({ messageId, userId, emoji, on = true }) {
+    const message = this.#q.messageById.get(messageId);
+    if (!message) return { ok: false, error: 'no_such_message' };
+
+    const key = Chat.reactionKey(emoji);
+    if (!key) return { ok: false, error: 'bad_emoji' };
+
+    if (on) this.#q.react.run(messageId, userId, key, Date.now());
+    else this.#q.unreact.run(messageId, userId, key);
+
+    return { ok: true, message, reactions: this.reactions(messageId) };
+  }
+
+  /**
+   * What counts as something to react with.
+   *
+   * ":name:" for a custom one, or a short run of emoji. The cap matters:
+   * the column is TEXT and without it a "reaction" can be a second message
+   * body, rendering as a button the width of the pane.
+   *
+   * The control-character rule has one deliberate hole. \p{C} would be the
+   * obvious test and it is WRONG here -- U+200D ZERO WIDTH JOINER is
+   * Cf, and it is what holds together every family, every profession and
+   * most of the people emoji anyone would actually use. It is allowed by
+   * name; the other format characters, which is where a right-to-left
+   * override would come in and reverse the row around it, are not.
+   */
+  static reactionKey(raw) {
+    const value = String(raw ?? '').trim();
+    if (!value) return null;
+    if (/^:[a-z0-9_]{2,32}:$/.test(value)) return value;
+
+    if (/[\p{Cc}\p{Cs}]/u.test(value)) return null;
+    if (/\p{Cf}/u.test(value.replaceAll('\u200d', ''))) return null;
+    if ([...value].length > 16) return null;
+    return value;
   }
 
   history(channelId, { before = Number.MAX_SAFE_INTEGER, limit = PAGE_SIZE } = {}) {
@@ -494,6 +608,121 @@ export class Soundpad {
   }
 }
 
+/**
+ * Custom emoji.
+ *
+ * A registry over ordinary uploads, exactly like the soundpad -- so the
+ * allowlist, the per-file cap and the disk quota all apply without this
+ * class knowing they exist.
+ *
+ * Any member may add one. That is a deliberate departure from the soundpad,
+ * which is admin-only: the soundpad plays out loud in everybody's ears and
+ * an emoji sits in a picker until somebody chooses it. Removal is the
+ * uploader's or an admin's, so a bad one can always be taken back without
+ * making every addition a request.
+ */
+export class Emojis {
+  #db;
+  #q;
+
+  constructor(db) {
+    this.#db = db;
+    this.#q = {
+      all: db.prepare(`
+        SELECT e.*, u.nickname AS uploader FROM emojis e
+        LEFT JOIN users u ON u.id = e.uploaded_by
+        ORDER BY e.name
+      `),
+      byId: db.prepare(`
+        SELECT e.*, u.nickname AS uploader FROM emojis e
+        LEFT JOIN users u ON u.id = e.uploaded_by
+        WHERE e.id = ?
+      `),
+      byName: db.prepare('SELECT * FROM emojis WHERE name = ?'),
+      insert: db.prepare(
+        'INSERT INTO emojis (name, file_hash, uploaded_by, created_at) VALUES (?, ?, ?, ?)',
+      ),
+      remove: db.prepare('DELETE FROM emojis WHERE id = ?'),
+      count: db.prepare('SELECT COUNT(*) AS n FROM emojis'),
+      addRef: db.prepare('UPDATE uploads SET refs = refs + 1 WHERE hash = ?'),
+      dropRef: db.prepare('UPDATE uploads SET refs = MAX(0, refs - 1) WHERE hash = ?'),
+      upload: db.prepare('SELECT * FROM uploads WHERE hash = ?'),
+    };
+  }
+
+  list() {
+    return this.#q.all.all();
+  }
+
+  /**
+   * Fold what somebody typed into a name that can be a trigger.
+   *
+   * Lowercased, spaces and dashes to underscores, surrounding colons
+   * dropped so pasting ":shrug:" does what it looks like it does. The
+   * result has to match exactly, because the trigger is a literal match in
+   * message text -- there is no second chance to be lenient at render time.
+   */
+  static normalizeName(raw) {
+    const value = String(raw ?? '').trim().toLowerCase()
+      .replace(/^:+|:+$/g, '')
+      .replace(/[\s-]+/g, '_');
+    return /^[a-z0-9_]{2,32}$/.test(value) ? value : null;
+  }
+
+  add({ name, fileHash, userId }) {
+    const clean = Emojis.normalizeName(name);
+    if (!clean) return { ok: false, error: 'invalid_name' };
+    if (this.#q.byName.get(clean)) return { ok: false, error: 'name_taken' };
+    if (this.#q.count.get().n >= MAX_EMOJIS) return { ok: false, error: 'too_many_emojis' };
+
+    const upload = this.#q.upload.get(fileHash);
+    if (!upload) return { ok: false, error: 'no_such_upload' };
+    if (mediaTypeOf(upload.content_type) !== 'image') return { ok: false, error: 'not_an_image' };
+    // Against the stored row, not the request: the upload may be one
+    // somebody else made, and the cap has to hold either way.
+    if (upload.bytes > MAX_EMOJI_BYTES) return { ok: false, error: 'emoji_too_large' };
+
+    this.#db.exec('BEGIN');
+    try {
+      const info = this.#q.insert.run(clean, fileHash, userId, Date.now());
+      this.#q.addRef.run(fileHash);
+      this.#db.exec('COMMIT');
+      return { ok: true, emoji: this.#q.byId.get(Number(info.lastInsertRowid)) };
+    } catch (err) {
+      this.#db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  get(id) {
+    return this.#q.byId.get(id) ?? null;
+  }
+
+  remove(id) {
+    const emoji = this.#q.byId.get(id);
+    if (!emoji) return { ok: false, error: 'no_such_emoji' };
+    this.#db.exec('BEGIN');
+    try {
+      this.#q.remove.run(id);
+      this.#q.dropRef.run(emoji.file_hash);
+      this.#db.exec('COMMIT');
+    } catch (err) {
+      this.#db.exec('ROLLBACK');
+      throw err;
+    }
+    return { ok: true, emoji };
+  }
+}
+
+export const publicEmoji = (e) => (e ? {
+  id: e.id,
+  name: e.name,
+  hash: e.file_hash,
+  uploadedBy: e.uploaded_by ?? null,
+  uploader: e.uploader ?? null,
+  createdAt: e.created_at,
+} : null);
+
 export const publicClip = (c) => (c ? {
   id: c.id,
   name: c.name,
@@ -503,7 +732,16 @@ export const publicClip = (c) => (c ? {
   createdAt: c.created_at,
 } : null);
 
-export const publicMessage = (m) => (m ? {
+/**
+ * A message as the client sees it.
+ *
+ * Reactions are passed in rather than looked up here, because they are a
+ * second query and this is called in a loop over a page. Defaulting to []
+ * means a caller that has not got them yet renders an empty strip rather
+ * than throwing -- which is also exactly right for a message created one
+ * line ago.
+ */
+export const publicMessage = (m, reactions = []) => (m ? {
   id: m.id,
   channelId: m.channel_id,
   userId: m.user_id,
@@ -512,5 +750,6 @@ export const publicMessage = (m) => (m ? {
   attachmentHash: m.attachment_hash ?? null,
   mediaType: m.media_type ?? null,
   pinned: Boolean(m.pinned),
+  reactions,
   createdAt: m.created_at,
 } : null);

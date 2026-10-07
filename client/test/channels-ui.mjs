@@ -534,6 +534,122 @@ async function run() {
     `${afterDelete.rows} rows left; error: "${afterDelete.error}"`,
   );
 
+  // --- emoji, shortcodes and reactions -----------------------------------
+  //
+  // Through the picker, not through the API. The whole point of the picker
+  // is that it is reachable, and every part of this feature that can be
+  // wrong -- the popover opening, a cell inserting at the caret, a typed
+  // :name: becoming a character, a reaction counting -- is on this path.
+  await cdp.evaluate("document.getElementById('chat-emoji').click(); return true;");
+  await waitFor(cdp, "!document.getElementById('emoji-pop').hidden", {
+    label: 'the emoji picker',
+  });
+  const picker = await cdp.evaluate(`
+    return {
+      cells: document.querySelectorAll('#emoji-grid .emoji-cell').length,
+      sections: document.querySelectorAll('#emoji-grid .emoji-section-head').length,
+    };
+  `);
+  check(
+    'the emoji button opens a picker with the whole set in it',
+    picker.cells > 1000 && picker.sections >= 6,
+    `${picker.cells} emoji in ${picker.sections} sections`,
+  );
+
+  await cdp.evaluate(`${setInput('emoji-search', 'pizza')} return true;`);
+  await sleep(300);
+  const filtered = await cdp.evaluate(`
+    const cells = [...document.querySelectorAll('#emoji-grid .emoji-cell')]
+      .filter((c) => c.offsetParent !== null);
+    return { count: cells.length, first: cells[0]?.dataset.value ?? null };
+  `);
+  check(
+    'searching narrows it to what matches the name',
+    filtered.count > 0 && filtered.count < 40,
+    `${filtered.count} matching, first ${filtered.first}`,
+  );
+
+  await cdp.evaluate(`
+    [...document.querySelectorAll('#emoji-grid .emoji-cell')]
+      .filter((c) => c.offsetParent !== null)[0].click();
+    return true;
+  `);
+  await sleep(300);
+  const inserted = await cdp.evaluate(
+    "return document.getElementById('chat-input').value;",
+  );
+  check(
+    'picking one puts it in the box',
+    inserted.length > 0,
+    JSON.stringify(inserted),
+  );
+
+  // A typed shortcode, which is the half of this that has no picker.
+  await cdp.evaluate(`${setInput('chat-input', 'nice :grinning_face: one')} return true;`);
+  await cdp.evaluate("document.getElementById('chat-form').requestSubmit(); return true;");
+  await waitFor(cdp, "document.querySelectorAll('#chat-log .chat-msg').length > 0", {
+    label: 'the emoji message',
+  });
+  const rendered = await cdp.evaluate(`
+    const msg = [...document.querySelectorAll('#chat-log .chat-msg')].pop();
+    return { text: msg.querySelector('.text').textContent };
+  `);
+  check(
+    'a typed :shortcode: comes out as the emoji, not as the text',
+    rendered.text.includes('\u{1F600}') && !rendered.text.includes(':grinning_face:'),
+    JSON.stringify(rendered.text),
+  );
+
+  // Reacting. The button sits with Pin and Delete rather than on the strip,
+  // because the strip only exists once there is something on it.
+  await cdp.evaluate(`
+    const msg = [...document.querySelectorAll('#chat-log .chat-msg')].pop();
+    msg.querySelector('.react-btn').click();
+    return true;
+  `);
+  await waitFor(cdp, "!document.getElementById('emoji-pop').hidden", {
+    label: 'the picker, opened from a message',
+  });
+  await cdp.evaluate(`
+    [...document.querySelectorAll('#emoji-grid .emoji-cell')]
+      .filter((c) => c.offsetParent !== null)[0].click();
+    return true;
+  `);
+  await waitFor(cdp, "document.querySelectorAll('#chat-log .reaction').length > 0", {
+    label: 'the reaction appearing',
+  });
+  const reacted = await cdp.evaluate(`
+    const msg = [...document.querySelectorAll('#chat-log .chat-msg')].pop();
+    const chips = [...msg.querySelectorAll('.reaction')];
+    return {
+      chips: chips.length,
+      count: chips[0]?.querySelector('.count')?.textContent,
+      mine: chips[0]?.hasAttribute('data-mine') ?? false,
+    };
+  `);
+  check(
+    'reacting adds one chip, counted, and marked as yours',
+    reacted.chips === 1 && reacted.count === '1' && reacted.mine === true,
+    `${reacted.chips} chips, count ${reacted.count}, mine ${reacted.mine}`,
+  );
+
+  // Clicking the same one again is the way back, and it has to leave
+  // nothing behind -- a chip reading 0 is the classic version of this bug.
+  await cdp.evaluate(`
+    [...document.querySelectorAll('#chat-log .chat-msg')].pop()
+      .querySelector('.reaction').click();
+    return true;
+  `);
+  await sleep(900);
+  const unreacted = await cdp.evaluate(
+    "return document.querySelectorAll('#chat-log .reaction').length;",
+  );
+  check(
+    'clicking your own reaction takes it back, chip and all',
+    unreacted === 0,
+    `${unreacted} chips left`,
+  );
+
   // --- the soundpad -----------------------------------------------------
   /*
    * The first clip goes in THROUGH THE UI -- the file input and the naming
@@ -565,6 +681,24 @@ async function run() {
     `"${clipDialog.title}" suggesting "${clipDialog.suggested}"`,
   );
   await answerDialog(cdp, { name: 'airhorn' });
+
+  /*
+   * Open the pad, because it is a popover now and renderSoundpad does
+   * nothing while it is hidden.
+   *
+   * The button is deliberately disabled outside a call -- a clip plays into
+   * a voice channel, and there is no channel to play it into -- and this
+   * suite stubs MediaMTX and never joins one. So it is enabled here to
+   * reach the panel. That is the one thing in this file that a person could
+   * not do, and it is the price of keeping the media path out of a suite
+   * that runs in seconds.
+   */
+  await cdp.evaluate(`
+    const button = document.getElementById('voice-soundboard');
+    button.disabled = false;
+    button.click();
+    return true;
+  `);
   await waitFor(
     cdp,
     "document.querySelectorAll('#soundpad-grid .clip-cell').length === 1",
@@ -592,7 +726,7 @@ async function run() {
     return {
       shown: !document.getElementById('soundpad').hidden,
       cells: document.querySelectorAll('#soundpad-grid .clip-cell').length,
-      names: [...document.querySelectorAll('#soundpad-grid .clip-cell > button:nth-child(2)')]
+      names: [...document.querySelectorAll('#soundpad-grid .clip-cell .clip-name')]
         .map((b) => b.textContent),
     };
   `);
@@ -604,13 +738,17 @@ async function run() {
 
   await cdp.evaluate(`
     const cells = [...document.querySelectorAll('#soundpad-grid .clip-cell')];
-    cells[1].querySelector('button').click();   // the left arrow on the second
+    // .clip-tools, not the first button in the cell: the first button IS the
+    // clip now, and clicking it tries to play into a channel this suite is
+    // not in. The admin controls are layered over the clip rather than
+    // beside it, because three buttons beside an 8.5rem cell left about two
+    // centimetres for the name.
+    cells[1].querySelector('.clip-tools button').click();   // move left
     return true;
   `);
   await sleep(900);
   const padOrder = await cdp.evaluate(
-    // nth-child(2): an admin's cell is [left arrow][the clip][right arrow].
-    "return [...document.querySelectorAll('#soundpad-grid .clip-cell > button:nth-child(2)')]"
+    "return [...document.querySelectorAll('#soundpad-grid .clip-cell .clip-name')]"
     + ".map((b) => b.textContent);",
   );
   check(

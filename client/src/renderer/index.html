@@ -416,6 +416,12 @@
                 maxlength="4000"
               />
               <input id="chat-file" type="file" hidden />
+              <button
+                type="button"
+                class="ghost chat-emoji-btn"
+                id="chat-emoji"
+                title="Emoji"
+              >&#128512;</button>
               <button type="button" class="ghost" id="chat-attach">Attach</button>
               <button type="submit" class="primary small">Send</button>
             </form>
@@ -650,6 +656,35 @@
       </div>
       <div class="soundpad-grid" id="soundpad-grid"></div>
       <p class="muted soundpad-empty" id="soundpad-empty" hidden></p>
+    </div>
+
+    <!--
+      The emoji picker.
+
+      One popover for two jobs: putting an emoji in what you are typing, and
+      reacting to a message. They are the same grid and the same search, and
+      the only difference is where the answer goes -- which is a variable,
+      not a second picker. openEmojiPicker decides.
+
+      Custom emoji come first because they are the ones this server has and
+      nowhere else does. Then "recent", which is what anybody actually
+      clicks, then the generated sections.
+    -->
+    <div class="emoji-pop" id="emoji-pop" hidden>
+      <div class="emoji-head">
+        <input
+          id="emoji-search"
+          class="search-field"
+          type="search"
+          placeholder="Search emoji"
+          autocomplete="off"
+        />
+        <button class="ghost small" id="emoji-add" title="Upload a custom emoji">+ Add</button>
+        <input id="emoji-file" type="file" accept="image/*" hidden />
+      </div>
+      <div class="emoji-grid" id="emoji-grid"></div>
+      <p class="muted emoji-empty" id="emoji-empty" hidden></p>
+      <div class="emoji-preview" id="emoji-preview"></div>
     </div>
 
     <!--

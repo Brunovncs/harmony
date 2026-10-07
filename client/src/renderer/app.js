@@ -1,4 +1,5 @@
 import { harmony } from './bridge.js';
+import { EMOJI_SECTIONS, emojiByShortcode } from './emoji.js';
 import { publish, watch, hangup, createStatsReader, applySenderSettings } from './webrtc.js';
 import { AudioBridge } from './audio-bridge.js';
 import { runConnectionTest } from './connection-test.js';
@@ -136,6 +137,14 @@ const el = {
   chatAttach: $('chat-attach'),
   chatNote: $('chat-note'),
   soundpad: $('soundpad'),
+  chatEmoji: $('chat-emoji'),
+  emojiPop: $('emoji-pop'),
+  emojiSearch: $('emoji-search'),
+  emojiGrid: $('emoji-grid'),
+  emojiEmpty: $('emoji-empty'),
+  emojiPreview: $('emoji-preview'),
+  emojiAdd: $('emoji-add'),
+  emojiFile: $('emoji-file'),
   soundpadAdd: $('soundpad-add'),
   soundpadFile: $('soundpad-file'),
   soundpadGrid: $('soundpad-grid'),
@@ -370,6 +379,14 @@ const state = {
   share: { target: null },
   chat: { channelId: null, messages: [], pinned: [], searching: false, pendingFile: null },
   soundpad: { clips: [] },
+  /**
+   * The server's own emoji.
+   *
+   * byName as well as the list, because every message body is scanned for
+   * :name: on every render -- a linear search through the list would be
+   * that scan times the number of emoji, for every message on screen.
+   */
+  emojis: { list: [], byName: new Map() },
   /** The webcam publish, which is a SECOND stream under `<nickname>-cam`. */
   camera: { stream: null, publication: null, session: null },
   voice: new VoiceSession(),
@@ -1137,6 +1154,7 @@ function refreshKeepSet() {
   return harmony.media.keep([
     ...[...state.users.values()].map((u) => u.avatarHash).filter(Boolean),
     ...state.soundpad.clips.map((c) => c.hash),
+    ...state.emojis.list.map((e) => e.hash),
     ...state.chat.pinned.map((m) => m.attachmentHash).filter(Boolean),
   ]).catch(() => { /* the cache is a cache */ });
 }
@@ -1216,6 +1234,7 @@ async function enterChannels() {
   renderOwnAvatar();
   await refreshUsers();
   loadSoundpad();
+  loadEmojis();
   showView('view-channels');
 
   try {
@@ -3268,6 +3287,388 @@ function closeChat() {
   applyStage();
 }
 
+// ---------------------------------------------------------------------------
+// Emoji
+// ---------------------------------------------------------------------------
+
+/** Longest side a custom emoji is stored at. */
+const EMOJI_PX = 128;
+const EMOJI_MAX_BYTES = 256 * 1024;
+/** How many of your last picks the picker keeps. */
+const RECENT_EMOJI = 24;
+/** A filtered grid stops here. Nobody scrolls past three hundred faces. */
+const EMOJI_RESULT_CAP = 300;
+
+/*
+ * :name:
+ *
+ * Deliberately NOT allowing '-' or '+', because the server folds both into
+ * '_' when it stores a name -- a trigger that cannot match anything is
+ * worse than one that is not recognised at all, since it still looks like
+ * it ought to work.
+ */
+const SHORTCODE_RE = /:([a-z0-9_]{2,32}):/gi;
+const PICTOGRAPHIC = /\p{Extended_Pictographic}/u;
+const EMOJI_ONLY_RE =
+  /^(?:\s|\p{Extended_Pictographic}|[\u200d\ufe0f\u{1F3FB}-\u{1F3FF}]|:[a-z0-9_]{2,32}:)+$/iu;
+
+function setEmojis(list) {
+  state.emojis.list = list ?? [];
+  state.emojis.byName = new Map(state.emojis.list.map((e) => [e.name, e]));
+  renderEmojiPicker();
+  // Every message body is scanned against this map, so a message already on
+  // screen showing :shrug: becomes a picture the moment one is added.
+  if (state.chat.channelId) renderChat();
+  refreshKeepSet();
+}
+
+async function loadEmojis() {
+  try {
+    const { emojis } = await harmony.api.emojis(state.server);
+    setEmojis(emojis);
+    // Warm the cache the same way the soundpad does: asking for the URL is
+    // enough, because the protocol handler downloads on demand.
+    for (const emoji of emojis) new Image().src = harmony.mediaUrl(emoji.hash);
+  } catch {
+    // Not fatal. Without them :name: stays text, which is what it looks like.
+  }
+}
+
+/** An <img> for one custom emoji, sized by CSS rather than by attributes. */
+function customEmojiImg(emoji, className = 'emoji-img') {
+  const img = document.createElement('img');
+  img.className = className;
+  img.src = harmony.mediaUrl(emoji.hash);
+  img.alt = `:${emoji.name}:`;
+  img.title = `:${emoji.name}:`;
+  img.loading = 'lazy';
+  return img;
+}
+
+/**
+ * Append one emoji -- a character or a :name: -- to an element.
+ *
+ * A custom emoji whose picture has been deleted falls back to its literal
+ * text, which is why a reaction stores the name rather than a foreign key.
+ * The count was somebody's, and it stays.
+ */
+function appendEmoji(target, value) {
+  const match = /^:([a-z0-9_]{2,32}):$/i.exec(String(value ?? ''));
+  const custom = match ? state.emojis.byName.get(match[1].toLowerCase()) : null;
+  if (custom) target.append(customEmojiImg(custom));
+  else target.append(document.createTextNode(String(value ?? '')));
+}
+
+/**
+ * Put a message body on the page, turning :name: into a picture.
+ *
+ * Text nodes and <img> elements, never innerHTML. "A chat message is the
+ * most obvious place in the app for someone to try injecting markup" did
+ * not stop being true when emoji arrived -- it got more tempting, because
+ * now there is a substitution to aim at.
+ *
+ * Custom emoji win over the standard shortcode table. A server that calls
+ * something :pizza: means ITS picture, and quietly showing the Unicode one
+ * instead would be a worse surprise than the collision.
+ *
+ * `returns {boolean} whether the body was nothing but emoji
+ */
+function renderBody(target, body) {
+  const text = String(body ?? '');
+  let last = 0;
+  let replaced = 0;
+
+  SHORTCODE_RE.lastIndex = 0;
+  for (let m = SHORTCODE_RE.exec(text); m; m = SHORTCODE_RE.exec(text)) {
+    const name = m[1].toLowerCase();
+    const custom = state.emojis.byName.get(name);
+    const standard = custom ? null : emojiByShortcode(name);
+    if (!custom && !standard) continue;
+
+    if (m.index > last) target.append(document.createTextNode(text.slice(last, m.index)));
+    target.append(custom ? customEmojiImg(custom) : document.createTextNode(standard));
+    last = m.index + m[0].length;
+    replaced += 1;
+  }
+  if (last < text.length) target.append(document.createTextNode(text.slice(last)));
+
+  // "Only emoji" has to mean at least one emoji: a line of colons matches
+  // the shape and is not something to enlarge.
+  return Boolean(text.trim())
+    && EMOJI_ONLY_RE.test(text)
+    && (replaced > 0 || PICTOGRAPHIC.test(text));
+}
+
+/** The strip of reactions under a message. Drawn only when there are some. */
+function reactionRow(message) {
+  const row = document.createElement('div');
+  row.className = 'reactions';
+
+  for (const reaction of message.reactions ?? []) {
+    const mine = Boolean(reaction.userIds?.includes(state.auth.user?.id));
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'reaction';
+    if (mine) button.setAttribute('data-mine', '');
+    // Read at click time rather than captured, for the same reason the
+    // roster rows are: the row is rebuilt under you by everybody else's
+    // reactions, and `mine` from render time would be stale.
+    button.addEventListener('click', () => toggleReaction(message.id, reaction.emoji));
+    button.title = (reaction.userIds ?? []).map((id) => displayOf(id, 'someone')).join(', ');
+
+    appendEmoji(button, reaction.emoji);
+    const count = document.createElement('span');
+    count.className = 'count';
+    count.textContent = String(reaction.count);
+    button.append(count);
+    row.append(button);
+  }
+
+  return row;
+}
+
+/**
+ * React, or take it back. The server works out which.
+ *
+ * `on` is computed here from the live message rather than from what the
+ * button looked like when it was drawn, so two quick clicks cannot leave
+ * the two sides disagreeing about whether you reacted.
+ */
+async function toggleReaction(messageId, emoji) {
+  const message = state.chat.messages.find((m) => m.id === messageId);
+  const existing = message?.reactions?.find((r) => r.emoji === emoji);
+  const mine = Boolean(existing?.userIds?.includes(state.auth.user?.id));
+  try {
+    await harmony.api.react(state.server, messageId, emoji, !mine);
+    // Everyone gets message:reactions, including us -- so nothing is drawn
+    // here. One path updates the strip, whoever caused it.
+    if (!mine) rememberEmoji(emoji);
+  } catch (err) {
+    showChannelsError(err.message);
+  }
+}
+
+/** Your last few picks, newest first. Local -- it is about your hands. */
+function rememberEmoji(value) {
+  const recent = [value, ...(state.settings.recentEmoji ?? []).filter((v) => v !== value)]
+    .slice(0, RECENT_EMOJI);
+  state.settings.recentEmoji = recent;
+  harmony.settings.set({ recentEmoji: recent }).catch(() => { /* a convenience */ });
+}
+
+// --- the picker ------------------------------------------------------------
+
+/** What to do with the emoji that gets chosen. Set by openEmojiPicker. */
+let emojiPick = null;
+let emojiFilter = '';
+/** The generated grid, built once and kept: 1400 buttons is not free. */
+let standardWrap = null;
+let dynamicWrap = null;
+
+function emojiCell(value, label, custom) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'emoji-cell';
+  button.dataset.value = value;
+  button.dataset.label = label;
+  button.title = `:${label}:`;
+  if (custom) button.append(customEmojiImg(custom, ''));
+  else button.textContent = value;
+  return button;
+}
+
+function emojiSection(label, cells) {
+  const wrap = document.createDocumentFragment();
+  const head = document.createElement('div');
+  head.className = 'emoji-section-head';
+  head.textContent = label;
+  const grid = document.createElement('div');
+  grid.className = 'emoji-section';
+  grid.append(...cells);
+  wrap.append(head, grid);
+  return wrap;
+}
+
+/**
+ * The custom and recent sections, which change, and the search results.
+ *
+ * Separated from the generated grid because that one does not change at
+ * all: rebuilding fourteen hundred buttons every time somebody types a
+ * letter is the difference between a picker that opens and one that
+ * stutters.
+ */
+function renderEmojiPicker() {
+  if (!dynamicWrap || el.emojiPop.hidden) return;
+
+  const filter = emojiFilter;
+  const nodes = [];
+
+  if (filter) {
+    const cells = [];
+    for (const emoji of state.emojis.list) {
+      if (emoji.name.includes(filter)) cells.push(emojiCell(`:${emoji.name}:`, emoji.name, emoji));
+    }
+    for (const section of EMOJI_SECTIONS) {
+      for (const [ch, name] of section.items) {
+        if (cells.length >= EMOJI_RESULT_CAP) break;
+        if (name.includes(filter)) cells.push(emojiCell(ch, name, null));
+      }
+    }
+    if (cells.length) nodes.push(emojiSection(`Matching "${el.emojiSearch.value}"`, cells));
+    el.emojiEmpty.hidden = cells.length > 0;
+    el.emojiEmpty.textContent = `Nothing called "${el.emojiSearch.value}".`;
+  } else {
+    el.emojiEmpty.hidden = true;
+
+    if (state.emojis.list.length) {
+      nodes.push(emojiSection('This server', state.emojis.list.map((emoji) => {
+        const cell = emojiCell(`:${emoji.name}:`, emoji.name, emoji);
+        // Yours, or anybody's if you are an admin -- the rule the server
+        // enforces, so a button that appears always works.
+        if (emoji.uploadedBy !== state.auth.user?.id && !isAdmin()) return cell;
+        const wrap = document.createElement('span');
+        wrap.className = 'emoji-cell-wrap';
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'emoji-remove';
+        remove.textContent = '\u00d7';
+        remove.title = `Remove :${emoji.name}:`;
+        remove.addEventListener('click', async (event) => {
+          event.stopPropagation();
+          if (!await askConfirm(`Remove :${emoji.name}:?`, {
+            text: 'Reactions that used it keep their count and fall back to the text.',
+            okLabel: 'Remove',
+          })) return;
+          try {
+            await harmony.api.deleteEmoji(state.server, emoji.id);
+          } catch (err) {
+            showChannelsError(err.message);
+          }
+        });
+        wrap.append(cell, remove);
+        return wrap;
+      })));
+    }
+
+    const recent = (state.settings.recentEmoji ?? []).slice(0, RECENT_EMOJI);
+    if (recent.length) {
+      nodes.push(emojiSection('Recent', recent.map((value) => {
+        const match = /^:([a-z0-9_]{2,32}):$/i.exec(value);
+        const custom = match ? state.emojis.byName.get(match[1].toLowerCase()) : null;
+        // A custom emoji that has since been removed still sits in the
+        // list; it is drawn as its text rather than dropped, because
+        // silently losing something out of "recent" is confusing.
+        return emojiCell(value, match ? match[1] : value, custom);
+      })));
+    }
+  }
+
+  dynamicWrap.replaceChildren(...nodes);
+  standardWrap.hidden = Boolean(filter);
+}
+
+/** Build the generated sections. Once per session, on first open. */
+function buildEmojiGrid() {
+  if (standardWrap) return;
+  dynamicWrap = document.createElement('div');
+  standardWrap = document.createElement('div');
+  standardWrap.append(...EMOJI_SECTIONS.map(
+    (section) => emojiSection(section.label, section.items.map(
+      ([ch, name]) => emojiCell(ch, name, null),
+    )),
+  ));
+  el.emojiGrid.replaceChildren(dynamicWrap, standardWrap);
+}
+
+/**
+ * Open the picker over something, and say where the answer goes.
+ *
+ * One popover for the composer and for every message, because it is the
+ * same grid and the same search -- the only difference is the callback.
+ * Measured and clamped for the same reason the soundboard is: it is fixed,
+ * and a fixed element has no idea where its button is.
+ */
+function openEmojiPicker(anchorEl, onPick) {
+  buildEmojiGrid();
+  emojiPick = onPick;
+  emojiFilter = '';
+  el.emojiSearch.value = '';
+  el.emojiPop.hidden = false;
+  el.emojiPreview.replaceChildren();
+  renderEmojiPicker();
+
+  const anchor = anchorEl.getBoundingClientRect();
+  const box = el.emojiPop.getBoundingClientRect();
+  const left = Math.min(
+    Math.max(8, anchor.left - box.width / 2),
+    Math.max(8, window.innerWidth - box.width - 8),
+  );
+  const above = anchor.top - box.height - 8;
+  el.emojiPop.style.left = `${left}px`;
+  el.emojiPop.style.top = above >= 8
+    ? `${above}px`
+    : `${Math.min(anchor.bottom + 8, window.innerHeight - box.height - 8)}px`;
+
+  el.emojiSearch.focus();
+}
+
+function closeEmojiPicker() {
+  el.emojiPop.hidden = true;
+  emojiPick = null;
+}
+
+/**
+ * Downscale a picked image and register it as an emoji.
+ *
+ * Fit, not cover -- unlike an avatar. An avatar is a circle and cropping it
+ * is the point; an emoji's shape IS the joke, and cropping a wide one in
+ * half ruins it.
+ *
+ * PNG rather than the avatar's JPEG, because an emoji without transparency
+ * is a white rectangle sitting in a line of text.
+ */
+async function uploadCustomEmoji(file) {
+  try {
+    showChannelsError('');
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, EMOJI_PX / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+
+    const blob = await new Promise((done) => canvas.toBlob(done, 'image/png'));
+    if (!blob) throw new Error('Could not read that image.');
+    if (blob.size > EMOJI_MAX_BYTES) {
+      throw new Error('That picture is too detailed to shrink into an emoji.');
+    }
+
+    const answer = await ask({
+      title: 'Name this emoji',
+      text: 'The name is the trigger: typing it between colons puts the picture '
+        + 'in a message. Letters, numbers and underscores.',
+      okLabel: 'Add',
+      fields: [{
+        name: 'name',
+        label: 'Name',
+        value: file.name.replace(/\.[^.]+$/, '').toLowerCase().replace(/[^a-z0-9_]+/g, '_')
+          .slice(0, 32),
+        required: true,
+        maxlength: 32,
+      }],
+    });
+    if (!answer?.name) return;
+
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const upload = await harmony.media.upload(state.server, bytes, 'image/png');
+    await harmony.api.addEmoji(state.server, { name: answer.name, hash: upload.hash });
+    // The server pushes the new list to everybody, this client included.
+  } catch (err) {
+    showChannelsError(err.message);
+  }
+}
+
 /** One message row. Attachments are rendered from the local cache. */
 function messageRow(message) {
   const row = document.createElement('div');
@@ -3284,9 +3685,9 @@ function messageRow(message) {
 
   const text = document.createElement('span');
   text.className = 'text';
-  // textContent, never innerHTML: a chat message is the most obvious place in
-  // the app for someone to try injecting markup.
-  text.textContent = message.body;
+  // Text nodes and images only -- see renderBody. A chat message is the most
+  // obvious place in the app for someone to try injecting markup.
+  if (renderBody(text, message.body)) row.setAttribute('data-emoji-only', '');
 
   if (message.attachmentHash) {
     // harmony://app/media/<hash> -- same-origin, so the CSP allows it, and the
@@ -3333,7 +3734,16 @@ function messageRow(message) {
     }
   });
 
-  row.append(who, text, when, pin);
+  const react = document.createElement('button');
+  react.className = 'ghost small react-btn';
+  react.textContent = '\u{1F642}';
+  react.title = 'Add a reaction';
+  react.addEventListener('click', () => openEmojiPicker(react, (value) => {
+    closeEmojiPicker();
+    toggleReaction(message.id, value);
+  }));
+
+  row.append(who, text, when, react, pin);
 
   // Your own, or anybody's if you are an admin -- the same rule the server
   // enforces, so a button that appears always works.
@@ -3352,6 +3762,10 @@ function messageRow(message) {
     });
     row.append(remove);
   }
+
+  // Last, and only when there are any: the strip is a flex line of its own,
+  // and an empty one would add a blank line under every message in the log.
+  if (message.reactions?.length) row.append(reactionRow(message));
 
   return row;
 }
@@ -3706,6 +4120,38 @@ async function editClip(clip) {
   }
 }
 
+/**
+ * Move a clip one place. The whole list is sent, as with the channels.
+ *
+ * Lost with MAX_CLIP_BYTES in the same rewrite, and invisible for the same
+ * reason: its only callers are the two arrows inside renderSoundpad, so the
+ * ReferenceError waited until somebody pressed one.
+ */
+async function nudgeClip(id, delta) {
+  const ids = state.soundpad.clips.map((c) => c.id);
+  const from = ids.indexOf(id);
+  const to = from + delta;
+  if (from < 0 || to < 0 || to >= ids.length) return;
+  ids.splice(to, 0, ...ids.splice(from, 1));
+  try {
+    await harmony.api.reorderClips(state.server, ids);
+  } catch (err) {
+    showChannelsError(err.message);
+  }
+}
+
+/*
+ * The server's own per-clip ceiling, repeated here so the refusal happens
+ * before a two-megabyte upload rather than after it.
+ *
+ * It was deleted along with the old soundpad markup when the pad became a
+ * popover, and nothing noticed: the only reference is inside addSoundpadClip,
+ * so the file picked up a ReferenceError that only fired when somebody
+ * actually added a clip. Which is the argument for the test that caught it --
+ * every other soundpad test puts clips in through the API.
+ */
+const MAX_CLIP_BYTES = 2 * 1024 * 1024;
+
 async function addSoundpadClip(file) {
   try {
     el.channelsError.hidden = true;
@@ -3960,6 +4406,22 @@ function onRealtimeEvent(msg) {
         state.chat.pinned = state.chat.pinned.filter((m) => m.id !== msg.id);
         renderChat();
       }
+      break;
+
+    case 'message:reactions': {
+      if (msg.channelId !== state.chat.channelId) break;
+      // Both lists: a pinned message is a separate copy, and the strip in
+      // the pinned pane would otherwise go stale until the next page load.
+      for (const list of [state.chat.messages, state.chat.pinned]) {
+        const target = list.find((m) => m.id === msg.id);
+        if (target) target.reactions = msg.reactions;
+      }
+      renderChat();
+      break;
+    }
+
+    case 'emojis':
+      setEmojis(msg.emojis);
       break;
 
     case 'soundpad':
@@ -6135,6 +6597,76 @@ el.soundpadFile.addEventListener('change', () => {
 el.chatForm.addEventListener('submit', (event) => {
   event.preventDefault();
   sendMessage();
+});
+
+el.chatEmoji.addEventListener('click', () => {
+  if (!el.emojiPop.hidden) return closeEmojiPicker();
+  return openEmojiPicker(el.chatEmoji, (value) => {
+    // Inserted at the caret, not appended: an emoji chosen half way through
+    // a sentence belongs where the sentence was.
+    const input = el.chatInput;
+    const at = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? at;
+    input.value = input.value.slice(0, at) + value + input.value.slice(end);
+    const after = at + value.length;
+    input.setSelectionRange(after, after);
+    input.focus();
+    rememberEmoji(value);
+  });
+});
+
+el.emojiSearch.addEventListener('input', () => {
+  emojiFilter = el.emojiSearch.value.trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  renderEmojiPicker();
+});
+
+el.emojiGrid.addEventListener('click', (event) => {
+  const cell = event.target.closest('.emoji-cell');
+  if (!cell || !emojiPick) return;
+  const pick = emojiPick;
+  pick(cell.dataset.value);
+});
+
+/*
+ * The name of whatever the pointer is over.
+ *
+ * The only place a :shortcode: is ever shown, which for a custom emoji is
+ * the whole point of having one -- nobody can type a trigger they have
+ * never seen.
+ */
+el.emojiGrid.addEventListener('mouseover', (event) => {
+  const cell = event.target.closest('.emoji-cell');
+  if (!cell) return;
+  const big = document.createElement('span');
+  big.className = 'big';
+  appendEmoji(big, cell.dataset.value);
+  const name = document.createElement('span');
+  name.textContent = `:${cell.dataset.label}:`;
+  el.emojiPreview.replaceChildren(big, name);
+});
+
+el.emojiAdd.addEventListener('click', () => el.emojiFile.click());
+el.emojiFile.addEventListener('change', () => {
+  const file = el.emojiFile.files?.[0];
+  el.emojiFile.value = '';
+  if (file) uploadCustomEmoji(file);
+});
+
+// Anywhere else closes it. The grid and the button are excluded, or opening
+// it would immediately close it again.
+document.addEventListener('click', (event) => {
+  if (el.emojiPop.hidden) return;
+  if (el.emojiPop.contains(event.target)) return;
+  if (el.chatEmoji.contains(event.target)) return;
+  // The button that just opened it. Without this the same click that
+  // opens the picker from a message reaches this handler and closes it.
+  if (event.target.closest?.('.react-btn')) return;
+  closeEmojiPicker();
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !el.emojiPop.hidden) closeEmojiPicker();
 });
 
 el.chatAttach.addEventListener('click', () => el.chatFile.click());

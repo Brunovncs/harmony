@@ -88,6 +88,14 @@ const DEFAULTS = {
    * want to happen on the next launch.
    */
   soundpadVolume: 100,
+  /*
+   * The emoji you reached for last, newest first.
+   *
+   * Local, like every other preference here: it is about your hands, not
+   * about the server. Nobody else's picker should reorder because of what
+   * you clicked.
+   */
+  recentEmoji: [],
   // Rolling clip buffer. Off by default: it is memory the user did not ask for.
   clipsEnabled: false,
   // GPU video encoding (NVENC / AMF / Quick Sync). 'auto' leaves Chromium to

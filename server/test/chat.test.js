@@ -11,7 +11,7 @@ import { dirname, resolve } from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
-import { ftsPhrase, mediaTypeOf, MAX_UPLOAD_BYTES } from '../src/chat.js';
+import { Chat, Emojis, ftsPhrase, mediaTypeOf, MAX_UPLOAD_BYTES } from '../src/chat.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const serverEntry = resolve(here, '..', 'src', 'index.js');
@@ -351,6 +351,268 @@ describe('search', () => {
       );
       assert.equal(res.status, 200, `query ${JSON.stringify(q)} must not 500`);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reactions
+// ---------------------------------------------------------------------------
+
+describe('what may be reacted with', () => {
+  it('takes an emoji, and a :name: for a custom one', () => {
+    assert.equal(Chat.reactionKey('\u{1F44D}'), '\u{1F44D}');
+    assert.equal(Chat.reactionKey(':shrug:'), ':shrug:');
+  });
+
+  it('KEEPS THE ZERO WIDTH JOINER', () => {
+    // \p{C} is the obvious control-character test and it is wrong here: ZWJ
+    // is Cf, and it is what holds together every profession and family
+    // emoji anybody would actually use.
+    const dev = '\u{1F468}\u200D\u{1F4BB}';
+    assert.equal(Chat.reactionKey(dev), dev, 'a joined emoji must survive');
+    const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}';
+    assert.equal(Chat.reactionKey(family), family);
+  });
+
+  it('refuses a right-to-left override, which would reverse the row', () => {
+    assert.equal(Chat.reactionKey('\u202Eabc'), null);
+  });
+
+  it('refuses a paragraph pretending to be a reaction', () => {
+    assert.equal(Chat.reactionKey('x'.repeat(40)), null);
+    assert.equal(Chat.reactionKey(''), null);
+    assert.equal(Chat.reactionKey('   '), null);
+  });
+});
+
+describe('reactions', () => {
+  let messageId;
+
+  before(async () => {
+    messageId = (await api(`/api/channels/${textChannelId}/messages`, {
+      method: 'POST', body: { body: 'react to me' }, token: ownerToken,
+    })).body.message.id;
+  });
+
+  it('a new message arrives with an empty strip, not without one', async () => {
+    const posted = await api(`/api/channels/${textChannelId}/messages`, {
+      method: 'POST', body: { body: 'fresh' }, token: memberToken,
+    });
+    assert.deepEqual(posted.body.message.reactions, [],
+      'a client that has to cope with undefined here will cope with it wrongly');
+  });
+
+  it('adds one', async () => {
+    const res = await api(`/api/messages/${messageId}/react`, {
+      method: 'POST', body: { emoji: '\u{1F44D}' }, token: ownerToken,
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.reactions.map((r) => [r.emoji, r.count]), [['\u{1F44D}', 1]]);
+  });
+
+  it('SUMS UP when somebody else adds the same one', async () => {
+    const res = await api(`/api/messages/${messageId}/react`, {
+      method: 'POST', body: { emoji: '\u{1F44D}' }, token: memberToken,
+    });
+    assert.equal(res.body.reactions.length, 1, 'one entry, not two');
+    assert.equal(res.body.reactions[0].count, 2);
+    assert.equal(res.body.reactions[0].userIds.length, 2);
+  });
+
+  it('counts the same person once, however many times they click', async () => {
+    for (let i = 0; i < 3; i += 1) {
+      await api(`/api/messages/${messageId}/react`, {
+        method: 'POST', body: { emoji: '\u{1F44D}' }, token: memberToken,
+      });
+    }
+    const res = await api(`/api/channels/${textChannelId}/messages`, { token: ownerToken });
+    const message = res.body.messages.find((m) => m.id === messageId);
+    assert.equal(message.reactions[0].count, 2,
+      'the primary key is what makes the count a COUNT');
+  });
+
+  it('keeps a different emoji as its own entry, in the order it was first used',
+    async () => {
+      await api(`/api/messages/${messageId}/react`, {
+        method: 'POST', body: { emoji: '\u{1F389}' }, token: ownerToken,
+      });
+      const res = await api(`/api/channels/${textChannelId}/messages`, { token: memberToken });
+      const message = res.body.messages.find((m) => m.id === messageId);
+      assert.deepEqual(message.reactions.map((r) => r.emoji), ['\u{1F44D}', '\u{1F389}']);
+    });
+
+  it('takes it back, and only yours', async () => {
+    const res = await api(`/api/messages/${messageId}/react`, {
+      method: 'POST', body: { emoji: '\u{1F44D}', on: false }, token: memberToken,
+    });
+    assert.equal(res.body.reactions.find((r) => r.emoji === '\u{1F44D}').count, 1);
+  });
+
+  it('drops the entry entirely when the last one goes', async () => {
+    await api(`/api/messages/${messageId}/react`, {
+      method: 'POST', body: { emoji: '\u{1F389}', on: false }, token: ownerToken,
+    });
+    const res = await api(`/api/channels/${textChannelId}/messages`, { token: ownerToken });
+    const message = res.body.messages.find((m) => m.id === messageId);
+    assert.deepEqual(message.reactions.map((r) => r.emoji), ['\u{1F44D}']);
+  });
+
+  it('refuses a reaction on a channel you cannot read', async () => {
+    // Locked AFTER the message was posted, which is the only way to get a
+    // message into a password channel over plain HTTP -- the grant is
+    // issued on the realtime socket. It is also the real-world case: the
+    // one where somebody could read it yesterday.
+    const room = (await api('/api/channels', {
+      method: 'POST', body: { kind: 'text', name: 'soonlocked' }, token: ownerToken,
+    })).body.channel.id;
+    const hidden = (await api(`/api/channels/${room}/messages`, {
+      method: 'POST', body: { body: 'secret' }, token: ownerToken,
+    })).body.message.id;
+
+    const before = await api(`/api/messages/${hidden}/react`, {
+      method: 'POST', body: { emoji: '\u{1F44D}' }, token: memberToken,
+    });
+    assert.equal(before.status, 200, 'readable while the channel is open');
+
+    await api(`/api/channels/${room}`, {
+      method: 'POST', body: { password: 'letmein' }, token: ownerToken,
+    });
+    const after = await api(`/api/messages/${hidden}/react`, {
+      method: 'POST', body: { emoji: '\u{1F389}' }, token: memberToken,
+    });
+    assert.equal(after.status, 404, 'and gone the moment it is not');
+  });
+
+  it('refuses nonsense', async () => {
+    const res = await api(`/api/messages/${messageId}/react`, {
+      method: 'POST', body: { emoji: 'x'.repeat(40) }, token: ownerToken,
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'bad_emoji');
+  });
+
+  it('TAKES ITS REACTIONS WITH IT WHEN THE MESSAGE GOES', async () => {
+    const doomed = (await api(`/api/channels/${textChannelId}/messages`, {
+      method: 'POST', body: { body: 'briefly here' }, token: ownerToken,
+    })).body.message.id;
+    await api(`/api/messages/${doomed}/react`, {
+      method: 'POST', body: { emoji: '\u{1F44D}' }, token: memberToken,
+    });
+    const gone = await api(`/api/messages/${doomed}/delete`, {
+      method: 'POST', token: ownerToken,
+    });
+    assert.equal(gone.status, 200);
+
+    // The point: the cascade has to fire, or the next message to be given
+    // this id inherits somebody else's reactions.
+    const res = await api(`/api/messages/${doomed}/react`, {
+      method: 'POST', body: { emoji: '\u{1F44D}' }, token: ownerToken,
+    });
+    assert.equal(res.status, 404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Custom emoji
+// ---------------------------------------------------------------------------
+
+describe('custom emoji names', () => {
+  it('fold to something that can be a :trigger:', () => {
+    assert.equal(Emojis.normalizeName('  Big Shrug '), 'big_shrug');
+    assert.equal(Emojis.normalizeName(':party-parrot:'), 'party_parrot');
+    assert.equal(Emojis.normalizeName('OK'), 'ok');
+  });
+
+  it('refuse anything the trigger could not match', () => {
+    assert.equal(Emojis.normalizeName('a'), null, 'one character is not a name');
+    assert.equal(Emojis.normalizeName('x'.repeat(33)), null);
+    assert.equal(Emojis.normalizeName('with.dot'), null);
+    assert.equal(Emojis.normalizeName(''), null);
+  });
+});
+
+describe('custom emoji', () => {
+  let hash;
+  let emojiId;
+
+  before(async () => {
+    hash = (await api('/api/uploads', {
+      method: 'POST', raw: PNG, contentType: 'image/png', token: memberToken,
+    })).body.hash;
+  });
+
+  it('A MEMBER MAY ADD ONE', async () => {
+    // Deliberately looser than the soundpad, which is admin-only: a clip
+    // plays out loud in everyone's ears, an emoji waits in a picker.
+    const res = await api('/api/emojis', {
+      method: 'POST', body: { name: 'Shrug', hash }, token: memberToken,
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.emoji.name, 'shrug');
+    emojiId = res.body.emoji.id;
+  });
+
+  it('lists it for everybody', async () => {
+    const res = await api('/api/emojis', { token: ownerToken });
+    assert.ok(res.body.emojis.some((e) => e.name === 'shrug'));
+  });
+
+  it('refuses a name already taken', async () => {
+    const res = await api('/api/emojis', {
+      method: 'POST', body: { name: ':shrug:', hash }, token: ownerToken,
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'name_taken',
+      'one name must mean one picture, or a message reads differently for two people');
+  });
+
+  it('refuses audio dressed up as an emoji', async () => {
+    const wav = (await api('/api/uploads', {
+      method: 'POST', raw: Buffer.alloc(64, 7), contentType: 'audio/wav', token: ownerToken,
+    })).body.hash;
+    const res = await api('/api/emojis', {
+      method: 'POST', body: { name: 'noise', hash: wav }, token: ownerToken,
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'not_an_image');
+  });
+
+  it('does not let somebody else delete it', async () => {
+    const outsider = (await api('/api/accounts/register', {
+      method: 'POST', body: { nickname: 'stranger', password: 'hunter22' },
+    })).body.token;
+    const res = await api(`/api/emojis/${emojiId}/delete`, {
+      method: 'POST', token: outsider,
+    });
+    assert.equal(res.status, 403);
+  });
+
+  it('lets an admin delete it', async () => {
+    const res = await api(`/api/emojis/${emojiId}/delete`, {
+      method: 'POST', token: ownerToken,
+    });
+    assert.equal(res.status, 200);
+    assert.equal((await api('/api/emojis', { token: ownerToken })).body.emojis.length, 0);
+  });
+
+  it('LEAVES REACTIONS THAT USED IT ALONE', async () => {
+    // The reaction stores ":name:", not a foreign key, exactly so that
+    // tidying up the picker cannot silently delete other people's
+    // reactions. The count stays; the picture falls back to the text.
+    const message = (await api(`/api/channels/${textChannelId}/messages`, {
+      method: 'POST', body: { body: 'before the purge' }, token: ownerToken,
+    })).body.message.id;
+    const added = (await api('/api/emojis', {
+      method: 'POST', body: { name: 'doomed', hash }, token: ownerToken,
+    })).body.emoji;
+    await api(`/api/messages/${message}/react`, {
+      method: 'POST', body: { emoji: ':doomed:' }, token: memberToken,
+    });
+    await api(`/api/emojis/${added.id}/delete`, { method: 'POST', token: ownerToken });
+
+    const res = await api(`/api/channels/${textChannelId}/messages`, { token: ownerToken });
+    const row = res.body.messages.find((m) => m.id === message);
+    assert.deepEqual(row.reactions.map((r) => [r.emoji, r.count]), [[':doomed:', 1]]);
   });
 });
 

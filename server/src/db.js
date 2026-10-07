@@ -216,6 +216,48 @@ const MIGRATIONS = [
         ADD COLUMN group_id INTEGER REFERENCES channel_groups(id) ON DELETE SET NULL;
     `);
   },
+
+  /*
+   * v8 -- custom emoji, and reactions.
+   *
+   * PRIMARY KEY (message_id, user_id, emoji) is the whole of "they add up".
+   * A second identical reaction from the same person is a key conflict
+   * rather than a second row, so a count is a COUNT and cannot drift --
+   * there is no tally to keep in step with anything. Reacting again
+   * deletes the row, which is why the route is a toggle rather than two.
+   *
+   * ON DELETE CASCADE on both sides, unlike the groups above. A reaction
+   * has no life of its own: it is a fact about a message by a person, and
+   * once either is gone there is nothing left for it to mean.
+   *
+   * emoji is TEXT holding a unicode emoji or ":name:", NOT a foreign key
+   * into emojis. A reaction has to outlive the custom emoji behind it --
+   * an admin tidying the picker must not silently delete other people's
+   * reactions. The count stays and the picture falls back to the text.
+   *
+   * emojis.name is UNIQUE because it is the trigger: ":shrug:" has to mean
+   * exactly one picture, everywhere, or the same message reads differently
+   * for two people.
+   */
+  (db) => {
+    db.exec(`
+      CREATE TABLE emojis (
+        id          INTEGER PRIMARY KEY,
+        name        TEXT    NOT NULL UNIQUE,
+        file_hash   TEXT    NOT NULL REFERENCES uploads(hash),
+        uploaded_by INTEGER REFERENCES users(id),
+        created_at  INTEGER NOT NULL
+      );
+      CREATE TABLE message_reactions (
+        message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        user_id    INTEGER NOT NULL REFERENCES users(id)    ON DELETE CASCADE,
+        emoji      TEXT    NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (message_id, user_id, emoji)
+      );
+      CREATE INDEX message_reactions_message ON message_reactions(message_id);
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

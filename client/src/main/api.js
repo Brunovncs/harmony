@@ -297,6 +297,15 @@ module.exports = {
     requestJson(s, `/api/messages/${id}/pin`, { method: 'POST', body: { pinned } }),
   deleteMessage: (s, id) =>
     requestJson(s, `/api/messages/${id}/delete`, { method: 'POST' }),
+  // A toggle, not an add: the server decides, because clicking an emoji
+  // somebody else already chose has to add to it rather than replace it.
+  react: (s, id, emoji, on) =>
+    requestJson(s, `/api/messages/${id}/react`, { method: 'POST', body: { emoji, on } }),
+
+  emojis: (s) => requestJson(s, '/api/emojis'),
+  addEmoji: (s, body) => requestJson(s, '/api/emojis', { method: 'POST', body }),
+  deleteEmoji: (s, id) => requestJson(s, `/api/emojis/${id}/delete`, { method: 'POST' }),
+
   soundpad: (s) => requestJson(s, '/api/soundpad'),
   addClip: (s, body) => requestJson(s, '/api/soundpad', { method: 'POST', body }),
   deleteClip: (s, id) => requestJson(s, `/api/soundpad/${id}/delete`, { method: 'POST' }),

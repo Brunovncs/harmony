@@ -28,8 +28,9 @@ import {
 } from './channels.js';
 import { Realtime } from './realtime.js';
 import {
-  Chat, Soundpad, publicMessage, publicClip, allowedTypes, mediaTypeOf,
-  MAX_UPLOAD_BYTES, MAX_AVATAR_BYTES, MAX_CLIP_BYTES,
+  Chat, Soundpad, Emojis,
+  publicMessage, publicClip, publicEmoji, allowedTypes, mediaTypeOf,
+  MAX_UPLOAD_BYTES, MAX_AVATAR_BYTES, MAX_CLIP_BYTES, MAX_EMOJI_BYTES, MAX_EMOJIS,
 } from './chat.js';
 
 const app = express();
@@ -58,6 +59,7 @@ const voice = new VoiceRooms();
 const mediaSecret = channelSecret(metaStore);
 const chat = new Chat(db, { dataDir: config.dataDir, maxDiskBytes: config.maxDiskBytes });
 const soundpad = new Soundpad(db);
+const emojis = new Emojis(db);
 
 const rooms = new Rooms({ claimTtlMs: config.claimTtlMs });
 const limiter = new LoginLimiter({
@@ -745,6 +747,24 @@ function readableChannel(req, id) {
   return channel;
 }
 
+/**
+ * publicMessage over a list, with everyone's reactions attached.
+ *
+ * Here rather than inside publicMessage because the reactions are a second
+ * query: doing it per message would make a fifty-row page fifty queries.
+ * Every route that hands a client a message goes through this, so a
+ * reaction strip can never be missing from one of them and present in
+ * another -- the client would then draw it from the pushed copy and lose it
+ * on the next refresh.
+ */
+function withReactions(messages) {
+  const list = [].concat(messages).filter(Boolean);
+  const byId = chat.reactionsFor(list.map((m) => m.id));
+  return list.map((m) => publicMessage(m, byId.get(m.id) ?? []));
+}
+
+const oneWithReactions = (message) => withReactions([message])[0] ?? null;
+
 app.get('/api/channels/:id/messages', requireLogin, (req, res) => {
   const id = Number.parseInt(req.params.id, 10);
   const channel = readableChannel(req, id);
@@ -752,10 +772,10 @@ app.get('/api/channels/:id/messages', requireLogin, (req, res) => {
 
   const before = Number.parseInt(req.query.before ?? '', 10);
   return res.json({
-    messages: chat
-      .history(id, { before: Number.isFinite(before) ? before : undefined })
-      .map(publicMessage),
-    pinned: chat.pinned(id).map(publicMessage),
+    messages: withReactions(
+      chat.history(id, { before: Number.isFinite(before) ? before : undefined }),
+    ),
+    pinned: withReactions(chat.pinned(id)),
   });
 });
 
@@ -772,7 +792,7 @@ app.post('/api/channels/:id/messages', requireLogin, (req, res) => {
   });
   if (!result.ok) return res.status(400).json({ error: result.error });
 
-  const message = publicMessage(result.message);
+  const message = oneWithReactions(result.message);
   realtime?.broadcast({ type: 'message', message });
   return res.status(201).json({ message });
 });
@@ -781,7 +801,7 @@ app.post('/api/messages/:id/pin', requireLogin, (req, res) => {
   const id = Number.parseInt(req.params.id, 10);
   const result = chat.setPinned(id, req.body?.pinned !== false);
   if (!result.ok) return res.status(404).json({ error: result.error });
-  const message = publicMessage(result.message);
+  const message = oneWithReactions(result.message);
   realtime?.broadcast({ type: 'message:updated', message });
   return res.json({ message });
 });
@@ -805,13 +825,52 @@ app.post('/api/messages/:id/delete', requireLogin, (req, res) => {
   return res.json({ ok: true });
 });
 
+/**
+ * React, or take it back. One route, because it is one gesture.
+ *
+ * No permission check beyond being signed in and able to read the channel:
+ * a reaction is the cheapest thing anybody can say, and the only person it
+ * can be removed by is the one who left it.
+ */
+app.post('/api/messages/:id/react', requireLogin, (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+  const existing = chat.get(id);
+  if (!existing) return res.status(404).json({ error: 'no_such_message' });
+  if (!readableChannel(req, existing.channel_id)) {
+    return res.status(404).json({ error: 'no_such_channel' });
+  }
+
+  const result = chat.react({
+    messageId: id,
+    userId: req.user.id,
+    emoji: req.body?.emoji,
+    on: req.body?.on !== false,
+  });
+  if (!result.ok) {
+    return res.status(result.error === 'no_such_message' ? 404 : 400).json({
+      error: result.error,
+      message: result.error === 'bad_emoji'
+        ? 'React with an emoji or a :name:, not a paragraph.'
+        : 'No such message.',
+    });
+  }
+
+  realtime?.broadcast({
+    type: 'message:reactions',
+    id,
+    channelId: existing.channel_id,
+    reactions: result.reactions,
+  });
+  return res.json({ reactions: result.reactions });
+});
+
 app.get('/api/channels/:id/search', requireLogin, (req, res) => {
   const id = Number.parseInt(req.params.id, 10);
   const channel = readableChannel(req, id);
   if (!channel) return res.status(404).json({ error: 'no_such_channel' });
 
   const { mode, results } = chat.search(id, req.query.q);
-  return res.json({ mode, results: results.map(publicMessage) });
+  return res.json({ mode, results: withReactions(results) });
 });
 
 /**
@@ -879,6 +938,59 @@ app.get('/api/uploads/:hash', requireLogin, (req, res) => {
   // Content-addressed, so it can never change: cache it forever.
   res.set('Cache-Control', 'public, max-age=31536000, immutable');
   return res.sendFile(info.path);
+});
+
+// ---------------------------------------------------------------------------
+// Custom emoji
+//
+// Any member may add one; the uploader or an admin may remove it. See the
+// Emojis class for why this is looser than the soundpad.
+// ---------------------------------------------------------------------------
+
+app.get('/api/emojis', requireLogin, (_req, res) => {
+  res.json({ emojis: emojis.list().map(publicEmoji) });
+});
+
+app.post('/api/emojis', requireLogin, (req, res) => {
+  const result = emojis.add({
+    name: req.body?.name,
+    fileHash: req.body?.hash,
+    userId: req.user.id,
+  });
+  if (!result.ok) {
+    const messages = {
+      invalid_name: 'Names are 2-32 characters of a-z, 0-9 and _ -- it becomes the :trigger:.',
+      name_taken: 'Something else is already called that.',
+      too_many_emojis: `This server is at its limit of ${MAX_EMOJIS} custom emoji.`,
+      no_such_upload: 'Upload the picture first.',
+      not_an_image: 'A custom emoji has to be an image.',
+      emoji_too_large:
+        `Custom emoji are limited to ${Math.round(MAX_EMOJI_BYTES / 1024)} KB -- `
+        + 'every client downloads every one of them.',
+    };
+    return res.status(400).json({ error: result.error, message: messages[result.error] });
+  }
+  const list = emojis.list().map(publicEmoji);
+  realtime?.broadcast({ type: 'emojis', emojis: list });
+  return res.status(201).json({ emoji: publicEmoji(result.emoji) });
+});
+
+app.post('/api/emojis/:id/delete', requireLogin, (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+
+  // Checked before removing, for the same reason deleting a message is.
+  const existing = emojis.get(id);
+  if (!existing) return res.status(404).json({ error: 'no_such_emoji' });
+
+  const isOwn = existing.uploaded_by === req.user.id;
+  if (!isOwn && req.user.role !== 'owner' && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'forbidden', message: 'Not yours to remove.' });
+  }
+
+  const result = emojis.remove(id);
+  if (!result.ok) return res.status(404).json({ error: result.error });
+  realtime?.broadcast({ type: 'emojis', emojis: emojis.list().map(publicEmoji) });
+  return res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------
