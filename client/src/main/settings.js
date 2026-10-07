@@ -76,6 +76,9 @@ const DEFAULTS = {
    * them on a snapshot of how it looked the day they picked it.
    */
   theme: 'midnight',
+  // The member column on the right. On by default: it is the answer to
+  // "is anybody around", which is the question people open the app with.
+  showMembers: true,
   /*
    * How loudly soundpad clips play, as a percentage.
    *

@@ -226,6 +226,9 @@
             left two buttons for one action. The panel is where everything
             the call can do lives.
           -->
+          <button class="ghost small" id="channels-members" title="Show or hide the member list">
+            Members
+          </button>
           <button class="ghost small" id="channels-watch">Watch everyone</button>
           <button class="ghost small" id="channels-signout">Sign out</button>
         </div>
@@ -396,6 +399,23 @@
             <p class="muted" id="chat-note"></p>
           </div>
         </section>
+
+        <!--
+          Everybody with an account, online first.
+
+          A fourth column rather than something inside the stage, because
+          it answers a different question: the stage is what you are
+          looking at, this is who else is here. Online is derived from an
+          open socket -- never stored -- which is the same rule voice
+          presence follows.
+        -->
+        <aside class="member-list" id="member-list" hidden>
+          <div class="member-list-head">
+            <h2>Members</h2>
+            <span class="muted" id="member-count"></span>
+          </div>
+          <ul id="member-items"></ul>
+        </aside>
       </div>
     </section>
 

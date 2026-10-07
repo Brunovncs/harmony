@@ -120,6 +120,32 @@ export class Realtime {
     for (const { channelId } of this.#deps.voice.leaveAll(client.user.id)) {
       this.#broadcastRoster(channelId);
     }
+    // After leaveAll, so a client redrawing on this gets a roster that has
+    // already lost them rather than one that still has them in a channel.
+    this.broadcastPresence();
+  }
+
+  /**
+   * Who has a socket open, by user id.
+   *
+   * Derived, never stored -- the same rule as voice presence, and for the
+   * same reason: a restart rebuilds the whole picture from whoever
+   * reconnects instead of leaving a stale table to be reconciled with
+   * reality, which is the bug every "who is online" table eventually has.
+   *
+   * A Set, so two windows count once.
+   */
+  onlineUserIds() {
+    const out = new Set();
+    for (const client of this.#clients.values()) {
+      if (client.user) out.add(client.user.id);
+    }
+    return [...out];
+  }
+
+  /** Tell everybody who is on. Sent whenever that set changes. */
+  broadcastPresence() {
+    this.broadcast({ type: 'presence', online: this.onlineUserIds() });
   }
 
   /** True if this user has another socket open (a second window, say). */
@@ -171,6 +197,10 @@ export class Realtime {
         return ws.close(4401, 'bad token');
       }
       client.user = user;
+      // Before the reply, so the arriving client's own hello already
+      // contains them -- otherwise the one person guaranteed to be online
+      // is missing from the list until somebody else connects.
+      this.broadcastPresence();
       return this.#send(ws, {
         type: 'hello-ok',
         rid: msg.rid,
@@ -182,6 +212,7 @@ export class Realtime {
         // connected shows empty voice channels until somebody happens to
         // join or leave one.
         rosters: this.#deps.voice.allRosters(),
+        online: this.onlineUserIds(),
         voiceCap: VOICE_HARD_CAP,
       });
     }

@@ -108,7 +108,11 @@ const el = {
   avatarButton: $('avatar-button'),
   avatarFile: $('avatar-file'),
   channelsRole: $('channels-role'),
+  channelsMembers: $('channels-members'),
   channelsWatch: $('channels-watch'),
+  memberList: $('member-list'),
+  memberItems: $('member-items'),
+  memberCount: $('member-count'),
   channelsSignout: $('channels-signout'),
   channelAdd: $('channel-add'),
   channelItems: $('channel-items'),
@@ -337,6 +341,15 @@ const state = {
      * are not in, which is the entire point of a sidebar.
      */
     rosters: {},
+    /**
+     * Who has a socket open, by user id.
+     *
+     * Derived on the server from open sockets and pushed -- never stored
+     * there and never inferred here. A client that guessed at this from
+     * voice rosters would call somebody offline the moment they left a
+     * channel, which is the opposite of true.
+     */
+    online: new Set(),
     joining: false,
   },
 
@@ -1197,6 +1210,9 @@ async function enterChannels() {
   // to be told separately where to download from.
   await harmony.media.setServer(state.server);
   showChannelsError('');
+  // Restored here rather than at boot: the column only exists in the
+  // lobby, and applyMemberList draws it.
+  applyMemberList(state.settings?.showMembers !== false);
   renderOwnAvatar();
   await refreshUsers();
   loadSoundpad();
@@ -1213,9 +1229,12 @@ async function enterChannels() {
     showChannelsError(`Live updates unavailable: ${err.message}`);
     // Fall back to the REST list so the lobby is still usable read-only.
     try {
-      const { channels, groups, occupancy, rosters } = await harmony.api.channels(state.server);
+      const {
+        channels, groups, occupancy, rosters, online,
+      } = await harmony.api.channels(state.server);
       state.channels.list = channels;
       state.channels.groups = groups ?? [];
+      state.channels.online = new Set(online ?? []);
       state.channels.occupancy = occupancy ?? {};
       state.channels.rosters = rosters ?? {};
     } catch { /* nothing more to try */ }
@@ -1575,6 +1594,68 @@ function groupNode(group) {
   }
 
   return li;
+}
+
+/**
+ * Everybody with an account, online first.
+ *
+ * Drawn from state.users -- the accounts list, which already arrives for
+ * the avatars and display names -- crossed with the online set the server
+ * pushes. Nothing new is fetched, and nothing is inferred from voice
+ * presence: somebody who leaves a voice channel is still here.
+ */
+function renderMembers() {
+  if (el.memberList.hidden) return;
+
+  const everybody = [...state.users.values()];
+  const online = everybody
+    .filter((u) => state.channels.online.has(u.id))
+    .sort((a, b) => displayOf(a.id, a.nickname).localeCompare(displayOf(b.id, b.nickname)));
+  const offline = everybody
+    .filter((u) => !state.channels.online.has(u.id))
+    .sort((a, b) => displayOf(a.id, a.nickname).localeCompare(displayOf(b.id, b.nickname)));
+
+  el.memberCount.textContent = `${online.length} of ${everybody.length}`;
+
+  const row = (user, off) => {
+    const li = document.createElement('li');
+    li.className = 'member-row';
+    li.dataset.userId = String(user.id);
+    if (off) li.setAttribute('data-off', '');
+
+    li.append(avatarEl(user, 'tiny'));
+
+    const name = document.createElement('span');
+    name.className = 'member-name';
+    name.textContent = displayOf(user.id, user.nickname);
+    li.append(name);
+
+    if (user.role === 'owner' || user.role === 'admin') {
+      const tag = document.createElement('span');
+      tag.className = 'role-tag';
+      tag.textContent = user.role;
+      li.append(tag);
+    }
+    return li;
+  };
+
+  const head = (text) => {
+    const li = document.createElement('li');
+    li.className = 'member-head';
+    li.textContent = text;
+    return li;
+  };
+
+  const nodes = [];
+  // The headings are drawn even for an empty half, so the list does not
+  // silently become "just the people who are here" on a quiet server.
+  nodes.push(head(`Online \u2014 ${online.length}`));
+  nodes.push(...online.map((u) => row(u, false)));
+  if (offline.length) {
+    nodes.push(head(`Offline \u2014 ${offline.length}`));
+    nodes.push(...offline.map((u) => row(u, true)));
+  }
+  el.memberItems.replaceChildren(...nodes);
 }
 
 function renderChannels() {
@@ -3789,6 +3870,11 @@ async function stopCamera() {
  */
 function onRealtimeEvent(msg) {
   switch (msg.type) {
+    case 'presence':
+      state.channels.online = new Set(msg.online ?? []);
+      renderMembers();
+      break;
+
     case 'channels':
       state.channels.list = msg.channels;
       // Always together. A client holding one and not the other would draw
@@ -3873,6 +3959,7 @@ function onRealtimeEvent(msg) {
       // all again.
       renderVoiceRoster(state.channels.roster);
       renderChannels();
+      renderMembers();
       renderChat();
       break;
 
@@ -3922,6 +4009,7 @@ function onRealtimeEvent(msg) {
       // hello is the one message that brings the whole picture back.
       if (msg.channels) state.channels.list = msg.channels;
       if (msg.groups) state.channels.groups = msg.groups;
+      if (msg.online) state.channels.online = new Set(msg.online);
       if (msg.rosters) state.channels.rosters = msg.rosters;
       if (msg.occupancy) state.channels.occupancy = msg.occupancy;
       renderChannels();
@@ -5725,6 +5813,27 @@ el.continue.addEventListener('click', startSession);
 // --- channels and voice ---------------------------------------------------
 
 harmony.realtime.onEvent(onRealtimeEvent);
+
+/*
+ * Show or hide the member column.
+ *
+ * The attribute lives on the layout rather than only on the panel,
+ * because an empty grid track still reserves its width -- the same reason
+ * the stage column collapses when there is nothing on it.
+ */
+function applyMemberList(show) {
+  el.memberList.hidden = !show;
+  el.channelsLayout.toggleAttribute('data-members', show);
+  el.channelsMembers.toggleAttribute('data-on', show);
+  if (show) renderMembers();
+}
+
+el.channelsMembers.addEventListener('click', async () => {
+  const show = el.memberList.hidden;
+  applyMemberList(show);
+  await harmony.settings.set({ showMembers: show });
+  state.settings = await harmony.settings.get();
+});
 
 el.channelsWatch.addEventListener('click', () => enterMosaic());
 

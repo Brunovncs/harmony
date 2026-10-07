@@ -724,7 +724,8 @@ async function run() {
       'channel-video', 'voice-screen', 'voice-cam', 'voice-camera',
       'channel-stage', 'peer-menu', 'voice-panel', 'voice-soundboard',
       'soundpad-volume', 'soundpad-mute', 'voice-config', 'devices',
-      'voice-signal', 'self-status',
+      'voice-signal', 'self-status', 'member-list', 'member-items',
+      'channels-members', 'theme-grid',
     ];
     const missing = ids.filter((id) => !document.getElementById(id));
     // An id that appears twice is worse than one that is missing:

@@ -612,6 +612,9 @@ app.get('/api/channels', requireLogin, (req, res) => {
     })),
     groups: channels.groups().map(publicGroup),
     occupancy: voice.occupancy(),
+    // Derived from open sockets, never stored. Empty when the realtime
+    // layer is not up, which is honest: with no sockets nobody is online.
+    online: realtime?.onlineUserIds() ?? [],
     // Same payload the WebSocket hello carries, so the read-only fallback
     // path the client uses when the socket is down shows the same sidebar.
     rosters: voice.allRosters(),
