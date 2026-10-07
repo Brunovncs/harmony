@@ -13,7 +13,7 @@
 
 import { WebSocketServer } from 'ws';
 
-import { publicChannel, VOICE_HARD_CAP } from './channels.js';
+import { publicChannel, publicGroup, VOICE_HARD_CAP } from './channels.js';
 import { publicUser } from './accounts.js';
 
 /** A socket that has not answered a ping in this long is assumed dead. */
@@ -176,6 +176,7 @@ export class Realtime {
         rid: msg.rid,
         user: publicUser(user),
         channels: this.#deps.channels.list().map(publicChannel),
+        groups: this.#deps.channels.groups().map(publicGroup),
         occupancy: this.#deps.voice.occupancy(),
         // Who is in each channel right now. Without this a client that just
         // connected shows empty voice channels until somebody happens to
@@ -396,6 +397,7 @@ export class Realtime {
     this.broadcast({
       type: 'channels',
       channels: this.#deps.channels.list().map(publicChannel),
+      groups: this.#deps.channels.groups().map(publicGroup),
     });
   }
 

@@ -22,6 +22,7 @@ import {
   mintChannelToken,
   parseChannelPath,
   publicChannel,
+  publicGroup,
   readChannelToken,
   MEDIA_KINDS,
 } from './channels.js';
@@ -609,6 +610,7 @@ app.get('/api/channels', requireLogin, (req, res) => {
       // padlock on a channel this person already unlocked.
       unlocked: !c.password_hash || channels.hasGrant(c.id, req.user.id),
     })),
+    groups: channels.groups().map(publicGroup),
     occupancy: voice.occupancy(),
     // Same payload the WebSocket hello carries, so the read-only fallback
     // path the client uses when the socket is down shows the same sidebar.
@@ -638,6 +640,64 @@ app.post('/api/channels', requireAdmin, async (req, res) => {
 // /api/channels/reorder is matched by /:id with id="reorder", parsed as NaN,
 // and answered "no such channel" -- a 400 that looks like a validation bug and
 // is really a routing one.
+app.post('/api/channels/groups', requireAdmin, (req, res) => {
+  const result = channels.createGroup(req.body?.name);
+  if (!result.ok) {
+    return res.status(400).json({ error: result.error, message: 'Give the group a name.' });
+  }
+  realtime?.broadcastChannels();
+  return res.status(201).json({ group: publicGroup(result.group) });
+});
+
+app.post('/api/channels/groups/:id', requireAdmin, (req, res) => {
+  const result = channels.renameGroup(Number.parseInt(req.params.id, 10), req.body?.name);
+  if (!result.ok) {
+    const messages = {
+      no_such_group: 'No such group.',
+      invalid_name: 'Give the group a name.',
+    };
+    return res.status(400).json({ error: result.error, message: messages[result.error] });
+  }
+  realtime?.broadcastChannels();
+  return res.json({ group: publicGroup(result.group) });
+});
+
+/**
+ * Delete a group. Its channels survive, ungrouped.
+ *
+ * The schema's ON DELETE SET NULL does that, and it is deliberate: a group
+ * is a folder for the sidebar, not something that owns what is inside it.
+ * Deleting it must not take a year of chat with it.
+ */
+app.post('/api/channels/groups/:id/delete', requireAdmin, (req, res) => {
+  const result = channels.removeGroup(Number.parseInt(req.params.id, 10));
+  if (!result.ok) {
+    return res.status(400).json({ error: result.error, message: 'No such group.' });
+  }
+  realtime?.broadcastChannels();
+  return res.json({ ok: true });
+});
+
+/** The whole sidebar after a drag: see Channels.arrange. */
+app.post('/api/channels/arrange', requireAdmin, (req, res) => {
+  const result = channels.arrange({
+    groups: req.body?.groups,
+    channels: req.body?.channels,
+  });
+  if (!result.ok) {
+    const messages = {
+      no_such_channel: 'That channel is gone -- refresh and try again.',
+      no_such_group: 'That group is gone -- refresh and try again.',
+    };
+    return res.status(400).json({ error: result.error, message: messages[result.error] });
+  }
+  realtime?.broadcastChannels();
+  return res.json({
+    channels: result.channels.map(publicChannel),
+    groups: result.groups.map(publicGroup),
+  });
+});
+
 app.post('/api/channels/reorder', requireAdmin, (req, res) => {
   const result = channels.reorder(Array.isArray(req.body?.ids) ? req.body.ids : []);
   if (!result.ok) {

@@ -310,6 +310,20 @@ const state = {
    */
   channels: {
     list: [],
+    /**
+     * Folders for the sidebar.
+     *
+     * A group OWNS nothing: deleting one leaves its channels where they
+     * were, ungrouped, which is the ON DELETE SET NULL in schema v7. It is
+     * a heading with a fold, not a container.
+     */
+    groups: [],
+    /**
+     * Which groups are rolled up, by id. Local and unsaved to the server:
+     * a folder you closed is a fact about your sidebar, not about
+     * everybody's.
+     */
+    collapsed: new Set(),
     occupancy: {},
     /** The roster of the channel WE are in. */
     roster: [],
@@ -1199,8 +1213,9 @@ async function enterChannels() {
     showChannelsError(`Live updates unavailable: ${err.message}`);
     // Fall back to the REST list so the lobby is still usable read-only.
     try {
-      const { channels, occupancy, rosters } = await harmony.api.channels(state.server);
+      const { channels, groups, occupancy, rosters } = await harmony.api.channels(state.server);
       state.channels.list = channels;
+      state.channels.groups = groups ?? [];
       state.channels.occupancy = occupancy ?? {};
       state.channels.rosters = rosters ?? {};
     } catch { /* nothing more to try */ }
@@ -1215,20 +1230,6 @@ async function enterChannels() {
  * admins reordering at once cannot interleave into an order neither of them
  * chose. That makes this the client's job: work out the list we want, send it.
  */
-async function nudgeChannel(id, delta) {
-  const ids = state.channels.list.map((c) => c.id);
-  const from = ids.indexOf(id);
-  const to = from + delta;
-  if (from < 0 || to < 0 || to >= ids.length) return;
-  ids.splice(to, 0, ...ids.splice(from, 1));
-  try {
-    await harmony.api.reorderChannels(state.server, ids);
-    // The server broadcasts the new list; nothing is applied locally.
-  } catch (err) {
-    showChannelsError(err.message);
-  }
-}
-
 async function editChannel(channel) {
   const answer = await ask({
     title: `Edit #${channel.name}`,
@@ -1263,114 +1264,336 @@ function rowButton(label, title, onClick) {
   return button;
 }
 
-function renderChannels() {
-  const items = state.channels.list.map((channel, index) => {
-    const li = document.createElement('li');
-    // Named, because the member list under a channel is an <li> too and
-    // "every li in the sidebar" stopped meaning "every channel".
-    li.className = 'channel-row';
-    li.dataset.id = String(channel.id);
-    if (channel.id === state.voice.channelId) li.setAttribute('data-active', '');
+/*
+ * The sidebar.
+ *
+ * Ungrouped channels first, then each group with its own under it. That
+ * order is also the order the whole arrangement is SUBMITTED in, which is
+ * what makes positions and groups agree: Channels.arrange writes
+ * position = index in the submitted list, so as long as a group's channels
+ * are contiguous here they stay contiguous there.
+ *
+ * Nothing is applied locally after a drag. The server broadcasts the new
+ * list and the sidebar is redrawn from it, so what you see is always what
+ * was actually written -- and a rejected drag snaps back rather than
+ * leaving the sidebar showing an arrangement the server never accepted.
+ */
 
-    const kind = document.createElement('span');
-    kind.className = 'kind';
-    kind.textContent = channel.kind === 'voice' ? '\u{1F50A}' : '#';
+/** Channels in the order they are drawn: ungrouped, then group by group. */
+function orderedChannels() {
+  const byGroup = new Map([[null, []]]);
+  for (const group of state.channels.groups) byGroup.set(group.id, []);
+  for (const channel of state.channels.list) {
+    const key = channel.groupId ?? null;
+    // A channel in a group this client has not heard of yet reads as
+    // ungrouped rather than disappearing.
+    (byGroup.get(key) ?? byGroup.get(null)).push(channel);
+  }
+  return [
+    ...byGroup.get(null),
+    ...state.channels.groups.flatMap((group) => byGroup.get(group.id) ?? []),
+  ];
+}
 
-    const name = document.createElement('span');
-    name.textContent = channel.name;
+/** Send the whole tree. See Channels.arrange for why it is not a move. */
+async function applyArrangement(ordered) {
+  try {
+    await harmony.api.arrange(state.server, {
+      groups: state.channels.groups.map((g) => g.id),
+      channels: ordered.map((c) => ({ id: c.id, groupId: c.groupId ?? null })),
+    });
+  } catch (err) {
+    showChannelsError(err.message);
+    // Redraw from what we last heard, so a refused drag does not leave the
+    // sidebar showing an arrangement the server never accepted.
+    renderChannels();
+  }
+}
 
-    li.append(kind, name);
+/**
+ * Move a channel, by rebuilding the order rather than computing indices.
+ *
+ * @param {number} id        the channel being dragged
+ * @param {object} to        {beforeId} to land above a channel, or
+ *                           {groupId} to land at the end of a group
+ */
+function moveChannel(id, to) {
+  const ordered = orderedChannels();
+  const moving = ordered.find((c) => c.id === id);
+  if (!moving) return;
 
-    if (channel.locked) {
-      const lock = document.createElement('span');
-      lock.className = 'tag';
-      lock.textContent = channel.unlocked ? 'unlocked' : 'locked';
-      li.append(lock);
+  const rest = ordered.filter((c) => c.id !== id);
+  let index = rest.length;
+  if (to.beforeId != null) {
+    const anchor = rest.find((c) => c.id === to.beforeId);
+    if (!anchor) return;
+    moving.groupId = anchor.groupId ?? null;
+    index = rest.indexOf(anchor);
+  } else {
+    moving.groupId = to.groupId ?? null;
+    // The end of that group, which is the last channel belonging to it --
+    // or, for an empty group, wherever the group's block begins.
+    const last = rest.map((c, i) => [c, i])
+      .filter(([c]) => (c.groupId ?? null) === moving.groupId)
+      .pop();
+    if (last) index = last[1] + 1;
+    else if (moving.groupId === null) index = 0;
+    else {
+      // An empty group: everything before it in group order, plus the
+      // ungrouped block, comes first.
+      const before = new Set([null]);
+      for (const g of state.channels.groups) {
+        if (g.id === moving.groupId) break;
+        before.add(g.id);
+      }
+      index = rest.filter((c) => before.has(c.groupId ?? null)).length;
     }
+  }
 
-    const occupants = state.channels.occupancy[channel.id] ?? 0;
-    if (channel.kind === 'voice' && occupants) {
-      const count = document.createElement('span');
-      count.className = 'count';
-      count.textContent = String(occupants);
-      li.append(count);
-    }
+  rest.splice(index, 0, moving);
+  applyArrangement(rest);
+}
 
-    if (isAdmin()) {
-      const tools = document.createElement('span');
-      tools.className = 'row-tools';
-      const up = rowButton('\u25B2', 'Move up', () => nudgeChannel(channel.id, -1));
-      const down = rowButton('\u25BC', 'Move down', () => nudgeChannel(channel.id, 1));
-      up.disabled = index === 0;
-      down.disabled = index === state.channels.list.length - 1;
-      tools.append(
-        up,
-        down,
-        rowButton('\u270E', 'Rename or set a password', () => editChannel(channel)),
-        rowButton('\u2715', 'Delete this channel', async () => {
-          if (!await askConfirm(`Delete #${channel.name}?`, {
-            text: 'Everything written in it goes too. This cannot be undone.',
-          })) return;
-          try {
-            await harmony.api.deleteChannel(state.server, channel.id);
-          } catch (err) {
-            showChannelsError(err.message);
-          }
-        }),
-      );
-      li.append(tools);
-    }
+/** The row for one channel, plus its member list where it has one. */
+function channelNodes(channel) {
+  const li = document.createElement('li');
+  // Named, because the member list under a channel is an <li> too and
+  // "every li in the sidebar" stopped meaning "every channel".
+  li.className = 'channel-row';
+  li.dataset.id = String(channel.id);
+  if (channel.id === state.voice.channelId) li.setAttribute('data-active', '');
 
-    li.addEventListener('click', () => onChannelClick(channel));
+  const kind = document.createElement('span');
+  kind.className = 'kind';
+  kind.dataset.kind = channel.kind;
+  kind.textContent = channel.kind === 'voice' ? '\u{1F50A}' : '#';
 
-    // Who is in this voice channel, under it, the way a sidebar shows it.
-    //
-    // Returned as a SECOND top-level node rather than nested inside the row:
-    // the row has a click handler that joins the channel, and a nested list
-    // would make every click on a member's name join it too.
-    const members = state.channels.rosters[channel.id] ?? [];
-    if (channel.kind !== 'voice' || members.length === 0) return [li];
+  const name = document.createElement('span');
+  name.className = 'channel-name';
+  name.textContent = channel.name;
 
-    const list = document.createElement('li');
-    list.className = 'channel-members';
-    list.dataset.for = String(channel.id);
-    list.append(...members.map((member) => {
-      const row = document.createElement('span');
-      row.className = 'channel-member';
-      row.append(avatarEl(faceOf(member.userId, member.nickname), 'tiny'));
+  li.append(kind, name);
 
-      const name = document.createElement('span');
-      name.className = 'member-name';
-      name.textContent = displayOf(member.userId, member.nickname);
-      row.append(name);
+  if (channel.locked) {
+    const lock = document.createElement('span');
+    lock.className = 'tag';
+    lock.textContent = channel.unlocked ? 'unlocked' : 'locked';
+    li.append(lock);
+  }
 
-      // Exactly the indicators the voice pane shows, from the same helper --
-      // the two lists are looked at side by side, and nothing is more
-      // confusing than the same person reading differently in each.
-      if (member.forceMuted) row.setAttribute('data-forced', '');
-      else if (member.muted) row.setAttribute('data-muted', '');
+  const occupants = state.channels.occupancy[channel.id] ?? 0;
+  if (channel.kind === 'voice' && occupants) {
+    const count = document.createElement('span');
+    count.className = 'count';
+    count.textContent = String(occupants);
+    li.append(count);
+  }
 
-      const status = document.createElement('span');
-      status.className = 'status';
-      renderStatus(status, member);
-      row.append(status);
+  if (isAdmin()) {
+    const tools = document.createElement('span');
+    tools.className = 'row-tools';
+    tools.append(
+      rowButton('\u270E', 'Rename or set a password', () => editChannel(channel)),
+      rowButton('\u2715', 'Delete this channel', async () => {
+        if (!await askConfirm(`Delete #${channel.name}?`, {
+          text: 'Everything written in it goes too. This cannot be undone.',
+        })) return;
+        try {
+          await harmony.api.deleteChannel(state.server, channel.id);
+        } catch (err) {
+          showChannelsError(err.message);
+        }
+      }),
+    );
+    li.append(tools);
 
-      // The same menu as the roster. Right-clicking somebody in the sidebar
-      // is the natural thing to try, and an admin muting someone in a
-      // channel they are not in is the main reason to want it.
-      row.title = 'Right-click for volume and controls';
-      row.addEventListener('contextmenu', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        openPeerMenu(channel.id, member.mid, event);
-      });
-      return row;
-    }));
+    // The up/down arrows are gone: dragging replaced them, and keeping
+    // both would mean two code paths writing the same positions.
+    li.draggable = true;
+    li.addEventListener('dragstart', (event) => {
+      dragging = { kind: 'channel', id: channel.id };
+      event.dataTransfer.effectAllowed = 'move';
+      // Firefox will not start a drag without data on the transfer, and
+      // Chromium is happy to be given some anyway.
+      event.dataTransfer.setData('text/plain', String(channel.id));
+      li.setAttribute('data-dragging', '');
+    });
+    li.addEventListener('dragend', () => {
+      dragging = null;
+      li.removeAttribute('data-dragging');
+      clearDropMarks();
+    });
+    li.addEventListener('dragover', (event) => {
+      if (dragging?.kind !== 'channel' || dragging.id === channel.id) return;
+      event.preventDefault();
+      clearDropMarks();
+      li.setAttribute('data-drop-before', '');
+    });
+    li.addEventListener('drop', (event) => {
+      if (dragging?.kind !== 'channel' || dragging.id === channel.id) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const id = dragging.id;
+      dragging = null;
+      clearDropMarks();
+      moveChannel(id, { beforeId: channel.id });
+    });
+  }
 
-    return [li, list];
+  li.addEventListener('click', () => onChannelClick(channel));
+
+  // Who is in this voice channel, under it, the way a sidebar shows it.
+  //
+  // Returned as a SECOND top-level node rather than nested inside the row:
+  // the row has a click handler that joins the channel, and a nested list
+  // would make every click on a member's name join it too.
+  const members = state.channels.rosters[channel.id] ?? [];
+  if (channel.kind !== 'voice' || members.length === 0) return [li];
+
+  const list = document.createElement('li');
+  list.className = 'channel-members';
+  list.dataset.for = String(channel.id);
+  list.append(...members.map((member) => {
+    const row = document.createElement('span');
+    row.className = 'channel-member';
+    row.append(avatarEl(faceOf(member.userId, member.nickname), 'tiny'));
+
+    const who = document.createElement('span');
+    who.className = 'member-name';
+    who.textContent = displayOf(member.userId, member.nickname);
+    row.append(who);
+
+    // Exactly the indicators the voice pane shows, from the same helper --
+    // the two lists are looked at side by side, and nothing is more
+    // confusing than the same person reading differently in each.
+    if (member.forceMuted) row.setAttribute('data-forced', '');
+    else if (member.muted) row.setAttribute('data-muted', '');
+
+    const status = document.createElement('span');
+    status.className = 'status';
+    renderStatus(status, member);
+    row.append(status);
+
+    // The same menu as the roster. Right-clicking somebody in the sidebar
+    // is the natural thing to try, and an admin muting someone in a
+    // channel they are not in is the main reason to want it.
+    row.title = 'Right-click for volume and controls';
+    row.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openPeerMenu(channel.id, member.mid, event);
+    });
+    return row;
+  }));
+
+  return [li, list];
+}
+
+/** What is being dragged right now, or null. */
+let dragging = null;
+
+function clearDropMarks() {
+  for (const node of el.channelItems.querySelectorAll('[data-drop-before], [data-drop-into]')) {
+    node.removeAttribute('data-drop-before');
+    node.removeAttribute('data-drop-into');
+  }
+}
+
+/** A group heading: a fold, a name, and somewhere to drop things. */
+function groupNode(group) {
+  const li = document.createElement('li');
+  li.className = 'channel-group';
+  li.dataset.groupId = String(group.id);
+  const collapsed = state.channels.collapsed.has(group.id);
+  li.toggleAttribute('data-collapsed', collapsed);
+
+  const fold = document.createElement('span');
+  fold.className = 'group-fold';
+  fold.textContent = collapsed ? '\u25B8' : '\u25BE';
+
+  const name = document.createElement('span');
+  name.className = 'group-name';
+  name.textContent = group.name;
+
+  li.append(fold, name);
+
+  li.addEventListener('click', () => {
+    if (collapsed) state.channels.collapsed.delete(group.id);
+    else state.channels.collapsed.add(group.id);
+    renderChannels();
   });
 
-  el.channelItems.replaceChildren(...items.flat());
+  if (isAdmin()) {
+    const tools = document.createElement('span');
+    tools.className = 'row-tools';
+    tools.append(
+      rowButton('\u270E', 'Rename this group', async () => {
+        const answer = await ask({
+          title: `Rename "${group.name}"`,
+          okLabel: 'Save',
+          fields: [{ name: 'name', label: 'Name', value: group.name, required: true }],
+        });
+        if (!answer?.name) return;
+        try {
+          await harmony.api.renameGroup(state.server, group.id, answer.name);
+        } catch (err) {
+          showChannelsError(err.message);
+        }
+      }),
+      rowButton('\u2715', 'Delete this group', async () => {
+        if (!await askConfirm(`Delete the group "${group.name}"?`, {
+          // Worth saying plainly: every other delete in this app takes its
+          // contents with it, and this one deliberately does not.
+          text: 'The channels in it stay, and move back to the top of the list.',
+        })) return;
+        try {
+          await harmony.api.deleteGroup(state.server, group.id);
+        } catch (err) {
+          showChannelsError(err.message);
+        }
+      }),
+    );
+    li.append(tools);
+
+    // Dropping ON a heading means "into this group, at the end", which is
+    // the only way to reach an empty one or to add to a collapsed one.
+    li.addEventListener('dragover', (event) => {
+      if (dragging?.kind !== 'channel') return;
+      event.preventDefault();
+      clearDropMarks();
+      li.setAttribute('data-drop-into', '');
+    });
+    li.addEventListener('drop', (event) => {
+      if (dragging?.kind !== 'channel') return;
+      event.preventDefault();
+      event.stopPropagation();
+      const id = dragging.id;
+      dragging = null;
+      clearDropMarks();
+      moveChannel(id, { groupId: group.id });
+    });
+  }
+
+  return li;
+}
+
+function renderChannels() {
+  const byGroup = new Map([[null, []]]);
+  for (const group of state.channels.groups) byGroup.set(group.id, []);
+  for (const channel of state.channels.list) {
+    const key = channel.groupId ?? null;
+    (byGroup.get(key) ?? byGroup.get(null)).push(channel);
+  }
+
+  const nodes = [];
+  for (const channel of byGroup.get(null)) nodes.push(...channelNodes(channel));
+  for (const group of state.channels.groups) {
+    nodes.push(groupNode(group));
+    if (state.channels.collapsed.has(group.id)) continue;
+    for (const channel of byGroup.get(group.id) ?? []) nodes.push(...channelNodes(channel));
+  }
+
+  el.channelItems.replaceChildren(...nodes);
 }
 
 async function onChannelClick(channel) {
@@ -3568,6 +3791,10 @@ function onRealtimeEvent(msg) {
   switch (msg.type) {
     case 'channels':
       state.channels.list = msg.channels;
+      // Always together. A client holding one and not the other would draw
+      // channels into folders it has not heard of, or empty folders whose
+      // channels it has not been told about.
+      if (msg.groups) state.channels.groups = msg.groups;
       renderChannels();
       break;
 
@@ -3694,6 +3921,7 @@ function onRealtimeEvent(msg) {
       // that was away has missed every roster broadcast in between, and the
       // hello is the one message that brings the whole picture back.
       if (msg.channels) state.channels.list = msg.channels;
+      if (msg.groups) state.channels.groups = msg.groups;
       if (msg.rosters) state.channels.rosters = msg.rosters;
       if (msg.occupancy) state.channels.occupancy = msg.occupancy;
       renderChannels();
@@ -5798,6 +6026,27 @@ el.chatSearchClear.addEventListener('click', () => {
   runSearch();
 });
 
+/*
+ * The list itself is the "no group" drop target.
+ *
+ * Without it there is no way to take a channel back OUT of a group: every
+ * other target is a channel or a heading, and both of those are inside one
+ * once the sidebar has any. Dropping on the empty space below everything
+ * puts it back at the end of the ungrouped block.
+ */
+el.channelItems.addEventListener('dragover', (event) => {
+  if (dragging?.kind !== 'channel') return;
+  event.preventDefault();
+});
+el.channelItems.addEventListener('drop', (event) => {
+  if (dragging?.kind !== 'channel') return;
+  event.preventDefault();
+  const id = dragging.id;
+  dragging = null;
+  clearDropMarks();
+  moveChannel(id, { groupId: null });
+});
+
 el.channelAdd.addEventListener('click', async () => {
   // One dialog with three fields, rather than three questions in a row and
   // a confirm box asking somebody to remember that "OK means voice".
@@ -5809,7 +6058,15 @@ el.channelAdd.addEventListener('click', async () => {
       {
         name: 'kind',
         label: 'Kind',
-        options: [{ value: 'voice', label: 'Voice' }, { value: 'text', label: 'Text' }],
+        // A group is in the same menu rather than behind its own button:
+        // it is the same question -- what are you adding to the sidebar --
+        // and two buttons beside each other reading "+ New" and "+ Group"
+        // is a thing people have to read twice.
+        options: [
+          { value: 'voice', label: 'Voice channel' },
+          { value: 'text', label: 'Text channel' },
+          { value: 'group', label: 'Group (a folder)' },
+        ],
       },
       { name: 'password', label: 'Password', type: 'password', placeholder: 'Open to everyone' },
     ],
@@ -5818,7 +6075,8 @@ el.channelAdd.addEventListener('click', async () => {
   const { name, kind } = answer;
   const password = answer.password || undefined;
   try {
-    await harmony.api.createChannel(state.server, { kind, name, password });
+    if (kind === 'group') await harmony.api.createGroup(state.server, name);
+    else await harmony.api.createChannel(state.server, { kind, name, password });
     // The server broadcasts the new list to everyone, including us.
   } catch (err) {
     showChannelsError(err.message);

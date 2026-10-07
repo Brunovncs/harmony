@@ -255,6 +255,16 @@ module.exports = {
   setRole: (s, id, role) =>
     requestJson(s, `/api/accounts/${id}/role`, { method: 'POST', body: { role } }),
 
+  createGroup: (s, name) =>
+    requestJson(s, '/api/channels/groups', { method: 'POST', body: { name } }),
+  renameGroup: (s, id, name) =>
+    requestJson(s, `/api/channels/groups/${id}`, { method: 'POST', body: { name } }),
+  deleteGroup: (s, id) =>
+    requestJson(s, `/api/channels/groups/${id}/delete`, { method: 'POST' }),
+  // The whole sidebar after a drag, not a move: see Channels.arrange.
+  arrange: (s, body) =>
+    requestJson(s, '/api/channels/arrange', { method: 'POST', body }),
+
   renameClip: (s, id, body) =>
     requestJson(s, `/api/soundpad/${id}/rename`, { method: 'POST', body }),
 

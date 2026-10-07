@@ -80,6 +80,10 @@ export const harmony = {
     setRole: lift(raw.api.setRole),
     setDisplayName: lift(raw.api.setDisplayName),
     renameClip: lift(raw.api.renameClip),
+    createGroup: lift(raw.api.createGroup),
+    renameGroup: lift(raw.api.renameGroup),
+    deleteGroup: lift(raw.api.deleteGroup),
+    arrange: lift(raw.api.arrange),
 
     channels: lift(raw.api.channels),
     createChannel: lift(raw.api.createChannel),

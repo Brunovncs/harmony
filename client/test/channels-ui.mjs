@@ -93,16 +93,35 @@ function startHarmonyServer() {
   });
 }
 
-/**
- * The visible names in the sidebar.
- *
- * `.kind + span` rather than `span:not(.kind)`: a row is
- * [.kind][name][tag?][count?][.row-tools], and .row-tools is a span too, so
- * the looser selector returns the admin buttons alongside the name.
- */
+/** The visible names in the sidebar, in the order they are drawn. */
 const CHANNEL_NAMES =
   "return [...document.querySelectorAll('#channel-items li.channel-row')]"
-  + ".map((li) => li.querySelector('.kind + span')?.textContent);";
+  + ".map((li) => li.querySelector('.channel-name')?.textContent);";
+
+/**
+ * Drag one channel onto another, or onto a group heading.
+ *
+ * Synthetic DragEvents rather than a real pointer drag: the handlers key
+ * off a module-level `dragging` set in dragstart, so nothing here depends
+ * on the OS drag loop. A DataTransfer is still constructed because
+ * dragstart writes to it.
+ */
+const dragChannel = (cdp, name, onto) => cdp.evaluate(`
+  const rows = [...document.querySelectorAll('#channel-items li.channel-row')];
+  const from = rows.find((li) => li.querySelector('.channel-name').textContent === ${JSON.stringify(name)});
+  const target = ${JSON.stringify(onto.group ?? null)}
+    ? [...document.querySelectorAll('#channel-items li.channel-group')]
+      .find((li) => li.querySelector('.group-name').textContent === ${JSON.stringify(onto.group ?? '')})
+    : rows.find((li) => li.querySelector('.channel-name').textContent === ${JSON.stringify(onto.before ?? '')});
+  if (!from || !target) return { ok: false, from: Boolean(from), target: Boolean(target) };
+
+  const dt = new DataTransfer();
+  from.dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true }));
+  target.dispatchEvent(new DragEvent('dragover', { dataTransfer: dt, bubbles: true }));
+  target.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true }));
+  from.dispatchEvent(new DragEvent('dragend', { dataTransfer: dt, bubbles: true }));
+  return { ok: true };
+`);
 
 /** Type into an input and fire the events the app listens for. */
 const setInput = (id, value) =>
@@ -210,9 +229,9 @@ async function run() {
     return rows.map((li) => ({
       // The span right after .kind: .row-tools is a span as well, so
       // span:not(.kind) would pick the admin buttons up with the name.
-      name: li.querySelector('.kind + span')?.textContent,
+      name: li.querySelector('.channel-name')?.textContent,
       tools: li.querySelectorAll('.row-tools button').length,
-      firstDisabled: li.querySelector('.row-tools button')?.disabled ?? null,
+      draggable: li.draggable,
     }));
   `);
   check(
@@ -221,9 +240,16 @@ async function run() {
     sidebar.map((r) => r.name).join(', '),
   );
   check(
-    'each row carries the four admin controls, with "up" disabled on the first',
-    sidebar.every((r) => r.tools === 4) && sidebar[0].firstDisabled === true,
+    'each row carries its two admin controls',
+    // Two, not four: the up/down arrows are gone. Dragging replaced them,
+    // and keeping both would be two code paths writing the same positions.
+    sidebar.every((r) => r.tools === 2),
     `${sidebar[0].tools} buttons per row`,
+  );
+  check(
+    'an admin can pick a row up',
+    sidebar.every((r) => r.draggable === true),
+    sidebar.map((r) => r.draggable).join(', '),
   );
 
   // --- creating a channel -----------------------------------------------
@@ -256,22 +282,75 @@ async function run() {
     names.join(', '),
   );
 
-  // --- reordering -------------------------------------------------------
+  // --- reordering, by dragging ------------------------------------------
+  const dragged = await dragChannel(cdp, 'gamenight', { before: 'voice' });
+  await sleep(700);
+  const reordered = await cdp.evaluate(CHANNEL_NAMES);
+  check(
+    'dragging a channel onto another drops it above, for everybody',
+    dragged.ok === true && reordered[1] === 'gamenight',
+    `${JSON.stringify(dragged)} -> ${reordered.join(', ')}`,
+  );
+
+  // --- groups -----------------------------------------------------------
   //
-  // The button that had no caller at all until 2.1.0.
+  // A group is a heading with a fold, not a container: deleting one leaves
+  // its channels where they were. That is the ON DELETE SET NULL in schema
+  // v7, and it is the opposite of every other delete in this app, so it is
+  // worth pinning.
+  await cdp.evaluate("document.getElementById('channel-add').click(); return true;");
+  await dialogOpen(cdp);
+  await answerDialog(cdp, { name: 'Hangouts', kind: 'group', password: '' });
+  await waitFor(
+    cdp,
+    "document.querySelectorAll('#channel-items li.channel-group').length === 1",
+    { label: 'the group appearing' },
+  );
+  check('an admin can create a group', true, 'Hangouts');
+
+  const intoGroup = await dragChannel(cdp, 'gamenight', { group: 'Hangouts' });
+  await sleep(700);
+  const placed = await cdp.evaluate(`
+    const nodes = [...document.querySelectorAll('#channel-items > li')];
+    return nodes.map((li) => (li.classList.contains('channel-group')
+      ? 'GROUP:' + li.querySelector('.group-name').textContent
+      : (li.querySelector('.channel-name')?.textContent ?? null))).filter(Boolean);
+  `);
+  check(
+    'dragging a channel onto a group heading puts it in the group',
+    intoGroup.ok === true
+      && placed.indexOf('gamenight') === placed.indexOf('GROUP:Hangouts') + 1,
+    placed.join(' | '),
+  );
+
   await cdp.evaluate(`
-    const rows = [...document.querySelectorAll('#channel-items li.channel-row')];
-    rows[2].querySelector('.row-tools button').click();   // move up
+    document.querySelector('#channel-items li.channel-group').click();
     return true;
   `);
-  await sleep(700);
-  const reordered = await cdp.evaluate(
-    CHANNEL_NAMES,
-  );
+  const collapsed = await cdp.evaluate(CHANNEL_NAMES);
   check(
-    'moving a channel up reorders it for everybody',
-    reordered[1] === 'gamenight',
-    reordered.join(', '),
+    'collapsing a group hides what is inside it, and nothing else',
+    !collapsed.includes('gamenight') && collapsed.includes('general'),
+    collapsed.join(', '),
+  );
+
+  // Deleting the group must NOT delete gamenight with it.
+  await cdp.evaluate(`
+    const tools = document.querySelectorAll('#channel-items li.channel-group .row-tools button');
+    tools[tools.length - 1].click();
+    return true;
+  `);
+  await dialogOpen(cdp);
+  await answerDialog(cdp);
+  await sleep(700);
+  const survived = await cdp.evaluate(CHANNEL_NAMES);
+  check(
+    'deleting a group leaves its channels behind',
+    survived.includes('gamenight')
+      && (await cdp.evaluate(
+        "return document.querySelectorAll('#channel-items li.channel-group').length;",
+      )) === 0,
+    survived.join(', '),
   );
 
   // --- a profile picture ------------------------------------------------

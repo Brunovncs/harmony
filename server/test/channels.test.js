@@ -264,6 +264,102 @@ describe('channel management', () => {
   });
 });
 
+/*
+ * Groups.
+ *
+ * A group is a heading with a fold, not a container. The thing most worth
+ * pinning is that deleting one does NOT delete its channels -- it is the
+ * opposite of every other delete in this server, and getting it wrong
+ * destroys a year of chat with one click.
+ */
+describe('channel groups', () => {
+  let groupId;
+  let channelId;
+
+  before(async () => {
+    const made = await api('/api/channels', {
+      method: 'POST', body: { kind: 'text', name: 'grouped' }, token: adminToken,
+    });
+    channelId = made.body.channel.id;
+  });
+
+  it('lets an admin make one', async () => {
+    const res = await api('/api/channels/groups', {
+      method: 'POST', body: { name: 'Hangouts' }, token: adminToken,
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.group.name, 'Hangouts');
+    groupId = res.body.group.id;
+  });
+
+  it('is refused to a member', async () => {
+    const res = await api('/api/channels/groups', {
+      method: 'POST', body: { name: 'mine' }, token: memberToken,
+    });
+    assert.equal(res.status, 403);
+  });
+
+  it('lists groups beside the channels', async () => {
+    const res = await api('/api/channels', { token: memberToken });
+    assert.equal(res.status, 200);
+    assert.ok(res.body.groups.some((g) => g.id === groupId),
+      'the two must travel together, or a client draws channels into folders it has not got');
+  });
+
+  it('puts a channel in a group, and reports it', async () => {
+    const res = await api('/api/channels/arrange', {
+      method: 'POST',
+      body: { groups: [groupId], channels: [{ id: channelId, groupId }] },
+      token: adminToken,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.channels.find((c) => c.id === channelId).groupId, groupId);
+  });
+
+  it('leaves channels it was not told about alone', async () => {
+    const before = (await api('/api/channels', { token: adminToken })).body.channels;
+    const other = before.find((c) => c.id !== channelId);
+    const res = await api('/api/channels/arrange', {
+      method: 'POST', body: { channels: [{ id: channelId, groupId }] }, token: adminToken,
+    });
+    assert.equal(res.status, 200);
+    const after = res.body.channels.find((c) => c.id === other.id);
+    assert.equal(after.groupId, other.groupId,
+      'a client that has not refreshed must not drag everything else to the top');
+  });
+
+  it('refuses an arrangement naming a group that is gone', async () => {
+    const res = await api('/api/channels/arrange', {
+      method: 'POST',
+      body: { channels: [{ id: channelId, groupId: 9999 }] },
+      token: adminToken,
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'no_such_group');
+  });
+
+  it('renames one', async () => {
+    const res = await api(`/api/channels/groups/${groupId}`, {
+      method: 'POST', body: { name: 'Lounge' }, token: adminToken,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.group.name, 'Lounge');
+  });
+
+  it('DELETING A GROUP KEEPS ITS CHANNELS', async () => {
+    const res = await api(`/api/channels/groups/${groupId}/delete`, {
+      method: 'POST', token: adminToken,
+    });
+    assert.equal(res.status, 200);
+
+    const after = await api('/api/channels', { token: adminToken });
+    const channel = after.body.channels.find((c) => c.id === channelId);
+    assert.ok(channel, 'the channel must survive its group');
+    assert.equal(channel.groupId, null, 'and come back ungrouped');
+    assert.equal(after.body.groups.length, 0);
+  });
+});
+
 describe('channel-scoped media tokens', () => {
   it('refuses a read on a channel path with no token', async () => {
     const res = await api('/mediamtx/auth', {

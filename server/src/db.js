@@ -187,6 +187,35 @@ const MIGRATIONS = [
   (db) => {
     db.exec('ALTER TABLE soundpad_clips ADD COLUMN emoji TEXT');
   },
+
+  /*
+   * v7 -- channel groups.
+   *
+   * ON DELETE SET NULL, not CASCADE. Deleting a group must not take its
+   * channels -- and every message, pin and attachment in them -- with it.
+   * A group is a folder for the sidebar, not a container that owns
+   * anything, and an admin tidying the list would otherwise destroy a
+   * year of chat with one click and no warning that said so.
+   *
+   * group_id NULL means ungrouped, which is where every channel starts and
+   * is why this migration needs no data step.
+   *
+   * Positions stay on the channels themselves and are read WITHIN a group
+   * rather than globally -- see Channels.arrange for why the whole tree is
+   * written at once instead of in moves.
+   */
+  (db) => {
+    db.exec(`
+      CREATE TABLE channel_groups (
+        id         INTEGER PRIMARY KEY,
+        name       TEXT    NOT NULL,
+        position   INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      ALTER TABLE channels
+        ADD COLUMN group_id INTEGER REFERENCES channel_groups(id) ON DELETE SET NULL;
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

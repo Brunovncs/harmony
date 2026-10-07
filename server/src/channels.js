@@ -150,6 +150,19 @@ export class Channels {
     this.#db = db;
     this.#q = {
       all: db.prepare('SELECT * FROM channels ORDER BY position, id'),
+      setGroup: db.prepare('UPDATE channels SET group_id = ?, position = ? WHERE id = ?'),
+
+      groups: db.prepare('SELECT * FROM channel_groups ORDER BY position, id'),
+      groupById: db.prepare('SELECT * FROM channel_groups WHERE id = ?'),
+      insertGroup: db.prepare(
+        'INSERT INTO channel_groups (name, position, created_at) VALUES (?, ?, ?)',
+      ),
+      nextGroupPosition: db.prepare(
+        'SELECT COALESCE(MAX(position), -1) + 1 AS p FROM channel_groups',
+      ),
+      renameGroup: db.prepare('UPDATE channel_groups SET name = ? WHERE id = ?'),
+      setGroupPosition: db.prepare('UPDATE channel_groups SET position = ? WHERE id = ?'),
+      removeGroup: db.prepare('DELETE FROM channel_groups WHERE id = ?'),
       byId: db.prepare('SELECT * FROM channels WHERE id = ?'),
       insert: db.prepare(
         'INSERT INTO channels (kind, name, position, password_hash, created_at) '
@@ -217,6 +230,90 @@ export class Channels {
     return { ok: true };
   }
 
+  // ------------------------------------------------------------- groups
+
+  groups() {
+    return this.#q.groups.all();
+  }
+
+  createGroup(name) {
+    const clean = String(name ?? '').trim().slice(0, 32);
+    if (!clean) return { ok: false, error: 'invalid_name' };
+    const position = this.#q.nextGroupPosition.get().p;
+    const info = this.#q.insertGroup.run(clean, position, Date.now());
+    return { ok: true, group: this.#q.groupById.get(Number(info.lastInsertRowid)) };
+  }
+
+  renameGroup(id, name) {
+    if (!this.#q.groupById.get(id)) return { ok: false, error: 'no_such_group' };
+    const clean = String(name ?? '').trim().slice(0, 32);
+    if (!clean) return { ok: false, error: 'invalid_name' };
+    this.#q.renameGroup.run(clean, id);
+    return { ok: true, group: this.#q.groupById.get(id) };
+  }
+
+  /**
+   * Delete a group. Its channels survive, ungrouped.
+   *
+   * That is the schema's ON DELETE SET NULL doing the work, and it is the
+   * behaviour people expect from a folder: emptying the folder is a
+   * separate decision from deleting what was in it.
+   */
+  removeGroup(id) {
+    if (!this.#q.groupById.get(id)) return { ok: false, error: 'no_such_group' };
+    this.#q.removeGroup.run(id);
+    return { ok: true };
+  }
+
+  /**
+   * Write the whole sidebar at once: which group each channel is in, where
+   * it sits inside it, and the order of the groups themselves.
+   *
+   * The WHOLE tree, not "move channel X into group Y at index N". Drag and
+   * drop produces a new arrangement, not a diff, and sending the
+   * arrangement means two admins dragging at the same time cannot
+   * interleave into a layout neither of them chose: one transaction, last
+   * writer wins, and what lands is always something somebody asked for.
+   *
+   * Anything the caller leaves out keeps what it had. A client that has
+   * not refreshed since a channel was created would otherwise silently
+   * move that channel to the top of the ungrouped list every time anybody
+   * dragged anything.
+   */
+  arrange({ groups, channels }) {
+    const knownGroups = new Set(this.groups().map((g) => g.id));
+    const knownChannels = new Map(this.list().map((c) => [c.id, c]));
+
+    const groupOrder = Array.isArray(groups)
+      ? [...new Set(groups.map(Number))].filter((id) => knownGroups.has(id))
+      : null;
+    const moves = Array.isArray(channels) ? channels : [];
+    for (const move of moves) {
+      if (!knownChannels.has(Number(move?.id))) return { ok: false, error: 'no_such_channel' };
+      const groupId = move.groupId == null ? null : Number(move.groupId);
+      if (groupId !== null && !knownGroups.has(groupId)) {
+        return { ok: false, error: 'no_such_group' };
+      }
+    }
+
+    this.#db.exec('BEGIN');
+    try {
+      if (groupOrder) groupOrder.forEach((id, i) => this.#q.setGroupPosition.run(i, id));
+      moves.forEach((move, i) => {
+        const groupId = move.groupId == null ? null : Number(move.groupId);
+        // The index in the submitted list IS the position. The client sends
+        // them in the order they are drawn, so there is nothing to compute
+        // and no way for the two to disagree.
+        this.#q.setGroup.run(groupId, i, Number(move.id));
+      });
+      this.#db.exec('COMMIT');
+    } catch (err) {
+      this.#db.exec('ROLLBACK');
+      throw err;
+    }
+    return { ok: true, channels: this.list(), groups: this.groups() };
+  }
+
   /**
    * Reorder channels to exactly the given id order.
    *
@@ -269,7 +366,14 @@ export const publicChannel = (c) => (c ? {
   kind: c.kind,
   name: c.name,
   position: c.position,
+  groupId: c.group_id ?? null,
   locked: Boolean(c.password_hash),
+} : null);
+
+export const publicGroup = (g) => (g ? {
+  id: g.id,
+  name: g.name,
+  position: g.position,
 } : null);
 
 // ---------------------------------------------------------------------------
