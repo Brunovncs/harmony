@@ -504,18 +504,23 @@ select:focus {
 }
 
 /*
- * The member column is appended, so every arrangement grows one track
- * rather than needing its own rule. minmax(0, …) on the one before it, or
- * a long name in the member list pushes the stage wider than the window.
+ * The member column is appended: one more track, whatever else is on.
+ *
+ * ONE rule, and the reason is a trap worth naming. A grid track is
+ * consumed by a DISPLAYED child, and the rule above takes .channel-main
+ * out of the flow on every staged layout -- so a four-track template here
+ * was only ever filled by three items. The member list slid left into the
+ * track meant for the stage, inherited its 2fr, and the chat pane was
+ * squeezed into the 240px minimum beside twelve hundred pixels of names.
+ *
+ * Counting tracks against the markup is not enough; they have to be
+ * counted against what is on screen at the time. Three children, three
+ * tracks, always.
+ *
+ * minmax(0, …) on the middle one, or a long name in the member list pushes
+ * the stage wider than the window.
  */
 .channels-layout[data-members] {
-  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr) minmax(150px, 200px);
-}
-.channels-layout[data-members][data-stage] {
-  grid-template-columns:
-    minmax(170px, 210px) minmax(240px, 1fr) minmax(0, 2fr) minmax(150px, 200px);
-}
-.channels-layout[data-members][data-stage]:not([data-voice]) {
   grid-template-columns: minmax(200px, 260px) minmax(0, 1fr) minmax(150px, 200px);
 }
 
