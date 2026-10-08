@@ -408,13 +408,19 @@
             <div id="chat-log" class="chat-log"></div>
 
             <form id="chat-form" class="chat-form">
-              <input
+              <!--
+                A textarea, not an input, because an input cannot hold a
+                newline at all -- Shift+Enter in one does nothing, whatever
+                the handler says. One row to start with; it grows as it
+                fills and stops at eight.
+              -->
+              <textarea
                 id="chat-input"
-                type="text"
                 placeholder="Message"
                 autocomplete="off"
                 maxlength="4000"
-              />
+                rows="1"
+              ></textarea>
               <input id="chat-file" type="file" hidden />
               <button
                 type="button"

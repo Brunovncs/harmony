@@ -338,6 +338,7 @@ button:disabled {
 
 input[type='text'],
 input[type='password'],
+textarea,
 select {
   width: 100%;
   font: inherit;
@@ -351,6 +352,7 @@ select {
 }
 input[type='text']:focus,
 input[type='password']:focus,
+textarea:focus,
 select:focus {
   border-color: var(--accent);
 }
@@ -1596,10 +1598,20 @@ button.danger {
   display: flex;
   flex-wrap: wrap;
   gap: 0.25rem;
-  /* A line of its own, indented under the name rather than under the
-     avatar, so a run of reacted-to messages still reads as a column. */
+  /*
+   * A line of its own, indented under the name rather than under the
+   * avatar, so a run of reacted-to messages still reads as a column.
+   *
+   * The indent is PADDING, not margin. flex-basis is a content-box width
+   * and a margin sits outside it, so `flex: 0 0 100%` with a left margin
+   * is an item 100% + 1.9rem wide -- which put a horizontal scrollbar
+   * across the whole chat pane the first time anybody reacted. Padding is
+   * inside the box, because everything here is border-box.
+   */
   flex: 0 0 100%;
-  margin: 0.1rem 0 0.1rem 1.9rem;
+  min-width: 0;
+  padding-left: 1.9rem;
+  margin: 0.1rem 0;
 }
 .reaction {
   display: inline-flex;
@@ -1866,9 +1878,90 @@ button.danger {
   gap: 0.5rem;
   padding-top: 0.5rem;
 }
-.chat-form input[type='text'] {
+.chat-form {
+  align-items: flex-end;
+}
+/*
+ * The box grows with what is in it, up to eight lines.
+ *
+ * resize: none because the handle would fight the automatic height, and
+ * overflow-y: auto so the ninth line scrolls rather than pushing the chat
+ * log off the bottom of the window.
+ */
+.chat-form textarea {
   flex: 1;
   min-width: 0;
+  resize: none;
+  overflow-y: auto;
+  max-height: 11rem;
+  line-height: 1.35;
+  font: inherit;
+}
+
+/* ---------- markdown in a message ---------- */
+
+/*
+ * A deliberately small subset, and these rules are most of why.
+ *
+ * Chat markdown has to stay on the line it is written on: a heading that
+ * takes a 2rem font and 1rem of margin, in a log where every row is two
+ * lines, turns a sentence into a billboard. Everything here is sized
+ * relative to the message rather than to a document.
+ */
+.chat-msg .md-code {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 0.9em;
+  background: rgb(var(--tint-rgb) / 0.1);
+  border-radius: 4px;
+  padding: 0.05em 0.3em;
+}
+.chat-msg pre.md-block {
+  margin: 0.3rem 0;
+  padding: 0.5rem 0.6rem;
+  border-radius: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  overflow-x: auto;
+  max-width: 100%;
+}
+.chat-msg pre.md-block code {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 0.86em;
+  white-space: pre;
+  background: none;
+  padding: 0;
+}
+.chat-msg blockquote.md-quote {
+  margin: 0.2rem 0;
+  padding: 0 0 0 0.6rem;
+  border-left: 3px solid var(--border-strong);
+  color: var(--muted);
+}
+.chat-msg ul.md-list,
+.chat-msg ol.md-list {
+  margin: 0.2rem 0;
+  padding-left: 1.3rem;
+}
+.chat-msg .md-head {
+  display: block;
+  font-weight: 700;
+  /* Barely larger, and never larger than the line it sits on would be in a
+     heading two sizes up. A chat line is not a document title. */
+  font-size: 1.08em;
+  margin: 0.15rem 0;
+}
+.chat-msg .md-head[data-level='2'] {
+  font-size: 1.04em;
+}
+.chat-msg .md-head[data-level='3'] {
+  font-size: 1em;
+}
+.chat-msg del {
+  opacity: 0.7;
+}
+.chat-msg .text a {
+  color: var(--accent);
+  overflow-wrap: anywhere;
 }
 #chat-active {
   display: flex;

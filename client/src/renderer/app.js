@@ -1246,6 +1246,8 @@ async function enterChannels() {
   await refreshUsers();
   loadSoundpad();
   loadEmojis();
+  // Before anybody clicks, not on the click. See scheduleEmojiGrid.
+  scheduleEmojiGrid();
   showView('view-channels');
 
   try {
@@ -3588,27 +3590,22 @@ function appendEmoji(target, value) {
 }
 
 /**
- * Put a message body on the page, turning :name: into a picture.
+ * Emoji and mentions in a run of plain text.
  *
- * Text nodes and <img> elements, never innerHTML. "A chat message is the
- * most obvious place in the app for someone to try injecting markup" did
- * not stop being true when emoji arrived -- it got more tempting, because
- * now there is a substitution to aim at.
+ * One scan for both kinds of token. Two passes would mean the second one
+ * walking over nodes the first had already made, and a :name: inside
+ * somebody's nickname deciding which pass won.
  *
- * Custom emoji win over the standard shortcode table. A server that calls
+ * Custom emoji beat the standard shortcode table. A server that calls
  * something :pizza: means ITS picture, and quietly showing the Unicode one
  * instead would be a worse surprise than the collision.
  *
- * `returns {boolean} whether the body was nothing but emoji
+ * `returns {number} how many emoji were substituted
  */
-function renderBody(target, body) {
-  const text = String(body ?? '');
+function renderPlain(target, text) {
   let last = 0;
   let replaced = 0;
 
-  // One scan for both kinds of token. Two passes would mean the second one
-  // walking over nodes the first had already made, and a :name: inside
-  // somebody's nickname deciding which pass won.
   const TOKENS = new RegExp(`${SHORTCODE_RE.source}|${MENTION_RE.source}`, 'gi');
   for (let m = TOKENS.exec(text); m; m = TOKENS.exec(text)) {
     const [whole, shortcode, mention] = m;
@@ -3634,6 +3631,240 @@ function renderBody(target, body) {
     if (shortcode) replaced += 1;
   }
   if (last < text.length) target.append(document.createTextNode(text.slice(last)));
+  return replaced;
+}
+
+/*
+ * Inline markdown.
+ *
+ * A short list on purpose. Everything here is something people type by
+ * hand mid-sentence; tables, footnotes and reference links are things
+ * people paste out of a document, and a chat line is not a document.
+ *
+ * Code comes FIRST in the alternation, because whatever is inside
+ * backticks has to win -- `**not bold**` is the example everybody tries.
+ * Both underscore forms are guarded by lookarounds so that snake_case and
+ * a nickname like @big_tuna are left alone, which is the only reason the
+ * underscore rules are worth having at all.
+ */
+const INLINE_MD = new RegExp([
+  '(`[^`\\n]+`)',
+  '(\\*\\*[^\\n]+?\\*\\*)',
+  '((?<![\\w_])__[^\\n]+?__(?![\\w_]))',
+  '(~~[^\\n]+?~~)',
+  '(\\*[^*\\n]+?\\*)',
+  '((?<![\\w_])_[^_\\n]+?_(?![\\w_]))',
+  '(\\[[^\\]\\n]+\\]\\(https?://[^\\s)]+\\))',
+  '(https?://[^\\s<]+)',
+].join('|'), 'g');
+
+/**
+ * An anchor, or null if the URL is not one we will open.
+ *
+ * http and https only, and always target=_blank. The window-open handler
+ * in main sends those to the system browser and denies the navigation; a
+ * plain in-window click would instead navigate the RENDERER to the page,
+ * replacing the whole app with somebody's link.
+ */
+function linkNode(href, label) {
+  let url;
+  try {
+    url = new URL(href);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+
+  const a = document.createElement('a');
+  a.href = url.href;
+  a.target = '_blank';
+  a.rel = 'noreferrer noopener';
+  a.textContent = label ?? href;
+  a.title = url.href;
+  return a;
+}
+
+/**
+ * Inline markdown, then emoji and mentions in whatever is left.
+ *
+ * matchAll rather than a loop on exec, and that is not a style choice: this
+ * function RECURSES, into the inside of every bold and italic run. A /g
+ * regex carries lastIndex, so an inner call would leave the outer loop
+ * resuming at an offset into a different string. matchAll iterates over a
+ * clone, so each level gets its own position.
+ */
+function renderInline(target, text) {
+  let last = 0;
+  let replaced = 0;
+  const push = (from, to) => {
+    if (to > from) replaced += renderPlain(target, text.slice(from, to));
+  };
+
+  for (const m of text.matchAll(INLINE_MD)) {
+    const [whole, code, bold, boldUnder, strike, italic, italicUnder, link, bare] = m;
+    let node = null;
+
+    if (code) {
+      node = document.createElement('code');
+      node.className = 'md-code';
+      // textContent, and no recursion: inside backticks nothing else
+      // applies, which is the entire point of backticks.
+      node.textContent = code.slice(1, -1);
+    } else if (bold || boldUnder) {
+      node = document.createElement('strong');
+      renderInline(node, (bold ?? boldUnder).slice(2, -2));
+    } else if (strike) {
+      node = document.createElement('del');
+      renderInline(node, strike.slice(2, -2));
+    } else if (italic || italicUnder) {
+      node = document.createElement('em');
+      renderInline(node, (italic ?? italicUnder).slice(1, -1));
+    } else if (link) {
+      const close = link.indexOf('](');
+      node = linkNode(link.slice(close + 2, -1), link.slice(1, close));
+    } else if (bare) {
+      node = linkNode(bare, bare);
+    }
+    // A link we will not open stays as the text it was.
+    if (!node) continue;
+    // A match the previous one already swallowed -- matchAll gives every
+    // match from the clone's own scan, so this cannot happen today, but it
+    // is one line against a silently duplicated run of text.
+    if (m.index < last) continue;
+
+    push(last, m.index);
+    target.append(node);
+    last = m.index + whole.length;
+  }
+  push(last, text.length);
+  return replaced;
+}
+
+/**
+ * Put a message body on the page.
+ *
+ * Text nodes and elements, never innerHTML -- and markdown is exactly the
+ * feature that makes the shortcut tempting. "A chat message is the most
+ * obvious place in the app for someone to try injecting markup" has only
+ * become more true: there is now a parser between what somebody types and
+ * what everybody sees, and the one thing it must never do is hand a string
+ * to the HTML parser.
+ *
+ * Block structure is decided line by line, and the plain case is lines
+ * joined by <br> rather than paragraphs: a two-line message should be two
+ * lines, not two paragraphs with a blank one between them.
+ *
+ * `returns {boolean} whether the body was nothing but emoji
+ */
+/*
+ * The block rules, named once.
+ *
+ * Shared between "does this line start a block" and "does the run of plain
+ * lines stop here", which has to be the SAME question. When they were two
+ * nearly-identical regexes, a line like "## " -- a heading marker with
+ * nothing after it -- failed the first and matched the second, so the plain
+ * run ended where it began, nothing was consumed, and the loop never
+ * advanced. One set of constants cannot drift apart like that.
+ */
+const MD_FENCE = /^\s{0,3}```(\w*)\s*$/;
+const MD_FENCE_END = /^\s{0,3}```\s*$/;
+const MD_HEAD = /^(#{1,3})\s+(.+)$/;
+const MD_QUOTE = /^\s{0,3}>\s?/;
+const MD_BULLET = /^\s{0,3}(?:[-*+]|\d+[.)])\s+/;
+
+function renderBody(target, body) {
+  const text = String(body ?? '');
+  if (!text) return false;
+
+  const lines = text.split('\n');
+  let replaced = 0;
+  let i = 0;
+
+  const flow = (node, from, to) => {
+    for (let n = from; n < to; n += 1) {
+      if (n > from) node.append(document.createElement('br'));
+      replaced += renderInline(node, lines[n]);
+    }
+  };
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // A fence runs to the closing one, or to the end of the message if
+    // somebody never closed it -- which is far commoner than it should be
+    // and must not swallow the rest of the parse.
+    if (MD_FENCE.test(line)) {
+      let end = i + 1;
+      while (end < lines.length && !MD_FENCE_END.test(lines[end])) end += 1;
+      const pre = document.createElement('pre');
+      pre.className = 'md-block';
+      const code = document.createElement('code');
+      code.textContent = lines.slice(i + 1, end).join('\n');
+      pre.append(code);
+      target.append(pre);
+      i = end + 1;
+      continue;
+    }
+
+    const head = MD_HEAD.exec(line);
+    if (head) {
+      const node = document.createElement('span');
+      node.className = 'md-head';
+      node.dataset.level = String(head[1].length);
+      replaced += renderInline(node, head[2]);
+      target.append(node);
+      i += 1;
+      continue;
+    }
+
+    if (MD_QUOTE.test(line)) {
+      const quote = document.createElement('blockquote');
+      quote.className = 'md-quote';
+      let end = i;
+      const parts = [];
+      while (end < lines.length && MD_QUOTE.test(lines[end])) {
+        parts.push(lines[end].replace(MD_QUOTE, ''));
+        end += 1;
+      }
+      parts.forEach((part, index) => {
+        if (index) quote.append(document.createElement('br'));
+        replaced += renderInline(quote, part);
+      });
+      target.append(quote);
+      i = end;
+      continue;
+    }
+
+    if (MD_BULLET.test(line)) {
+      const ordered = /^\s{0,3}\d/.test(line);
+      const list = document.createElement(ordered ? 'ol' : 'ul');
+      list.className = 'md-list';
+      let end = i;
+      while (end < lines.length && MD_BULLET.test(lines[end])) {
+        const item = document.createElement('li');
+        replaced += renderInline(item, lines[end].replace(MD_BULLET, ''));
+        list.append(item);
+        end += 1;
+      }
+      target.append(list);
+      i = end;
+      continue;
+    }
+
+    // A run of ordinary lines, kept together so the <br>s go between them
+    // and not after the last one.
+    //
+    // lines[i] has just failed all four tests above, so the first step
+    // always advances and the loop cannot stall.
+    let end = i;
+    while (end < lines.length
+      && !MD_FENCE.test(lines[end])
+      && !MD_HEAD.test(lines[end])
+      && !MD_QUOTE.test(lines[end])
+      && !MD_BULLET.test(lines[end])) end += 1;
+    flow(target, i, end);
+    i = end;
+  }
 
   // "Only emoji" has to mean at least one emoji: a line of colons matches
   // the shape and is not something to enlarge.
@@ -3810,17 +4041,48 @@ function renderEmojiPicker() {
   standardWrap.hidden = Boolean(filter);
 }
 
-/** Build the generated sections. Once per session, on first open. */
-function buildEmojiGrid() {
+/**
+ * Build the generated sections, a section at a time, out of idle time.
+ *
+ * Fourteen hundred buttons is about a tenth of a second of DOM work, and
+ * doing it on the click meant the picker took that long to appear the first
+ * time -- the one time a person has no idea whether it is coming.
+ *
+ * So it is started when the channels view opens and spread across idle
+ * callbacks, and the picker never waits for it. Opening early is still
+ * useful: searching builds its own small list and hides this one, so the
+ * box at the top works before the grid under it has finished arriving.
+ *
+ * One section per callback rather than a fixed number of cells, because a
+ * section boundary is the only place the grid is coherent -- stopping half
+ * way through one would leave a heading with nothing under it if the build
+ * were ever interrupted.
+ */
+function scheduleEmojiGrid() {
   if (standardWrap) return;
+
   dynamicWrap = document.createElement('div');
   standardWrap = document.createElement('div');
-  standardWrap.append(...EMOJI_SECTIONS.map(
-    (section) => emojiSection(section.label, section.items.map(
-      ([ch, name]) => emojiCell(ch, name, null),
-    )),
-  ));
   el.emojiGrid.replaceChildren(dynamicWrap, standardWrap);
+
+  const idle = window.requestIdleCallback
+    ?? ((fn) => setTimeout(() => fn({ timeRemaining: () => 8 }), 0));
+
+  let index = 0;
+  const step = (deadline) => {
+    do {
+      const section = EMOJI_SECTIONS[index];
+      standardWrap.append(emojiSection(section.label, section.items.map(
+        ([ch, name]) => emojiCell(ch, name, null),
+      )));
+      index += 1;
+      // At least one section per callback, or a busy machine never
+      // finishes: timeRemaining() can be 0 on every single call.
+    } while (index < EMOJI_SECTIONS.length && deadline.timeRemaining() > 4);
+
+    if (index < EMOJI_SECTIONS.length) idle(step);
+  };
+  idle(step);
 }
 
 /**
@@ -3832,7 +4094,9 @@ function buildEmojiGrid() {
  * and a fixed element has no idea where its button is.
  */
 function openEmojiPicker(anchorEl, onPick) {
-  buildEmojiGrid();
+  // Idempotent, and it does NOT wait: if the background build has not
+  // finished, the picker opens with what there is and fills in behind.
+  scheduleEmojiGrid();
   emojiPick = onPick;
   emojiFilter = '';
   el.emojiSearch.value = '';
@@ -4116,8 +4380,11 @@ async function sendMessage() {
   if (!body && !file) return;
 
   el.chatInput.value = '';
-  // The box it was tracking is empty now, and nothing it could offer would
-  // go anywhere.
+  // Back to one row. Without this the box keeps the height of the message
+  // that has just left it.
+  growChatInput();
+  // The list it was tracking has an empty box now, and nothing it could
+  // offer would go anywhere.
   closeMentions();
   state.chat.pendingFile = null;
   el.chatNote.textContent = '';
@@ -6859,32 +7126,62 @@ el.chatForm.addEventListener('submit', (event) => {
  * middle of a half-typed name has to open the list and clicking out of one
  * has to close it -- neither of which fires an input event.
  */
-el.chatInput.addEventListener('input', () => updateMentions());
+el.chatInput.addEventListener('input', () => {
+  growChatInput();
+  updateMentions();
+});
 document.addEventListener('selectionchange', () => {
   if (document.activeElement === el.chatInput) updateMentions();
 });
 el.chatInput.addEventListener('blur', () => closeMentions());
 
-el.chatInput.addEventListener('keydown', (event) => {
-  if (el.mentionPop.hidden) return;
+/**
+ * Grow the box to fit what is in it.
+ *
+ * height:auto first, or scrollHeight only ever reports the taller of what
+ * it is and what it was, and the box can grow but never shrink again. The
+ * ceiling is the max-height in CSS rather than a number here, so there is
+ * one place that decides how tall it may get.
+ */
+function growChatInput() {
+  el.chatInput.style.height = 'auto';
+  el.chatInput.style.height = `${el.chatInput.scrollHeight}px`;
+}
 
-  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-    event.preventDefault();
-    const step = event.key === 'ArrowDown' ? 1 : -1;
-    mentionActive = (mentionActive + step + mentionMatches.length) % mentionMatches.length;
-    renderMentionList();
-    return;
+el.chatInput.addEventListener('keydown', (event) => {
+  if (!el.mentionPop.hidden) {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const step = event.key === 'ArrowDown' ? 1 : -1;
+      mentionActive = (mentionActive + step + mentionMatches.length) % mentionMatches.length;
+      renderMentionList();
+      return;
+    }
+    // Enter and Tab both take the highlighted name. Enter has to be stopped
+    // from reaching the form, or choosing a name also sends the message.
+    if (event.key === 'Enter' || event.key === 'Tab') {
+      event.preventDefault();
+      acceptMention(mentionActive);
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeMentions();
+      return;
+    }
   }
-  // Enter and Tab both take the highlighted name. Enter has to be stopped
-  // from reaching the form, or choosing a name also sends the message.
-  if (event.key === 'Enter' || event.key === 'Tab') {
+
+  /*
+   * Enter sends; Shift+Enter breaks the line.
+   *
+   * The opposite of a textarea's own behaviour, so it has to be taken over
+   * rather than added to. isComposing is not optional: with an IME, Enter
+   * is how a candidate is accepted, and sending the message on it would
+   * make the app unusable in half the world.
+   */
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
-    acceptMention(mentionActive);
-    return;
-  }
-  if (event.key === 'Escape') {
-    event.preventDefault();
-    closeMentions();
+    el.chatForm.requestSubmit();
   }
 });
 
