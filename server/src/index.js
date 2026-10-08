@@ -905,6 +905,44 @@ app.post('/api/messages/:id/pin', requireLogin, (req, res) => {
   return res.json({ message });
 });
 
+/**
+ * Change what a message says.
+ *
+ * YOUR OWN ONLY, and an admin is not an exception -- which is the one
+ * place this app's admin rules are narrower than for deleting. Deleting
+ * somebody's message removes it and everyone can see that it is gone;
+ * editing it would put words in their mouth under their name, and nothing
+ * in the UI could tell the difference.
+ */
+app.post('/api/messages/:id/edit', requireLogin, (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+  const existing = chat.get(id);
+  if (!existing) return res.status(404).json({ error: 'no_such_message' });
+  if (!readableChannel(req, existing.channel_id)) {
+    return res.status(404).json({ error: 'no_such_channel' });
+  }
+  if (existing.user_id !== req.user.id) {
+    return res.status(403).json({
+      error: 'forbidden',
+      message: 'You can only edit your own messages.',
+    });
+  }
+
+  const result = chat.edit(id, req.body?.body);
+  if (!result.ok) {
+    return res.status(400).json({
+      error: result.error,
+      message: result.error === 'empty_message'
+        ? 'A message has to say something, unless it carries a file.'
+        : 'No such message.',
+    });
+  }
+
+  const message = oneForClient(result.message);
+  toChannelReaders(existing.channel_id, { type: 'message:updated', message });
+  return res.json({ message });
+});
+
 app.post('/api/messages/:id/delete', requireLogin, (req, res) => {
   const id = Number.parseInt(req.params.id, 10);
 

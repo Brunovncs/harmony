@@ -1547,6 +1547,13 @@ button.danger {
   height: 1.5em;
 }
 
+/* Small and quiet. It is a footnote about the message, not part of it. */
+.edited-mark {
+  font-size: 0.72em;
+  opacity: 0.45;
+  white-space: nowrap;
+}
+
 /* ---------- mentions ---------- */
 
 /*
@@ -1719,12 +1726,16 @@ button.danger {
  * it. The controls group already exists and is already only interesting on
  * hover.
  */
-.chat-msg .react-btn {
-  font-size: 0.9rem;
-  line-height: 1;
-  padding: 0.15rem 0.35rem;
-  font-variant-emoji: emoji;
-}
+/*
+ * No rule for .react-btn.
+ *
+ * There was one, left over from when the react button sat in the flow of
+ * the row, and it set font-size: 0.9rem. `.chat-msg .react-btn` is (0,2,0)
+ * and `.msg-tool` is (0,1,0), so it beat the font-size: 0 that collapses
+ * the label on every one of these buttons -- and that one button alone
+ * showed the word "React" beside its glyph. The badge looked like a design
+ * decision; it was a stale selector with one more class in it.
+ */
 
 /* ---------- the emoji picker ---------- */
 
@@ -1974,7 +1985,11 @@ button.danger {
   content: attr(data-glyph);
   font-size: 0.95rem;
   line-height: 1;
-  font-variant-emoji: text;
+}
+/* The pencil is a drawn character rather than an emoji and comes out thin
+   and small beside three pictographs. */
+.msg-tool[data-glyph='\270E']::before {
+  font-size: 1.1rem;
 }
 .msg-tool:hover {
   background: rgb(var(--tint-rgb) / 0.12);

@@ -115,6 +115,7 @@ contextBridge.exposeInMainWorld('harmony', {
     postMessage: invoke('api:post-message'),
     pinMessage: invoke('api:pin-message'),
     deleteMessage: invoke('api:delete-message'),
+    editMessage: invoke('api:edit-message'),
     search: invoke('api:search'),
     deleteAccount: invoke('api:delete-account'),
     serverInfo: invoke('api:server-info'),

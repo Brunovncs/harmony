@@ -304,6 +304,9 @@ module.exports = {
     requestJson(s, `/api/messages/${id}/pin`, { method: 'POST', body: { pinned } }),
   deleteMessage: (s, id) =>
     requestJson(s, `/api/messages/${id}/delete`, { method: 'POST' }),
+  // Your own only; the server refuses anybody else's, admin or not.
+  editMessage: (s, id, body) =>
+    requestJson(s, `/api/messages/${id}/edit`, { method: 'POST', body: { body } }),
   // A toggle, not an add: the server decides, because clicking an emoji
   // somebody else already chose has to add to it rather than replace it.
   react: (s, id, emoji, on) =>

@@ -162,6 +162,7 @@ export class Chat {
         'INSERT INTO messages_fts (rowid, body, nickname, media_type) VALUES (?, ?, ?, ?)',
       ),
       deleteFts: db.prepare('DELETE FROM messages_fts WHERE rowid = ?'),
+      editMessage: db.prepare('UPDATE messages SET body = ?, edited_at = ? WHERE id = ?'),
       deleteMessage: db.prepare('DELETE FROM messages WHERE id = ?'),
       messageById: db.prepare(`
         SELECT m.*, u.nickname FROM messages m JOIN users u ON u.id = m.user_id
@@ -372,6 +373,43 @@ export class Chat {
 
   get(id) {
     return this.#q.messageById.get(id) ?? null;
+  }
+
+  /**
+   * Change what a message says.
+   *
+   * The FTS row is rewritten here, in the same transaction, for the same
+   * reason post() writes it: one write path, nothing hidden in a trigger.
+   * Deleting and re-inserting rather than updating, because that is the
+   * pair of operations the index is kept in step with everywhere else and
+   * an fts5 UPDATE is a different code path for no gain.
+   *
+   * An attachment cannot be edited -- only the words beside it. So a
+   * message with a picture may be edited down to nothing, and one without
+   * may not: the rule is the same one post() applies, which is that a
+   * message has to be something.
+   */
+  edit(id, body) {
+    const message = this.#q.messageById.get(id);
+    if (!message) return { ok: false, error: 'no_such_message' };
+
+    const text = String(body ?? '').slice(0, 4000);
+    if (!text.trim() && !message.attachment_hash) {
+      return { ok: false, error: 'empty_message' };
+    }
+    if (text === message.body) return { ok: true, message, unchanged: true };
+
+    this.#db.exec('BEGIN');
+    try {
+      this.#q.editMessage.run(text, Date.now(), id);
+      this.#q.deleteFts.run(id);
+      this.#q.insertFts.run(id, text, message.nickname, message.media_type ?? '');
+      this.#db.exec('COMMIT');
+    } catch (err) {
+      this.#db.exec('ROLLBACK');
+      throw err;
+    }
+    return { ok: true, message: this.#q.messageById.get(id) };
   }
 
   remove(id) {
@@ -828,6 +866,7 @@ export const publicMessage = (m, reactions = [], mentions = null) => (m ? {
   attachmentName: m.attachment_name ?? null,
   mediaType: m.media_type ?? null,
   pinned: Boolean(m.pinned),
+  editedAt: m.edited_at ?? null,
   reactions,
   // Ids, not names: the client already has the roster and would otherwise
   // have to fold and match nicknames a second time to know whether one of

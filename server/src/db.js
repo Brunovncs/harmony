@@ -279,6 +279,23 @@ const MIGRATIONS = [
   (db) => {
     db.exec('ALTER TABLE messages ADD COLUMN attachment_name TEXT');
   },
+
+  /*
+   * v10 -- when a message was changed.
+   *
+   * A timestamp rather than a flag, because "edited" and "edited when" are
+   * the same column and only one of them can be added later without a
+   * second migration.
+   *
+   * NOT a revision history. Keeping the old text would mean a client could
+   * show somebody words they deliberately took back, which is the opposite
+   * of what editing is for -- and on a friends' server nobody is auditing
+   * anybody. The marker exists so that a message which changed after you
+   * read it does not look like the one you read.
+   */
+  (db) => {
+    db.exec('ALTER TABLE messages ADD COLUMN edited_at INTEGER');
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

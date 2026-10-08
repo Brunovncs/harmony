@@ -95,6 +95,7 @@ export const harmony = {
     postMessage: lift(raw.api.postMessage),
     pinMessage: lift(raw.api.pinMessage),
     deleteMessage: lift(raw.api.deleteMessage),
+    editMessage: lift(raw.api.editMessage),
     search: lift(raw.api.search),
     deleteAccount: lift(raw.api.deleteAccount),
     serverInfo: lift(raw.api.serverInfo),

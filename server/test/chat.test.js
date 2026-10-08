@@ -619,6 +619,80 @@ describe('custom emoji', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Editing
+// ---------------------------------------------------------------------------
+
+describe('editing a message', () => {
+  let mine;
+
+  before(async () => {
+    mine = (await api(`/api/channels/${textChannelId}/messages`, {
+      method: 'POST', body: { body: 'frist post' }, token: memberToken,
+    })).body.message.id;
+  });
+
+  it('changes the words and marks when', async () => {
+    const res = await api(`/api/messages/${mine}/edit`, {
+      method: 'POST', body: { body: 'first post' }, token: memberToken,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.message.body, 'first post');
+    assert.ok(res.body.message.editedAt > 0, 'a message that changed must say so');
+  });
+
+  it('IS NOT AN ADMIN POWER, unlike deleting', async () => {
+    // Deleting somebody's message removes it and everyone can see it is
+    // gone. Editing it would put words in their mouth under their name.
+    const res = await api(`/api/messages/${mine}/edit`, {
+      method: 'POST', body: { body: 'actually I love mondays' }, token: ownerToken,
+    });
+    assert.equal(res.status, 403);
+  });
+
+  it('FOLLOWS THE MESSAGE INTO THE SEARCH INDEX', async () => {
+    // The quiet half: an index still answering with the old words means
+    // search can show text the message no longer contains.
+    const stale = await api(`/api/channels/${textChannelId}/search?q=frist`, {
+      token: memberToken,
+    });
+    assert.equal(stale.body.results.length, 0, 'the old words must be gone');
+
+    const fresh = await api(`/api/channels/${textChannelId}/search?q=first post`, {
+      token: memberToken,
+    });
+    assert.ok(fresh.body.results.some((m) => m.id === mine), 'and the new ones findable');
+  });
+
+  it('refuses to empty a message that has nothing else in it', async () => {
+    const res = await api(`/api/messages/${mine}/edit`, {
+      method: 'POST', body: { body: '   ' }, token: memberToken,
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'empty_message');
+  });
+
+  it('leaves editedAt alone when nothing actually changed', async () => {
+    const before_ = (await api(`/api/channels/${textChannelId}/messages`, {
+      token: memberToken,
+    })).body.messages.find((m) => m.id === mine);
+
+    const res = await api(`/api/messages/${mine}/edit`, {
+      method: 'POST', body: { body: 'first post' }, token: memberToken,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.message.editedAt, before_.editedAt,
+      'resaving the same text is not an edit');
+  });
+
+  it('refuses one that does not exist', async () => {
+    const res = await api('/api/messages/999999/edit', {
+      method: 'POST', body: { body: 'hello' }, token: memberToken,
+    });
+    assert.equal(res.status, 404);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Attachment names
 // ---------------------------------------------------------------------------
 

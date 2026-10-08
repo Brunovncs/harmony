@@ -1077,6 +1077,14 @@ function ask(spec) {
     if (field.options) {
       input = document.createElement('select');
       input.append(...field.options.map((o) => new Option(o.label, o.value)));
+    } else if (field.multiline) {
+      // A message can have newlines in it, and an <input> cannot hold one
+      // -- it would silently drop every line break the moment somebody
+      // edited a two-line message.
+      input = document.createElement('textarea');
+      input.rows = field.rows ?? 4;
+      input.placeholder = field.placeholder ?? '';
+      if (field.maxlength) input.maxLength = field.maxlength;
     } else {
       input = document.createElement('input');
       input.type = field.type ?? 'text';
@@ -1096,7 +1104,7 @@ function ask(spec) {
   el.ask.showModal();
   // Focus the first field: answering without reaching for the mouse is most
   // of why a prompt was reached for in the first place.
-  el.askFields.querySelector('input, select')?.focus();
+  el.askFields.querySelector('input, select, textarea')?.focus();
 
   return new Promise((resolve) => {
     askResolve = resolve;
@@ -4694,6 +4702,15 @@ function messageRow(message) {
   // Text nodes and images only -- see renderBody. A chat message is the most
   // obvious place in the app for someone to try injecting markup.
   if (renderBody(text, message.body)) row.setAttribute('data-emoji-only', '');
+  if (message.editedAt) {
+    // Inside .text, after the words, so it wraps with them rather than
+    // sitting in a column of its own that every unedited row pays for.
+    const edited = document.createElement('span');
+    edited.className = 'edited-mark';
+    edited.textContent = ' (edited)';
+    edited.title = new Date(message.editedAt).toLocaleString();
+    text.append(edited);
+  }
   if (mentionsMe(message) && message.userId !== state.auth.user?.id) {
     row.setAttribute('data-mentions-me', '');
   }
@@ -4725,7 +4742,7 @@ function messageRow(message) {
 
   const react = document.createElement('button');
   react.className = 'msg-tool react-btn';
-  react.dataset.glyph = '\u{1F642}';
+  react.dataset.glyph = '\u{1F600}';
   react.textContent = 'React';
   react.title = 'Add a reaction';
   react.addEventListener('click', () => openEmojiPicker(react, (value) => {
@@ -4748,6 +4765,51 @@ function messageRow(message) {
   });
 
   tools.append(react, pin);
+
+  /*
+   * Editing, and only your own.
+   *
+   * An admin can delete anybody's message and cannot edit one, which is the
+   * single place this app's admin powers are narrower rather than wider.
+   * Deleting removes a message and everybody can see that it is gone;
+   * editing would put words in somebody's mouth under their name, and
+   * nothing on the screen could tell the difference.
+   *
+   * A dialog rather than editing in place, and the reason is renderChat:
+   * it rebuilds every row from scratch on every push, so an in-place
+   * editor would be destroyed mid-sentence by somebody else's message
+   * arriving. Keeping it alive across that is a pile of state about
+   * drafts and caret positions, and this is a friends' chat.
+   */
+  if (message.userId === state.auth.user?.id) {
+    const change = document.createElement('button');
+    change.className = 'msg-tool';
+    change.dataset.glyph = '\u270E';
+    change.textContent = 'Edit';
+    change.title = 'Edit';
+    change.addEventListener('click', async () => {
+      const answer = await ask({
+        title: 'Edit message',
+        okLabel: 'Save',
+        fields: [{
+          name: 'body',
+          label: 'Message',
+          value: message.body,
+          multiline: true,
+          maxlength: 4000,
+          required: !message.attachmentHash,
+        }],
+      });
+      if (answer === null || answer.body === message.body) return;
+      try {
+        await harmony.api.editMessage(state.server, message.id, answer.body);
+        // The server pushes message:updated to everyone, us included.
+      } catch (err) {
+        showChannelsError(err.message);
+      }
+    });
+    tools.append(change);
+  }
   // when before text now: the badge owns the right-hand end of the row, and
   // a timestamp pushed under it by margin-left:auto would spend every hover
   // hidden behind it.
@@ -7461,7 +7523,9 @@ el.askForm.addEventListener('submit', (event) => {
     return;
   }
   const values = {};
-  for (const input of el.askFields.querySelectorAll('input, select')) {
+  // textarea too. Without it a multi-line field builds, fills and submits
+  // perfectly and its value is silently dropped on the way out.
+  for (const input of el.askFields.querySelectorAll('input, select, textarea')) {
     values[input.name] = input.value;
   }
   closeAsk(values);
