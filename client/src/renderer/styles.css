@@ -1535,19 +1535,38 @@ button.danger {
   gap: 0.35rem;
   padding: 0.5rem 0;
 }
+/*
+ * Picture, then everything else.
+ *
+ * Two columns rather than one wrapped line. The reaction strip no longer
+ * needs flex-basis: 100% to get a line of its own -- it is inside the
+ * second column with the words, which is also where it belongs visually,
+ * lined up under the text rather than under the face.
+ */
 .chat-msg {
   display: flex;
-  /*
-   * Wrapped, so the reaction strip can be a full-width item that lands on
-   * its own line under the message. The alternative was a wrapper element
-   * around the body and the reactions, which means every rule that targets
-   * .text having to learn about one more level.
-   */
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  align-items: baseline;
-  padding: 0.2rem 0.4rem;
+  gap: 0.6rem;
+  align-items: flex-start;
+  padding: 0.15rem 0.4rem;
   border-radius: 6px;
+}
+.msg-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.msg-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  line-height: 1.3;
+}
+/* The picture is a row taller than the text it sits beside, which is what
+   gives a block of messages its left margin. */
+.avatar.msg-avatar {
+  width: 2.5em;
+  height: 2.5em;
+  font-size: 0.72em;
+  margin-top: 0.15em;
 }
 .chat-msg:hover {
   background: rgb(var(--tint-rgb) / 0.04);
@@ -1559,6 +1578,9 @@ button.danger {
 .chat-msg .who {
   font-weight: 600;
   flex: 0 0 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* Beside the name, not pushed to the far right: the badge lives in that
    corner now and would sit on top of it on every hover. */
@@ -1567,7 +1589,34 @@ button.danger {
   opacity: 0.5;
   flex: 0 0 auto;
 }
+/*
+ * On a grouped row the timestamp IS the left column.
+ *
+ * Sized to the picture it replaces and right-aligned inside it, so a block
+ * of messages keeps one left edge. Hidden until the row is hovered,
+ * because a column of times down the side of a conversation is noise --
+ * but hidden with opacity, not display, or the column would collapse and
+ * every grouped line would jump a face's width to the left.
+ */
+/* .chat-msg .when.when-gutter, not .when-gutter: the element carries BOTH
+   classes, and `.chat-msg .when` is (0,2,0) with opacity 0.5 on it. A bare
+   class here loses, and the timestamp every grouped row was supposed to
+   hide would have been visible on all of them. */
+.chat-msg .when.when-gutter {
+  width: 2.5em;
+  font-size: 0.68rem;
+  text-align: right;
+  align-self: center;
+  opacity: 0;
+  transition: opacity 90ms ease-out;
+}
+.chat-msg:hover .when.when-gutter {
+  opacity: 0.45;
+}
+/* display: block, because it is no longer a flex item and a span would
+   leave the markdown blocks inside it laying out as inline content. */
 .chat-msg .text {
+  display: block;
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -1720,24 +1769,24 @@ button.danger {
 
 /* ---------- reactions ---------- */
 
+/*
+ * Inside the main column now, under the words.
+ *
+ * No flex-basis and no indent: it is already in the right column, and the
+ * indent it used to need is the width of the picture, which is now a
+ * sibling of the column rather than something the strip has to clear.
+ *
+ * Worth remembering why the old indent was padding rather than margin:
+ * flex-basis is a content-box width and a margin sits outside it, so
+ * `flex: 0 0 100%` with a left margin was an item 100% + 1.9rem wide, and
+ * it put a horizontal scrollbar across the whole chat pane.
+ */
 .chat-msg .reactions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.25rem;
-  /*
-   * A line of its own, indented under the name rather than under the
-   * avatar, so a run of reacted-to messages still reads as a column.
-   *
-   * The indent is PADDING, not margin. flex-basis is a content-box width
-   * and a margin sits outside it, so `flex: 0 0 100%` with a left margin
-   * is an item 100% + 1.9rem wide -- which put a horizontal scrollbar
-   * across the whole chat pane the first time anybody reacted. Padding is
-   * inside the box, because everything here is border-box.
-   */
-  flex: 0 0 100%;
   min-width: 0;
-  padding-left: 1.9rem;
-  margin: 0.1rem 0;
+  margin: 0.2rem 0 0.1rem;
 }
 .reaction {
   display: inline-flex;
@@ -2536,6 +2585,11 @@ button.danger {
   height: 100%;
   object-fit: cover;
   display: block;
+  /* .chat-msg img is the attachment rule and it reaches the picture in a
+     message's own avatar too -- same specificity, and only the properties
+     this rule names are won back. The margin is the one that shows: it
+     pushed the face down inside its circle. */
+  margin: 0;
 }
 .avatar.tiny {
   width: 1.5em;

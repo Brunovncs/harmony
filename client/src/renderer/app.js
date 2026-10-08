@@ -4683,19 +4683,49 @@ function attachmentNode(message) {
   return wrap;
 }
 
-/** One message row. Attachments are rendered from the local cache. */
-function messageRow(message) {
+/**
+ * How close together two messages from the same person stay one block.
+ *
+ * Five minutes is long enough that a conversation reads as a conversation
+ * and short enough that coming back after lunch starts a new one with your
+ * name on it.
+ */
+const GROUP_WINDOW_MS = 5 * 60 * 1000;
+
+/**
+ * One message row.
+ *
+ * Three parts: the picture in a column of its own, the name and the time on
+ * a line above, and the words below them. The whole row used to be one
+ * line -- picture, name, words, time -- which reads fine for "hello" and
+ * falls apart the moment anything is longer than the pane, because the
+ * words wrap under the picture and the next message starts in the middle
+ * of the last one.
+ *
+ * A run from the same person within GROUP_WINDOW_MS drops the picture and
+ * the header and keeps only the words, with the time appearing in the
+ * gutter on hover. Without that, a back-and-forth is mostly somebody's
+ * name and face repeated at every line, which is the thing the layout was
+ * meant to stop.
+ *
+ * @param {object} message
+ * @param {object} [previous]  the message drawn immediately above this one
+ */
+function messageRow(message, previous) {
   const row = document.createElement('div');
   row.className = 'chat-msg';
   row.dataset.id = String(message.id);
   if (message.pinned) row.setAttribute('data-pinned', '');
 
-  const who = document.createElement('span');
-  who.className = 'who';
-  who.append(
-    avatarEl(faceOf(message.userId, message.nickname), 'tiny'),
-    document.createTextNode(displayOf(message.userId, message.nickname)),
-  );
+  const grouped = Boolean(previous)
+    && previous.userId === message.userId
+    // A pin is a horizontal rule in all but name: it marks a message out,
+    // and swallowing the one under it into the same block hides which one
+    // was pinned.
+    && !previous.pinned
+    && !message.pinned
+    && message.createdAt - previous.createdAt < GROUP_WINDOW_MS;
+  if (grouped) row.setAttribute('data-grouped', '');
 
   const text = document.createElement('span');
   text.className = 'text';
@@ -4722,6 +4752,7 @@ function messageRow(message) {
   when.textContent = new Date(message.createdAt).toLocaleTimeString([], {
     hour: '2-digit', minute: '2-digit',
   });
+  when.title = new Date(message.createdAt).toLocaleString();
 
   /*
    * The controls, as a badge that floats over the top-right corner.
@@ -4767,6 +4798,33 @@ function messageRow(message) {
   tools.append(react, pin);
 
   /*
+   * The left column, and what fills it.
+   *
+   * On a grouped row the picture is replaced by the timestamp, which is
+   * invisible until the row is hovered: the column has to keep its width
+   * either way, or every grouped line would sit a face's width to the left
+   * of the one above it.
+   */
+  const gutter = grouped
+    ? when
+    : avatarEl(faceOf(message.userId, message.nickname), 'msg-avatar');
+  if (grouped) when.classList.add('when-gutter');
+
+  const main = document.createElement('div');
+  main.className = 'msg-main';
+
+  if (!grouped) {
+    const head = document.createElement('div');
+    head.className = 'msg-head';
+    const who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = displayOf(message.userId, message.nickname);
+    head.append(who, when);
+    main.append(head);
+  }
+  main.append(text);
+
+  /*
    * Editing, and only your own.
    *
    * An admin can delete anybody's message and cannot edit one, which is the
@@ -4810,10 +4868,7 @@ function messageRow(message) {
     });
     tools.append(change);
   }
-  // when before text now: the badge owns the right-hand end of the row, and
-  // a timestamp pushed under it by margin-left:auto would spend every hover
-  // hidden behind it.
-  row.append(who, when, text, tools);
+  row.append(gutter, main, tools);
 
   // Your own, or anybody's if you are an admin -- the same rule the server
   // enforces, so a button that appears always works.
@@ -4835,9 +4890,9 @@ function messageRow(message) {
     tools.append(remove);
   }
 
-  // Last, and only when there are any: the strip is a flex line of its own,
-  // and an empty one would add a blank line under every message in the log.
-  if (message.reactions?.length) row.append(reactionRow(message));
+  // Under the words rather than beside them, and inside the main column so
+  // it lines up with them rather than with the picture.
+  if (message.reactions?.length) main.append(reactionRow(message));
 
   return row;
 }
@@ -4854,7 +4909,12 @@ function renderChat({ scrollToBottom = false } = {}) {
   const log = el.chatLog;
   const wasAtBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
 
-  log.replaceChildren(...state.chat.messages.map(messageRow));
+  // (m, i, all) rather than a bare reference to messageRow: map passes the
+  // index as the second argument, which is now the "previous message"
+  // parameter and would be a number.
+  log.replaceChildren(
+    ...state.chat.messages.map((m, i, all) => messageRow(m, all[i - 1])),
+  );
 
   if (state.chat.pinned.length) {
     el.chatPinned.hidden = false;
