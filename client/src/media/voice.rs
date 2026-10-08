@@ -685,11 +685,18 @@ impl Voice {
             }
         }
         let mic = self.mic.clone();
+        let camera = self.shares.camera.as_ref().and_then(|s| s.out.link.clone());
         cx.spawn(async move |this, cx| {
             let (counts, (rtt, route)) = core::run(async move {
                 let mut counts = Vec::new();
                 for (who, generation, l) in links {
+                    if matches!(who, Watched::Tile(_)) {
+                        l.log_video_stats().await;
+                    }
                     counts.push((who, generation, l.packets_received().await));
+                }
+                if let Some(c) = camera {
+                    c.log_video_stats().await;
                 }
                 let path = match mic {
                     Some(m) => (m.rtt_ms().await, m.route().await),

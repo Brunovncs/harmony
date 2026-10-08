@@ -40,6 +40,12 @@ fn encoder_backend() -> libwebrtc::rtp_sender::VideoEncoderBackend {
     [B::Nvenc, B::Hardware].into_iter().find(|b| available.contains(b)).unwrap_or(B::Auto)
 }
 
+/// Whether to log video frame rates and timings (`HARMONY_VIDEO_STATS`).
+pub fn video_stats() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("HARMONY_VIDEO_STATS").is_some())
+}
+
 pub fn factory() -> &'static PeerConnectionFactory {
     FACTORY.get_or_init(PeerConnectionFactory::default)
 }
@@ -170,6 +176,58 @@ impl Link {
         } else {
             Route::Udp
         })
+    }
+
+    /// With `HARMONY_VIDEO_STATS` set, logs what the video encoder or decoder of this connection
+    /// is doing, for working out where frames go missing.
+    pub async fn log_video_stats(&self) {
+        if !video_stats() {
+            return;
+        }
+        for s in self.stats().await {
+            match s {
+                RtcStats::MediaSource(m) if m.source.kind == "video" => {
+                    log::info!(
+                        "video source: {}x{} {} fps, {} frames",
+                        m.video.width,
+                        m.video.height,
+                        m.video.frames_per_second,
+                        m.video.frames
+                    )
+                }
+                RtcStats::OutboundRtp(o) if o.stream.kind == "video" => {
+                    let e = &o.outbound;
+                    log::info!(
+                        "video out: {}x{} {} fps, {} encoded, {} sent, {} bytes, target {:.0} kbps, limited by {:?} {:?}, {}",
+                        e.frame_width,
+                        e.frame_height,
+                        e.frames_per_second,
+                        e.frames_encoded,
+                        e.frames_sent,
+                        o.sent.bytes_sent,
+                        e.target_bitrate / 1000.,
+                        e.quality_limitation_reason,
+                        e.quality_limitation_durations,
+                        e.encoder_implementation
+                    )
+                }
+                RtcStats::InboundRtp(i) if i.stream.kind == "video" => {
+                    let d = &i.inbound;
+                    log::info!(
+                        "video in: {}x{} {} fps, {} decoded, {} dropped, {} freezes, {} bytes, {}",
+                        d.frame_width,
+                        d.frame_height,
+                        d.frames_per_second,
+                        d.frames_decoded,
+                        d.frames_dropped,
+                        d.freeze_count,
+                        d.bytes_received,
+                        d.decoder_implementation
+                    )
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Packets received over all inbound streams, to notice a connection gone quiet.

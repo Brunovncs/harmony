@@ -105,6 +105,10 @@ impl Compositor {
         Compositor::default()
     }
 
+    pub fn has_mask(&self) -> bool {
+        !self.mask.is_empty()
+    }
+
     /// Feeds a fresh mask from the model; mixing it with the last one hides flicker.
     pub fn update_mask(&mut self, mask: &[f32], w: usize, h: usize) {
         if self.mask.len() != mask.len() || self.mask_w != w || self.mask_h != h {
