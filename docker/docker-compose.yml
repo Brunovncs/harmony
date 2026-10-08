@@ -57,8 +57,9 @@ services:
       # HARMONY_MAX_LOGIN_ATTEMPTS: "3"
       # HARMONY_LOCKOUT_MINUTES: "5,10,30,60"
 
-      # STUN servers handed to clients.
-      # HARMONY_STUN_URLS: "stun:stun.l.google.com:19302,stun:stun.cloudflare.com:3478"
+      # STUN servers handed to clients. None by default and none needed --
+      # setting them only slows connecting. See server/src/config.js.
+      # HARMONY_STUN_URLS: ""
 
       # A TURN relay, for clients that cannot manage even ICE-TCP. Costs money
       # per gigabyte -- try the TCP media port first.

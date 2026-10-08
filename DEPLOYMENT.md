@@ -210,7 +210,7 @@ a shared room password, not a credential that protects anything else.
 | `HARMONY_MEDIAMTX_API` | `http://127.0.0.1:9997` | MediaMTX control API, loopback only |
 | `HARMONY_POLL_INTERVAL_MS` | `1000` | How often liveness is re-read from MediaMTX |
 | `HARMONY_CLAIM_TTL_MS` | `30000` | How long a username stays reserved before publishing starts |
-| `HARMONY_STUN_URLS` | Google + Cloudflare | Comma-separated STUN servers handed to clients |
+| `HARMONY_STUN_URLS` | none | STUN servers handed to clients. Not needed -- every connection is client to server -- and setting them slows connecting |
 | `HARMONY_MAX_LOGIN_ATTEMPTS` | `3` | Wrong passwords allowed before a lockout |
 | `HARMONY_LOCKOUT_MINUTES` | `5,10,30,60` | Escalating lockout ladder, in minutes |
 | `HARMONY_TURN_URL` / `_USERNAME` / `_PASSWORD` | unset | Optional TURN relay — see [When a client still cannot connect](#when-a-client-still-cannot-connect) |
