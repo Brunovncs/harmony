@@ -18,6 +18,7 @@ mod prefs;
 mod session;
 mod text_field;
 mod theme;
+mod tray;
 mod ui;
 mod widgets;
 
@@ -37,7 +38,15 @@ fn main() {
     let smoke = std::env::args().any(|a| a == "--smoke");
     let store = core::settings::Store::load();
     i18n::set(i18n::resolve(&store.values.language));
+    let relaunched = std::env::var_os(core::update::RELAUNCH_VAR).is_some();
+    let Some(instance) = tray::Instance::claim(&core::settings::data_dir(), relaunched) else {
+        log::info!("Harmony is already running: its window was asked to show");
+        return;
+    };
 
+    // Closing the window never closes it (see `ui::tray`): it hides, or Harmony quits with it
+    // still open so a call is left properly. Quitting when it is gone covers the platforms
+    // where it can be closed some other way.
     gpui_platform::application().with_quit_mode(QuitMode::LastWindowClosed).run(move |cx: &mut gpui::App| {
         if let Err(e) = cx.text_system().add_fonts(theme::fonts()) {
             log::warn!("fonts did not load: {e}");
@@ -55,12 +64,14 @@ fn main() {
             window_background: WindowBackgroundAppearance::Opaque,
             ..Default::default()
         };
-        cx.open_window(options, |window, cx| {
-            let root = cx.new(|cx| ui::Root::new(window, cx));
-            cx.set_global(ui::overlay::RootHandle(root.downgrade()));
-            root
-        })
-        .expect("open the window");
+        let window = cx
+            .open_window(options, |window, cx| {
+                let root = cx.new(|cx| ui::Root::new(window, cx));
+                cx.set_global(ui::overlay::RootHandle(root.downgrade()));
+                root
+            })
+            .expect("open the window");
+        ui::tray::init(window.into(), &instance, cx);
         cx.activate(true);
 
         if smoke {

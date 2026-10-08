@@ -17,6 +17,8 @@ pub const RELEASES_PAGE: &str = "https://github.com/Brunovncs/harmony/releases/l
 const URL_VAR: &str = "HARMONY_UPDATE_URL";
 /// The version to claim instead of this one, to try updating from an older one.
 const PRETEND_VAR: &str = "HARMONY_PRETEND_VERSION";
+/// Set on the copy an update starts, while the one it replaces is still quitting.
+pub const RELAUNCH_VAR: &str = "HARMONY_RELAUNCHED";
 
 const ASSET_SUFFIX: &str = "-windows-x64.exe";
 
@@ -162,9 +164,16 @@ pub fn swap(exe: &Path, new: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Starts the program at `exe` again, with the arguments this one got.
+/// Starts the program at `exe` again, with the arguments this one got. The new copy waits for
+/// this one to quit instead of handing over to it as a second start would.
 pub fn relaunch(exe: &Path) -> Result<(), String> {
-    std::process::Command::new(exe).args(std::env::args_os().skip(1)).env_remove(PRETEND_VAR).spawn().map(drop).map_err(|e| e.to_string())
+    std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .env_remove(PRETEND_VAR)
+        .env(RELAUNCH_VAR, "1")
+        .spawn()
+        .map(drop)
+        .map_err(|e| e.to_string())
 }
 
 /// Deletes what an update left beside the program; true when the copy it replaced was there,

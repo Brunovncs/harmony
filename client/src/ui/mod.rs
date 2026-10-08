@@ -8,14 +8,14 @@ pub mod overlay;
 mod rail;
 pub mod server;
 pub mod settings;
+pub mod tray;
 pub mod updates;
 
-use crate::core::settings::same_server;
 use crate::prefs::prefs;
 use crate::session::{Session, SessionEvent};
 use crate::theme::{self, CustomColors, FONT, Theme, px, radius};
 use crate::widgets::*;
-use connect::{ConnectEvent, ConnectView};
+use connect::{ConnectEvent, ConnectView, Connected};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
@@ -28,11 +28,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 enum Screen {
-    /// `adding` when it is there to add another server to the rail.
-    Connect {
-        view: Entity<ConnectView>,
-        adding: bool,
-    },
+    Connect { view: Entity<ConnectView> },
     Server(Entity<ServerView>),
 }
 
@@ -73,10 +69,10 @@ impl Root {
             hotkeys::sync(cx);
             window.refresh();
         }));
-        let view = cx.new(|cx| ConnectView::new(None, false, window, cx));
+        let view = cx.new(|cx| ConnectView::new(None, window, cx));
         let mut root = Root {
             focus: cx.focus_handle(),
-            screen: Screen::Connect { view: view.clone(), adding: false },
+            screen: Screen::Connect { view: view.clone() },
             overlay: Overlay::default(),
             toasts: Vec::new(),
             next_toast: 0,
@@ -190,38 +186,39 @@ impl Render for Root {
 impl Root {
     /// The sign-in screen for the active server, which goes straight in when a sign-in is kept.
     pub fn show_connect(&mut self, error: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_connect(error, false, window, cx);
-    }
-
-    fn open_connect(&mut self, error: Option<String>, adding: bool, window: &mut Window, cx: &mut Context<Self>) {
         if let Screen::Server(v) = &self.screen {
             v.update(cx, |v, cx| v.shutdown(cx));
         }
         self.screen_subs.clear();
-        let view = cx.new(|cx| ConnectView::new(error, adding, window, cx));
+        let view = cx.new(|cx| ConnectView::new(error, window, cx));
         self.subscribe_connect(&view, window, cx);
-        self.screen = Screen::Connect { view, adding };
+        self.screen = Screen::Connect { view };
         self.overlay = Overlay::default();
         cx.notify();
     }
 
     fn subscribe_connect(&mut self, view: &Entity<ConnectView>, window: &mut Window, cx: &mut Context<Self>) {
         let sub = cx.subscribe_in(view, window, |this, _, ev: &ConnectEvent, window, cx| match ev {
-            ConnectEvent::Connected(done) => {
-                let done = done.as_ref();
-                let session = Session::start(
-                    done.api.clone(),
-                    done.cache.clone(),
-                    done.me.clone(),
-                    done.server_name.clone(),
-                    done.server_icon.clone(),
-                    done.ice_servers.clone(),
-                    cx,
-                );
-                this.open_server(session, window, cx);
-            }
+            ConnectEvent::Connected(done) => this.enter(done, window, cx),
         });
         self.screen_subs.push(sub);
+    }
+
+    /// Starts the session a sign-in handed over, in place of whatever was open.
+    fn enter(&mut self, done: &Connected, window: &mut Window, cx: &mut Context<Self>) {
+        if let Screen::Server(v) = &self.screen {
+            v.update(cx, |v, cx| v.shutdown(cx));
+        }
+        let session = Session::start(
+            done.api.clone(),
+            done.cache.clone(),
+            done.me.clone(),
+            done.server_name.clone(),
+            done.server_icon.clone(),
+            done.ice_servers.clone(),
+            cx,
+        );
+        self.open_server(session, window, cx);
     }
 
     fn open_server(&mut self, session: Entity<Session>, window: &mut Window, cx: &mut Context<Self>) {
@@ -235,20 +232,7 @@ impl Root {
             _ => {}
         });
         self.screen_subs.push(sub);
-        // The rail keeps the server's name and picture as the server last gave them.
-        self.screen_subs.push(cx.observe(&session, |_, session, cx| {
-            let s = session.read(cx);
-            let (url, name, icon) = (s.api.base(), s.server_name.clone(), s.server_icon.clone().unwrap_or_default());
-            let stale = prefs(cx).saved_server(&url).is_some_and(|saved| saved.name != name || saved.icon != icon);
-            if stale {
-                crate::prefs::set_prefs(cx, |p| {
-                    if let Some(saved) = p.saved_servers.iter_mut().find(|saved| same_server(&saved.url, &url)) {
-                        saved.name = name;
-                        saved.icon = icon;
-                    }
-                });
-            }
-        }));
+        self.screen_subs.push(cx.observe(&session, |_, session, cx| rail::keep_session_news(&session, cx)));
         let root = cx.entity().downgrade();
         let view = cx.new(|cx| ServerView::new(session, root, window, cx));
         self.screen = Screen::Server(view);

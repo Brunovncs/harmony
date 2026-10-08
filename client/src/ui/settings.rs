@@ -777,6 +777,20 @@ impl Settings {
             .flex()
             .flex_col()
             .gap(px(18.))
+            .when(cfg!(windows), |d| {
+                d.child(toggle_row(
+                    "close-to-tray",
+                    tr!("Close to the tray", "Fechar para a bandeja"),
+                    tr!(
+                        "Closing the window keeps Harmony running by the clock, calls included. Quit from its icon there.",
+                        "Fechar a janela deixa o Harmony rodando ao lado do relógio, inclusive em chamadas. Para sair, use o ícone dele ali."
+                    ),
+                    p.close_to_tray,
+                    t,
+                    cx,
+                    |cx| set_prefs(cx, |p| p.close_to_tray = !p.close_to_tray),
+                ))
+            })
             .child(toggle_row(
                 "hw",
                 tr!("Encode on the graphics card", "Codificar na placa de vídeo"),
