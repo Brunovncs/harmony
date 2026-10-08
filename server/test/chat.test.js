@@ -11,7 +11,9 @@ import { dirname, resolve } from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
-import { Chat, Emojis, ftsPhrase, mediaTypeOf, MAX_UPLOAD_BYTES } from '../src/chat.js';
+import {
+  Chat, Emojis, ftsPhrase, mediaTypeOf, mentionsIn, MAX_UPLOAD_BYTES,
+} from '../src/chat.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const serverEntry = resolve(here, '..', 'src', 'index.js');
@@ -613,6 +615,75 @@ describe('custom emoji', () => {
     const res = await api(`/api/channels/${textChannelId}/messages`, { token: ownerToken });
     const row = res.body.messages.find((m) => m.id === message);
     assert.deepEqual(row.reactions.map((r) => [r.emoji, r.count]), [[':doomed:', 1]]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Mentions
+// ---------------------------------------------------------------------------
+
+describe('reading mentions out of a message', () => {
+  const idOf = (name) => ({ boss: 1, member: 2 })[name] ?? null;
+
+  it('finds the people named', () => {
+    assert.deepEqual(mentionsIn('hey @boss and @member', idOf),
+      { userIds: [1, 2], everyone: false });
+  });
+
+  it('counts a name written twice once', () => {
+    // Writing somebody's name twice is emphasis, not two pings.
+    assert.deepEqual(mentionsIn('@boss @boss @boss', idOf).userIds, [1]);
+  });
+
+  it('ignores a name nobody has', () => {
+    assert.deepEqual(mentionsIn('@nobodyhere hello', idOf).userIds, []);
+  });
+
+  it('matches whatever case it was typed in', () => {
+    assert.deepEqual(mentionsIn('@BOSS', idOf).userIds, [1]);
+  });
+
+  it('DOES NOT NOTIFY AN EMAIL ADDRESS', () => {
+    // The lookbehind, which is the whole reason there is one.
+    assert.deepEqual(mentionsIn('write to me@boss.example', idOf).userIds, []);
+    assert.deepEqual(mentionsIn('@@boss', idOf).userIds, []);
+  });
+
+  it('reports @everyone separately, and not as a person', () => {
+    const result = mentionsIn('@everyone look at this', idOf);
+    assert.equal(result.everyone, true);
+    assert.deepEqual(result.userIds, []);
+  });
+});
+
+describe('mentions on a message', () => {
+  it('travel with it, as ids', async () => {
+    const posted = await api(`/api/channels/${textChannelId}/messages`, {
+      method: 'POST', body: { body: 'ping @member about this' }, token: ownerToken,
+    });
+    assert.equal(posted.status, 201);
+    const me = (await api('/api/accounts/me', { token: memberToken })).body.user;
+    assert.deepEqual(posted.body.message.mentions, [me.id],
+      'ids, so the client does not have to fold nicknames a second time');
+    assert.equal(posted.body.message.mentionsEveryone, false);
+  });
+
+  it('come back on history too, not only on the push', async () => {
+    // A field present on one path and missing on another is the worst
+    // case: it works until the pane is refreshed.
+    const history = await api(`/api/channels/${textChannelId}/messages`, {
+      token: memberToken,
+    });
+    const row = history.body.messages.find((m) => m.body.includes('ping @member'));
+    assert.equal(row.mentions.length, 1);
+  });
+
+  it('carries @everyone as its own flag', async () => {
+    const posted = await api(`/api/channels/${textChannelId}/messages`, {
+      method: 'POST', body: { body: '@everyone the server is up' }, token: memberToken,
+    });
+    assert.equal(posted.body.message.mentionsEveryone, true);
+    assert.deepEqual(posted.body.message.mentions, []);
   });
 });
 

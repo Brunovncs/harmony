@@ -89,6 +89,57 @@ const PAGE_SIZE = 50;
  */
 export const ftsPhrase = (query) => `"${String(query).replaceAll('"', '""')}"`;
 
+/**
+ * An @mention in message text.
+ *
+ * The body of the character class is USERNAME_RE from rooms.js, because a
+ * mention is a nickname and nothing else -- NOT a display name. Display
+ * names may contain spaces and capitals and two people may hold ones that
+ * look alike, so there is no answer to "who did they mean"; a nickname is
+ * unique, immutable and already folded.
+ *
+ * The lookbehind refuses a match that follows a word character or another
+ * @, so an email address in a message does not quietly notify somebody.
+ *
+ * THE CLIENT HAS A COPY of this, in app.js, because it has to draw the same
+ * thing it sends. If one changes the other has to.
+ */
+export const MENTION_RE = /(?<![\w@])@([a-z0-9][a-z0-9_-]{0,23})/gi;
+
+/** The one mention that is not a nickname. */
+export const EVERYONE = 'everyone';
+
+/**
+ * Who a message is addressed to.
+ *
+ * Computed from the text rather than stored, and that is deliberate. A
+ * mentions table would be a second source of truth for something the body
+ * already states: edit the text and the table is wrong, and nothing in the
+ * UI would show it. Nicknames cannot be changed, so the text cannot start
+ * meaning somebody else later.
+ *
+ * `idOf` takes a folded nickname and returns a user id or null, so this
+ * function needs no database of its own.
+ */
+export function mentionsIn(body, idOf) {
+  const text = String(body ?? '');
+  const userIds = [];
+  let everyone = false;
+
+  MENTION_RE.lastIndex = 0;
+  for (let m = MENTION_RE.exec(text); m; m = MENTION_RE.exec(text)) {
+    const name = m[1].toLowerCase();
+    if (name === EVERYONE) {
+      everyone = true;
+      continue;
+    }
+    const id = idOf(name);
+    // Deduped: writing somebody's name twice is emphasis, not two pings.
+    if (id && !userIds.includes(id)) userIds.push(id);
+  }
+  return { userIds, everyone };
+}
+
 export class Chat {
   #db;
   #dir;
@@ -741,7 +792,7 @@ export const publicClip = (c) => (c ? {
  * than throwing -- which is also exactly right for a message created one
  * line ago.
  */
-export const publicMessage = (m, reactions = []) => (m ? {
+export const publicMessage = (m, reactions = [], mentions = null) => (m ? {
   id: m.id,
   channelId: m.channel_id,
   userId: m.user_id,
@@ -751,5 +802,10 @@ export const publicMessage = (m, reactions = []) => (m ? {
   mediaType: m.media_type ?? null,
   pinned: Boolean(m.pinned),
   reactions,
+  // Ids, not names: the client already has the roster and would otherwise
+  // have to fold and match nicknames a second time to know whether one of
+  // them is you.
+  mentions: mentions?.userIds ?? [],
+  mentionsEveryone: Boolean(mentions?.everyone),
   createdAt: m.created_at,
 } : null);

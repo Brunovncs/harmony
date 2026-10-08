@@ -250,6 +250,15 @@ const CUES = {
   // One note, higher and shorter: it fires while people are talking and
   // should read as a notification rather than as an arrival.
   live: [[1046.5, 0]],
+  /*
+   * Somebody wrote your name.
+   *
+   * Three notes where everything else has one or two, and the only cue
+   * that goes up twice. It has to be recognisable from another room and
+   * unmistakable for an arrival, because it is the one cue that is asking
+   * for something rather than reporting it.
+   */
+  mention: [[880.0, 0], [1174.66, 0.08], [1396.91, 0.16]],
 };
 
 const CUE_GAIN = 0.07;

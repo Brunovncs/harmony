@@ -1484,6 +1484,112 @@ button.danger {
   height: 1.5em;
 }
 
+/* ---------- mentions ---------- */
+
+/*
+ * A name in a message.
+ *
+ * Tinted rather than merely coloured: a run of text with one accent-blue
+ * word in it reads as a link, and clicking it does nothing.
+ */
+.chat-msg .mention {
+  background: rgb(var(--accent-rgb) / 0.18);
+  color: var(--accent);
+  border-radius: 4px;
+  padding: 0 0.2em;
+  font-weight: 600;
+  white-space: nowrap;
+}
+/* Yours is the one worth finding in a wall of text. */
+.chat-msg .mention[data-me] {
+  background: rgb(var(--warn) / 0.22);
+  background: color-mix(in srgb, var(--warn) 22%, transparent);
+  color: var(--warn);
+}
+/*
+ * The whole row, when it is addressed to you.
+ *
+ * A bar down the side rather than a background wash, so it survives the
+ * hover highlight and does not fight the pinned marker -- which is the
+ * same bar in the accent colour, on the other side of the same rule.
+ */
+.chat-msg[data-mentions-me] {
+  box-shadow: inset 3px 0 0 var(--warn);
+  background: color-mix(in srgb, var(--warn) 7%, transparent);
+}
+
+/* A channel with something in it addressed to you. */
+.channel-list li[data-mention] .channel-name {
+  font-weight: 700;
+  color: var(--text);
+}
+.channel-list li[data-mention]::after {
+  content: '@';
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0.15rem 0.3rem;
+  border-radius: 999px;
+  background: var(--warn);
+  color: var(--bg);
+}
+
+/*
+ * Who you might mean.
+ *
+ * Fixed and positioned by script, like the other two popovers: it has to
+ * sit above a text box at the bottom of a column that scrolls.
+ */
+.mention-pop {
+  position: fixed;
+  z-index: 60;
+  width: min(320px, calc(100vw - 2rem));
+  max-height: 14rem;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  padding: 0.3rem;
+}
+.mention-pop ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.mention-pop li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.4rem;
+  border-radius: 6px;
+  cursor: pointer;
+  min-width: 0;
+}
+/* Driven by the keyboard as well as the mouse, so it is an attribute
+   rather than :hover -- arrowing down has to move the same highlight the
+   pointer does, or the two disagree about what Enter will pick. */
+.mention-pop li[data-active] {
+  background: rgb(var(--accent-rgb) / 0.22);
+}
+.mention-pop .mention-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mention-pop .mention-nick {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.mention-pop .mention-all {
+  font-weight: 600;
+}
+
 /* ---------- reactions ---------- */
 
 .chat-msg .reactions {

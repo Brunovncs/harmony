@@ -415,6 +415,19 @@ export class Realtime {
     }
   }
 
+  /**
+   * Send to everyone authenticated who passes a test.
+   *
+   * The test is supplied by the caller rather than evaluated here, because
+   * the only thing worth narrowing on so far is whether somebody may read a
+   * channel, and that question belongs with the routes that already ask it.
+   */
+  broadcastWhere(payload, allow) {
+    for (const [ws, client] of this.#clients) {
+      if (client.user && allow(client.user)) this.#send(ws, payload);
+    }
+  }
+
   #broadcastRoster(channelId) {
     this.broadcast({
       type: 'voice:roster',

@@ -659,6 +659,17 @@
     </div>
 
     <!--
+      Who you might mean, while you are typing an @.
+
+      Nicknames, because that is what a mention matches -- but each row
+      leads with the display name, since that is what people recognise and
+      what the finished message will show. Searching looks at both.
+    -->
+    <div class="mention-pop" id="mention-pop" hidden>
+      <ul id="mention-items"></ul>
+    </div>
+
+    <!--
       The emoji picker.
 
       One popover for two jobs: putting an emoji in what you are typing, and
@@ -803,6 +814,17 @@
                 <small
                   >Two short tones, synthesised rather than played from a file.
                   Rising means arriving, falling means leaving.</small
+                >
+              </span>
+            </label>
+
+            <label class="check">
+              <input type="checkbox" id="mention-sound" checked />
+              <span>
+                Play a sound when somebody writes your name
+                <small
+                  >Three rising notes, and the only cue that fires for a channel
+                  you are not looking at.</small
                 >
               </span>
             </label>

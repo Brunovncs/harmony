@@ -96,6 +96,14 @@ const DEFAULTS = {
    * you clicked.
    */
   recentEmoji: [],
+  /*
+   * A sound when somebody writes your name.
+   *
+   * Separate from voiceSounds, because it is a different question: that
+   * one is about a call you are already in, this one is the only thing
+   * that will reach you in a channel you are not looking at.
+   */
+  mentionSound: true,
   // Rolling clip buffer. Off by default: it is memory the user did not ask for.
   clipsEnabled: false,
   // GPU video encoding (NVENC / AMF / Quick Sync). 'auto' leaves Chromium to

@@ -138,6 +138,9 @@ const el = {
   chatNote: $('chat-note'),
   soundpad: $('soundpad'),
   chatEmoji: $('chat-emoji'),
+  mentionPop: $('mention-pop'),
+  mentionItems: $('mention-items'),
+  mentionSound: $('mention-sound'),
   emojiPop: $('emoji-pop'),
   emojiSearch: $('emoji-search'),
   emojiGrid: $('emoji-grid'),
@@ -387,6 +390,14 @@ const state = {
    * that scan times the number of emoji, for every message on screen.
    */
   emojis: { list: [], byName: new Map() },
+  /**
+   * Channels holding something addressed to you, by id.
+   *
+   * Client-side and not persisted: it answers "since I have been looking",
+   * which is the only question a mark on a sidebar row can honestly
+   * answer without a read-receipt table on the server.
+   */
+  mentioned: new Set(),
   /** The webcam publish, which is a SECOND stream under `<nickname>-cam`. */
   camera: { stream: null, publication: null, session: null },
   voice: new VoiceSession(),
@@ -1400,6 +1411,7 @@ function channelNodes(channel) {
   li.className = 'channel-row';
   li.dataset.id = String(channel.id);
   if (channel.id === state.voice.channelId) li.setAttribute('data-active', '');
+  if (state.mentioned.has(channel.id)) li.setAttribute('data-mention', '');
 
   const kind = document.createElement('span');
   kind.className = 'kind';
@@ -3258,6 +3270,8 @@ function renderChannelVideo() {
 
 async function openTextChannel(channel) {
   state.chat.channelId = channel.id;
+  // Opening it is reading it. The mark means "since I have been looking".
+  state.mentioned.delete(channel.id);
   state.chat.searching = false;
   state.chat.pendingFile = null;
   el.chatName.textContent = `#${channel.name}`;
@@ -3285,6 +3299,220 @@ function closeChat() {
   state.chat.channelId = null;
   if (el.voiceActive.hidden) el.voiceIdle.hidden = false;
   applyStage();
+}
+
+// ---------------------------------------------------------------------------
+// Mentions
+// ---------------------------------------------------------------------------
+
+/*
+ * THE SERVER HAS THE SAME REGEX, in chat.js, and it is the one that
+ * decides who gets notified. This copy only decides what is drawn. If one
+ * changes the other has to, or a name will light up for the person writing
+ * it and ping nobody.
+ *
+ * The body of the class is the nickname rule: a mention is a nickname and
+ * never a display name, because display names may repeat and may contain
+ * spaces, and "who did they mean" would have no answer.
+ */
+const MENTION_RE = /(?<![\w@])@([a-z0-9][a-z0-9_-]{0,23})/gi;
+
+/** The one mention that is not a person. */
+const EVERYONE = 'everyone';
+
+const userByNickname = (nickname) =>
+  [...state.users.values()].find((u) => u.nickname === nickname) ?? null;
+
+/**
+ * Draw one @name.
+ *
+ * Shows the display name while the text holds the nickname -- the same
+ * split as everywhere else in the app: the nickname is the identity, the
+ * display name is what people call each other. An @ that matches nobody is
+ * left as plain text, because it is plain text: somebody wrote an address,
+ * or a price, or nothing in particular.
+ */
+function mentionNode(raw, name) {
+  const everyone = name === EVERYONE;
+  const user = everyone ? null : userByNickname(name);
+  if (!everyone && !user) return document.createTextNode(raw);
+
+  const span = document.createElement('span');
+  span.className = 'mention';
+  span.textContent = everyone ? '@everyone' : `@${displayOf(user.id, user.nickname)}`;
+  if (everyone || user.id === state.auth.user?.id) span.setAttribute('data-me', '');
+  if (user) span.title = `@${user.nickname}`;
+  return span;
+}
+
+/** True if this message is addressed to the person reading it. */
+const mentionsMe = (message) => Boolean(
+  message.mentionsEveryone || message.mentions?.includes(state.auth.user?.id),
+);
+
+/**
+ * Ring for a message that names you.
+ *
+ * Driven by the push rather than by what is on screen, because the whole
+ * point is the channel you are NOT looking at. Your own message never
+ * rings: writing your own name is not news, and @everyone would otherwise
+ * ring for the person who sent it.
+ *
+ * The server only pushes messages from channels you may read, so there is
+ * nothing here about locked channels -- see toChannelReaders.
+ */
+function notifyMention(message) {
+  if (!mentionsMe(message)) return;
+  if (message.userId === state.auth.user?.id) return;
+
+  if (message.channelId !== state.chat.channelId) {
+    state.mentioned.add(message.channelId);
+    renderChannels();
+  }
+  if (state.settings?.mentionSound !== false) playCue('mention');
+}
+
+// --- the suggestion list ---------------------------------------------------
+
+/**
+ * Where the @ being typed starts, or -1.
+ *
+ * Only the token the caret is actually in: typing a second name must not
+ * re-open the list on the first one, and moving the caret away from a name
+ * has to close it. The @ must start a word, which is the same rule the
+ * mention regex uses, so the list cannot appear inside an email address.
+ */
+function mentionTokenStart() {
+  const value = el.chatInput.value;
+  const caret = el.chatInput.selectionStart ?? value.length;
+  const at = value.lastIndexOf('@', caret - 1);
+  if (at < 0) return -1;
+  if (at > 0 && /[\w@]/.test(value[at - 1])) return -1;
+  // Anything that cannot be in a nickname ends the token.
+  if (/[^a-z0-9_-]/i.test(value.slice(at + 1, caret))) return -1;
+  return at;
+}
+
+let mentionMatches = [];
+let mentionActive = 0;
+
+/** Everyone the typed fragment could mean, best first. */
+function mentionCandidates(query) {
+  const q = query.toLowerCase();
+  const people = [...state.users.values()]
+    .filter((u) => u.nickname.includes(q)
+      || displayOf(u.id, u.nickname).toLowerCase().includes(q))
+    // A name that STARTS with what you typed is what you meant far more
+    // often than one that merely contains it.
+    .sort((a, b) => {
+      const rank = (u) => (u.nickname.startsWith(q) ? 0 : 1);
+      return rank(a) - rank(b)
+        || displayOf(a.id, a.nickname).localeCompare(displayOf(b.id, b.nickname));
+    })
+    .slice(0, 8)
+    .map((u) => ({ nickname: u.nickname, label: displayOf(u.id, u.nickname), user: u }));
+
+  // Last, not first: it is the loudest thing on the list and should not be
+  // what a blind Enter picks.
+  if (EVERYONE.startsWith(q)) {
+    people.push({ nickname: EVERYONE, label: 'everyone', everyone: true });
+  }
+  return people;
+}
+
+function renderMentionList() {
+  el.mentionItems.replaceChildren(...mentionMatches.map((match, index) => {
+    const li = document.createElement('li');
+    if (index === mentionActive) li.setAttribute('data-active', '');
+    li.dataset.nickname = match.nickname;
+
+    if (match.everyone) {
+      const all = document.createElement('span');
+      all.className = 'mention-name mention-all';
+      all.textContent = '@everyone';
+      const note = document.createElement('span');
+      note.className = 'mention-nick';
+      note.textContent = 'notifies the whole server';
+      li.append(all, note);
+    } else {
+      li.append(avatarEl(faceOf(match.user.id, match.nickname), 'tiny'));
+      const name = document.createElement('span');
+      name.className = 'mention-name';
+      name.textContent = match.label;
+      li.append(name);
+      // The nickname is shown even when it equals the display name,
+      // because it is what actually goes in the message.
+      const nick = document.createElement('span');
+      nick.className = 'mention-nick';
+      nick.textContent = `@${match.nickname}`;
+      li.append(nick);
+    }
+
+    // pointerdown, not click: clicking moves focus out of the input first,
+    // and the blur handler would close the list before the click landed.
+    li.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      acceptMention(index);
+    });
+    li.addEventListener('pointerenter', () => {
+      mentionActive = index;
+      renderMentionList();
+    });
+    return li;
+  }));
+}
+
+function closeMentions() {
+  el.mentionPop.hidden = true;
+  mentionMatches = [];
+}
+
+/** Open, update or close the list for whatever is under the caret. */
+function updateMentions() {
+  const at = mentionTokenStart();
+  if (at < 0) return closeMentions();
+
+  const caret = el.chatInput.selectionStart ?? el.chatInput.value.length;
+  mentionMatches = mentionCandidates(el.chatInput.value.slice(at + 1, caret));
+  if (!mentionMatches.length) return closeMentions();
+
+  mentionActive = Math.min(mentionActive, mentionMatches.length - 1);
+  el.mentionPop.hidden = false;
+  renderMentionList();
+
+  // Above the box, where the box is: the composer sits at the bottom of a
+  // column whose width changes with the member list, so there is nothing
+  // to anchor it to in CSS.
+  const anchor = el.chatInput.getBoundingClientRect();
+  const box = el.mentionPop.getBoundingClientRect();
+  const left = Math.min(
+    Math.max(8, anchor.left),
+    Math.max(8, window.innerWidth - box.width - 8),
+  );
+  const above = anchor.top - box.height - 6;
+  el.mentionPop.style.left = `${left}px`;
+  el.mentionPop.style.top = above >= 8
+    ? `${above}px`
+    : `${Math.min(anchor.bottom + 6, window.innerHeight - box.height - 8)}px`;
+  return undefined;
+}
+
+/** Put the chosen nickname in, replacing what was typed of it. */
+function acceptMention(index) {
+  const match = mentionMatches[index];
+  const at = mentionTokenStart();
+  if (!match || at < 0) return closeMentions();
+
+  const input = el.chatInput;
+  const caret = input.selectionStart ?? input.value.length;
+  // A trailing space, because the next thing typed is a word and not more
+  // of the name -- and without it the list stays open over what follows.
+  const insert = `@${match.nickname} `;
+  input.value = input.value.slice(0, at) + insert + input.value.slice(caret);
+  const after = at + insert.length;
+  input.setSelectionRange(after, after);
+  input.focus();
+  return closeMentions();
 }
 
 // ---------------------------------------------------------------------------
@@ -3378,17 +3606,32 @@ function renderBody(target, body) {
   let last = 0;
   let replaced = 0;
 
-  SHORTCODE_RE.lastIndex = 0;
-  for (let m = SHORTCODE_RE.exec(text); m; m = SHORTCODE_RE.exec(text)) {
-    const name = m[1].toLowerCase();
-    const custom = state.emojis.byName.get(name);
-    const standard = custom ? null : emojiByShortcode(name);
-    if (!custom && !standard) continue;
+  // One scan for both kinds of token. Two passes would mean the second one
+  // walking over nodes the first had already made, and a :name: inside
+  // somebody's nickname deciding which pass won.
+  const TOKENS = new RegExp(`${SHORTCODE_RE.source}|${MENTION_RE.source}`, 'gi');
+  for (let m = TOKENS.exec(text); m; m = TOKENS.exec(text)) {
+    const [whole, shortcode, mention] = m;
+    let node = null;
+
+    if (shortcode) {
+      const name = shortcode.toLowerCase();
+      const custom = state.emojis.byName.get(name);
+      const standard = custom ? null : emojiByShortcode(name);
+      if (custom) node = customEmojiImg(custom);
+      else if (standard) node = document.createTextNode(standard);
+    } else if (mention) {
+      const drawn = mentionNode(whole, mention.toLowerCase());
+      // A text node back means it matched nobody, so leave the text where
+      // it is rather than cutting it out and putting it back.
+      if (drawn.nodeType !== Node.TEXT_NODE) node = drawn;
+    }
+    if (!node) continue;
 
     if (m.index > last) target.append(document.createTextNode(text.slice(last, m.index)));
-    target.append(custom ? customEmojiImg(custom) : document.createTextNode(standard));
-    last = m.index + m[0].length;
-    replaced += 1;
+    target.append(node);
+    last = m.index + whole.length;
+    if (shortcode) replaced += 1;
   }
   if (last < text.length) target.append(document.createTextNode(text.slice(last)));
 
@@ -3688,6 +3931,9 @@ function messageRow(message) {
   // Text nodes and images only -- see renderBody. A chat message is the most
   // obvious place in the app for someone to try injecting markup.
   if (renderBody(text, message.body)) row.setAttribute('data-emoji-only', '');
+  if (mentionsMe(message) && message.userId !== state.auth.user?.id) {
+    row.setAttribute('data-mentions-me', '');
+  }
 
   if (message.attachmentHash) {
     // harmony://app/media/<hash> -- same-origin, so the CSP allows it, and the
@@ -3870,6 +4116,9 @@ async function sendMessage() {
   if (!body && !file) return;
 
   el.chatInput.value = '';
+  // The box it was tracking is empty now, and nothing it could offer would
+  // go anywhere.
+  closeMentions();
   state.chat.pendingFile = null;
   el.chatNote.textContent = '';
 
@@ -4384,6 +4633,9 @@ function onRealtimeEvent(msg) {
       break;
 
     case 'message':
+      // Before the channel filter, on purpose: a mention in a channel you
+      // are not looking at is the only one worth making a noise about.
+      notifyMention(msg.message);
       if (msg.message.channelId === state.chat.channelId && !state.chat.searching) {
         state.chat.messages.push(msg.message);
         renderChat();
@@ -6499,6 +6751,7 @@ el.voiceConfig.addEventListener('click', () => {
   el.devicesDialog.showModal();
   renderThemes();
   el.voiceSounds.checked = state.settings?.voiceSounds !== false;
+  el.mentionSound.checked = state.settings?.mentionSound !== false;
   applyMicTuning();
   startMicMeter();
   refreshVoiceDevices().catch((err) => deviceNote(err.message));
@@ -6597,6 +6850,50 @@ el.soundpadFile.addEventListener('change', () => {
 el.chatForm.addEventListener('submit', (event) => {
   event.preventDefault();
   sendMessage();
+});
+
+/*
+ * The suggestion list follows the caret, not just the keystrokes.
+ *
+ * selectionchange rather than only 'input', because clicking into the
+ * middle of a half-typed name has to open the list and clicking out of one
+ * has to close it -- neither of which fires an input event.
+ */
+el.chatInput.addEventListener('input', () => updateMentions());
+document.addEventListener('selectionchange', () => {
+  if (document.activeElement === el.chatInput) updateMentions();
+});
+el.chatInput.addEventListener('blur', () => closeMentions());
+
+el.chatInput.addEventListener('keydown', (event) => {
+  if (el.mentionPop.hidden) return;
+
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    const step = event.key === 'ArrowDown' ? 1 : -1;
+    mentionActive = (mentionActive + step + mentionMatches.length) % mentionMatches.length;
+    renderMentionList();
+    return;
+  }
+  // Enter and Tab both take the highlighted name. Enter has to be stopped
+  // from reaching the form, or choosing a name also sends the message.
+  if (event.key === 'Enter' || event.key === 'Tab') {
+    event.preventDefault();
+    acceptMention(mentionActive);
+    return;
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeMentions();
+  }
+});
+
+el.mentionSound.addEventListener('change', async () => {
+  await harmony.settings.set({ mentionSound: el.mentionSound.checked });
+  state.settings = await harmony.settings.get();
+  // Played on the way on, so the setting demonstrates itself. The same
+  // thing the voice sounds box does.
+  if (el.mentionSound.checked) playCue('mention');
 });
 
 el.chatEmoji.addEventListener('click', () => {

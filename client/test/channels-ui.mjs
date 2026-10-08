@@ -650,6 +650,133 @@ async function run() {
     `${unreacted} chips left`,
   );
 
+  // --- mentions ----------------------------------------------------------
+  //
+  // The suggestion list is the half that can only be tested by typing: it
+  // keys off where the caret is, not off the value, so setting the box and
+  // firing 'input' is exactly the path a person takes.
+  await cdp.evaluate(`
+    const input = document.getElementById('chat-input');
+    input.focus();
+    input.value = 'hey @pedro';
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  `);
+  await waitFor(cdp, "!document.getElementById('mention-pop').hidden", {
+    label: 'the mention suggestions',
+  });
+  const suggestions = await cdp.evaluate(`
+    const rows = [...document.querySelectorAll('#mention-items li')];
+    return {
+      count: rows.length,
+      nicknames: rows.map((li) => li.dataset.nickname),
+      active: rows.findIndex((li) => li.hasAttribute('data-active')),
+    };
+  `);
+  check(
+    'typing an @ suggests who you might mean, with one already highlighted',
+    suggestions.count > 0 && suggestions.nicknames.includes('pedrolucas')
+      && suggestions.active === 0,
+    `${suggestions.count}: ${suggestions.nicknames.join(', ')}`,
+  );
+
+  // @everyone is offered, and offered LAST -- it is the loudest thing on
+  // the list and should not be what a blind Enter picks.
+  await cdp.evaluate(`
+    const input = document.getElementById('chat-input');
+    input.value = '@e';
+    input.setSelectionRange(2, 2);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  `);
+  await sleep(300);
+  const withEveryone = await cdp.evaluate(
+    "return [...document.querySelectorAll('#mention-items li')]"
+    + ".map((li) => li.dataset.nickname);",
+  );
+  check(
+    '@everyone is on the list, and never first',
+    withEveryone.includes('everyone') && withEveryone[0] !== 'everyone',
+    withEveryone.join(', '),
+  );
+
+  // Enter takes the highlighted name and must NOT also send the message.
+  await cdp.evaluate(`
+    const input = document.getElementById('chat-input');
+    input.value = 'hello @pedro';
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  `);
+  await sleep(300);
+  // Counted before, not assumed to be zero: earlier blocks left messages in
+  // the log, and "nothing was sent" means nothing NEW.
+  const sentBefore = await cdp.evaluate(
+    "return document.querySelectorAll('#chat-log .chat-msg').length;",
+  );
+  await cdp.evaluate(`
+    document.getElementById('chat-input').dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    );
+    return true;
+  `);
+  await sleep(300);
+  const accepted = await cdp.evaluate(`
+    return {
+      value: document.getElementById('chat-input').value,
+      listOpen: !document.getElementById('mention-pop').hidden,
+      sent: document.querySelectorAll('#chat-log .chat-msg').length,
+    };
+  `);
+  check(
+    'Enter completes the name instead of sending the message',
+    accepted.value === 'hello @pedrolucas ' && accepted.listOpen === false
+      && accepted.sent === sentBefore,
+    `"${accepted.value}", list open ${accepted.listOpen}, ${accepted.sent} sent`,
+  );
+
+  await cdp.evaluate("document.getElementById('chat-form').requestSubmit(); return true;");
+  await waitFor(cdp, "document.querySelectorAll('#chat-log .chat-msg').length > 0", {
+    label: 'the mention message',
+  });
+  const drawn = await cdp.evaluate(`
+    const msg = [...document.querySelectorAll('#chat-log .chat-msg')].pop();
+    const chip = msg.querySelector('.mention');
+    return {
+      chip: chip?.textContent ?? null,
+      mine: chip?.hasAttribute('data-me') ?? false,
+      // Your OWN message never marks the row, however many times it says
+      // your name: writing it is not news.
+      rowMarked: msg.hasAttribute('data-mentions-me'),
+    };
+  `);
+  check(
+    'a mention is drawn as a chip, and your own message does not flag itself',
+    drawn.chip !== null && drawn.mine === true && drawn.rowMarked === false,
+    `chip ${JSON.stringify(drawn.chip)}, row marked ${drawn.rowMarked}`,
+  );
+
+  // An @ that matches nobody stays plain text, and so does an email
+  // address -- nothing to notify, so nothing to highlight.
+  await cdp.evaluate(
+    `${setInput('chat-input', 'write to me@example.test and @nobodyatall')} return true;`,
+  );
+  await cdp.evaluate("document.getElementById('chat-form').requestSubmit(); return true;");
+  await sleep(900);
+  const plain = await cdp.evaluate(`
+    const msg = [...document.querySelectorAll('#chat-log .chat-msg')].pop();
+    return {
+      chips: msg.querySelectorAll('.mention').length,
+      text: msg.querySelector('.text').textContent,
+    };
+  `);
+  check(
+    'an email address and an unknown name are left as text',
+    plain.chips === 0,
+    `${plain.chips} chips in ${JSON.stringify(plain.text)}`,
+  );
+
   // --- the soundpad -----------------------------------------------------
   /*
    * The first clip goes in THROUGH THE UI -- the file input and the naming

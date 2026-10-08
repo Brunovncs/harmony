@@ -29,7 +29,7 @@ import {
 import { Realtime } from './realtime.js';
 import {
   Chat, Soundpad, Emojis,
-  publicMessage, publicClip, publicEmoji, allowedTypes, mediaTypeOf,
+  publicMessage, publicClip, publicEmoji, allowedTypes, mediaTypeOf, mentionsIn,
   MAX_UPLOAD_BYTES, MAX_AVATAR_BYTES, MAX_CLIP_BYTES, MAX_EMOJI_BYTES, MAX_EMOJIS,
 } from './chat.js';
 
@@ -748,22 +748,47 @@ function readableChannel(req, id) {
 }
 
 /**
- * publicMessage over a list, with everyone's reactions attached.
+ * publicMessage over a list, with its reactions and its mentions attached.
  *
- * Here rather than inside publicMessage because the reactions are a second
- * query: doing it per message would make a fifty-row page fifty queries.
- * Every route that hands a client a message goes through this, so a
- * reaction strip can never be missing from one of them and present in
- * another -- the client would then draw it from the pushed copy and lose it
- * on the next refresh.
+ * Here rather than inside publicMessage because both need something it has
+ * not got: the reactions are a second query, and the mentions need the
+ * nickname table. Doing either per message would make a fifty-row page
+ * fifty lookups.
+ *
+ * EVERY route that hands a client a message goes through this. A field
+ * missing from one of them and present in another is the worst case: the
+ * client draws it from the pushed copy and then loses it on the next
+ * refresh, which looks like the feature working intermittently.
  */
-function withReactions(messages) {
+function forClient(messages) {
   const list = [].concat(messages).filter(Boolean);
   const byId = chat.reactionsFor(list.map((m) => m.id));
-  return list.map((m) => publicMessage(m, byId.get(m.id) ?? []));
+  // Built once for the page. Eleven people on a friends' server, so the map
+  // is cheaper than the eleven-row query it replaces per message.
+  const ids = new Map(accounts.list().map((u) => [u.nickname, u.id]));
+  const idOf = (nickname) => ids.get(nickname) ?? null;
+  return list.map(
+    (m) => publicMessage(m, byId.get(m.id) ?? [], mentionsIn(m.body, idOf)),
+  );
 }
 
-const oneWithReactions = (message) => withReactions([message])[0] ?? null;
+const oneForClient = (message) => forClient([message])[0] ?? null;
+
+/**
+ * Push something about a message to everyone who may read where it lives.
+ *
+ * An open channel is everybody, which is the plain broadcast. A password
+ * channel is only the people holding a grant -- otherwise every message in
+ * it reaches every connected client and is merely not drawn, which is not
+ * the same thing as not being sent. It matters more now than it did: a
+ * client that receives a message it cannot read would ring a mention bell
+ * for a conversation it is not in.
+ */
+function toChannelReaders(channelId, payload) {
+  const channel = channels.get(channelId);
+  if (!channel?.password_hash) return realtime?.broadcast(payload);
+  return realtime?.broadcastWhere(payload, (user) => channels.hasGrant(channelId, user.id));
+}
 
 app.get('/api/channels/:id/messages', requireLogin, (req, res) => {
   const id = Number.parseInt(req.params.id, 10);
@@ -772,10 +797,10 @@ app.get('/api/channels/:id/messages', requireLogin, (req, res) => {
 
   const before = Number.parseInt(req.query.before ?? '', 10);
   return res.json({
-    messages: withReactions(
+    messages: forClient(
       chat.history(id, { before: Number.isFinite(before) ? before : undefined }),
     ),
-    pinned: withReactions(chat.pinned(id)),
+    pinned: forClient(chat.pinned(id)),
   });
 });
 
@@ -792,8 +817,8 @@ app.post('/api/channels/:id/messages', requireLogin, (req, res) => {
   });
   if (!result.ok) return res.status(400).json({ error: result.error });
 
-  const message = oneWithReactions(result.message);
-  realtime?.broadcast({ type: 'message', message });
+  const message = oneForClient(result.message);
+  toChannelReaders(id, { type: 'message', message });
   return res.status(201).json({ message });
 });
 
@@ -801,8 +826,8 @@ app.post('/api/messages/:id/pin', requireLogin, (req, res) => {
   const id = Number.parseInt(req.params.id, 10);
   const result = chat.setPinned(id, req.body?.pinned !== false);
   if (!result.ok) return res.status(404).json({ error: result.error });
-  const message = oneWithReactions(result.message);
-  realtime?.broadcast({ type: 'message:updated', message });
+  const message = oneForClient(result.message);
+  toChannelReaders(message.channelId, { type: 'message:updated', message });
   return res.json({ message });
 });
 
@@ -821,7 +846,9 @@ app.post('/api/messages/:id/delete', requireLogin, (req, res) => {
 
   const result = chat.remove(id);
   if (!result.ok) return res.status(404).json({ error: result.error });
-  realtime?.broadcast({ type: 'message:deleted', id, channelId: existing.channel_id });
+  toChannelReaders(existing.channel_id, {
+    type: 'message:deleted', id, channelId: existing.channel_id,
+  });
   return res.json({ ok: true });
 });
 
@@ -855,7 +882,7 @@ app.post('/api/messages/:id/react', requireLogin, (req, res) => {
     });
   }
 
-  realtime?.broadcast({
+  toChannelReaders(existing.channel_id, {
     type: 'message:reactions',
     id,
     channelId: existing.channel_id,
@@ -870,7 +897,7 @@ app.get('/api/channels/:id/search', requireLogin, (req, res) => {
   if (!channel) return res.status(404).json({ error: 'no_such_channel' });
 
   const { mode, results } = chat.search(id, req.query.q);
-  return res.json({ mode, results: withReactions(results) });
+  return res.json({ mode, results: forClient(results) });
 });
 
 /**
