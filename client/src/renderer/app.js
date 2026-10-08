@@ -4647,9 +4647,39 @@ function messageRow(message) {
     hour: '2-digit', minute: '2-digit',
   });
 
+  /*
+   * The controls, as a badge that floats over the top-right corner.
+   *
+   * In the flow they were three labelled buttons on every row, so a quiet
+   * channel read as a column of the word "Delete" rather than as a
+   * conversation. Out of the flow they cost nothing until the pointer is
+   * on the message.
+   *
+   * The LABEL stays as the button's textContent and is collapsed by
+   * font-size: 0, with the glyph drawn from data-glyph -- the same trick
+   * the voice panel uses, for the same two reasons: a screen reader still
+   * reads "Delete", and the test that clicks these finds them by their
+   * words.
+   */
+  const tools = document.createElement('span');
+  tools.className = 'msg-tools';
+
+  const react = document.createElement('button');
+  react.className = 'msg-tool react-btn';
+  react.dataset.glyph = '\u{1F642}';
+  react.textContent = 'React';
+  react.title = 'Add a reaction';
+  react.addEventListener('click', () => openEmojiPicker(react, (value) => {
+    closeEmojiPicker();
+    toggleReaction(message.id, value);
+  }));
+
   const pin = document.createElement('button');
-  pin.className = 'ghost small';
+  pin.className = 'msg-tool';
+  pin.dataset.glyph = '\u{1F4CC}';
   pin.textContent = message.pinned ? 'Unpin' : 'Pin';
+  pin.title = pin.textContent;
+  if (message.pinned) pin.setAttribute('data-on', '');
   pin.addEventListener('click', async () => {
     try {
       await harmony.api.pinMessage(state.server, message.id, !message.pinned);
@@ -4658,23 +4688,20 @@ function messageRow(message) {
     }
   });
 
-  const react = document.createElement('button');
-  react.className = 'ghost small react-btn';
-  react.textContent = '\u{1F642}';
-  react.title = 'Add a reaction';
-  react.addEventListener('click', () => openEmojiPicker(react, (value) => {
-    closeEmojiPicker();
-    toggleReaction(message.id, value);
-  }));
-
-  row.append(who, text, when, react, pin);
+  tools.append(react, pin);
+  // when before text now: the badge owns the right-hand end of the row, and
+  // a timestamp pushed under it by margin-left:auto would spend every hover
+  // hidden behind it.
+  row.append(who, when, text, tools);
 
   // Your own, or anybody's if you are an admin -- the same rule the server
   // enforces, so a button that appears always works.
   if (message.userId === state.auth.user?.id || isAdmin()) {
     const remove = document.createElement('button');
-    remove.className = 'ghost small danger';
+    remove.className = 'msg-tool msg-tool-danger';
+    remove.dataset.glyph = '\u{1F5D1}';
     remove.textContent = 'Delete';
+    remove.title = 'Delete';
     remove.addEventListener('click', async () => {
       if (!await askConfirm('Delete this message?', { okLabel: 'Delete' })) return;
       try {
@@ -4684,7 +4711,7 @@ function messageRow(message) {
         showChannelsError(err.message);
       }
     });
-    row.append(remove);
+    tools.append(remove);
   }
 
   // Last, and only when there are any: the strip is a flex line of its own,

@@ -1494,14 +1494,19 @@ button.danger {
 .chat-msg:hover {
   background: rgb(var(--tint-rgb) / 0.04);
 }
+/* The anchor for the controls badge, which is absolute. */
+.chat-msg {
+  position: relative;
+}
 .chat-msg .who {
   font-weight: 600;
   flex: 0 0 auto;
 }
+/* Beside the name, not pushed to the far right: the badge lives in that
+   corner now and would sit on top of it on every hover. */
 .chat-msg .when {
   font-size: 0.75rem;
   opacity: 0.5;
-  margin-left: auto;
   flex: 0 0 auto;
 }
 .chat-msg .text {
@@ -1910,6 +1915,92 @@ button.danger {
 }
 .chat-msg[data-pinned] {
   box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* ---------- the controls on a message ---------- */
+
+/*
+ * A badge over the top-right corner, appearing on hover.
+ *
+ * Deliberately overlapping the row's top edge rather than sitting inside
+ * it. A badge contained in a short row has nowhere to go but on top of the
+ * words; lifted half out of it, it covers the gap between two messages,
+ * which is the one part of a chat log that never has anything in it.
+ *
+ * pointer-events while hidden, not just opacity: an invisible row of
+ * buttons that still takes clicks is worse than no buttons, because the
+ * click lands somewhere and the person cannot see where.
+ */
+.msg-tools {
+  position: absolute;
+  /* -0.5rem, not more: the chat log has exactly that much top padding, so
+     the badge on the very first message lifts to the edge of the pane and
+     not past it, where the scroll container would cut the top off it. */
+  top: -0.5rem;
+  right: 0.5rem;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  padding: 0.15rem;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 90ms ease-out;
+}
+/*
+ * focus-within as well as hover, and it is not decoration: without it the
+ * controls are unreachable by keyboard, since a button inside something
+ * with opacity 0 and no pointer events can still be tabbed to and then
+ * pressed invisibly.
+ */
+.chat-msg:hover .msg-tools,
+.msg-tools:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+.msg-tool {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 5px;
+  padding: 0.25rem 0.35rem;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  /* The label is for screen readers and for the test that clicks these by
+     their words; the glyph is the button. */
+  font-size: 0;
+  line-height: 1;
+}
+.msg-tool::before {
+  content: attr(data-glyph);
+  font-size: 0.95rem;
+  line-height: 1;
+  font-variant-emoji: text;
+}
+.msg-tool:hover {
+  background: rgb(var(--tint-rgb) / 0.12);
+}
+/*
+ * Its own class rather than the shared .danger, which paints a solid red
+ * BUTTON -- right for "Delete the group", wrong for a 16-pixel glyph in a
+ * badge. The same goes for .ghost, whose background and :hover:not(:disabled)
+ * both outrank anything a single class here could say.
+ */
+.msg-tool-danger {
+  color: var(--danger-soft);
+}
+.msg-tool-danger:hover {
+  background: rgb(var(--danger-rgb) / 0.2);
+}
+/* Already pinned: the button now unpins, and should look like a state
+   rather than an action waiting to happen. */
+.msg-tool[data-on] {
+  color: var(--accent);
 }
 .pinned-strip {
   border: 1px solid rgb(var(--tint-rgb) / 0.12);
