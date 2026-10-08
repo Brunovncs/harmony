@@ -494,6 +494,11 @@ const state = {
   cameras: [],
   audioInputs: [],
   processes: [],
+  /**
+   * What the person picked in "Exclude audio" since the picker opened, or
+   * null for "not touched" -- in which case Harmony itself is excluded.
+   */
+  excludeChoice: null,
   activeKind: 'screen',
   selectedSource: null,
   /** True while the picker is being used to swap the source of a live stream. */
@@ -6604,6 +6609,7 @@ function onRealtimeEvent(msg) {
 // ---------------------------------------------------------------------------
 
 async function enterPicker() {
+  state.excludeChoice = null;
   const target = state.share.target;
   el.pickerUsername.textContent = target ? `#${target.name}` : state.session.username;
   state.selectedSource = null;
@@ -6765,12 +6771,34 @@ async function loadProcesses() {
   none.textContent = 'Nothing — share all system audio';
   el.excludeApp.append(none);
 
-  for (const proc of state.processes) {
+  /*
+   * Harmony first, and chosen unless the person has picked something else.
+   *
+   * A whole-screen share sends everything the machine plays -- and that
+   * includes Harmony playing everybody else's voices, the soundpad and the
+   * join sounds. Without this, the channel hears itself back out of your
+   * stream, a beat late. Still a choice: picking "Nothing" shares it all.
+   */
+  const self = state.processes.find((p) => p.self);
+  const others = state.processes.filter((p) => !p.self);
+  if (self) {
+    const option = document.createElement('option');
+    option.value = String(self.pid);
+    option.textContent = 'Harmony — voices, soundpad and sounds (recommended)';
+    el.excludeApp.append(option);
+  }
+  for (const proc of others) {
     const option = document.createElement('option');
     option.value = String(proc.pid);
     option.textContent = `${proc.name} — ${proc.title.slice(0, 40)}`;
     el.excludeApp.append(option);
   }
+
+  const wanted = state.excludeChoice ?? (self ? String(self.pid) : '');
+  el.excludeApp.value = [...el.excludeApp.options].some((o) => o.value === wanted) ? wanted : '';
+  // The list arrives after the picker has drawn its note (loadSources does
+  // not wait for it), so the note has to catch up with the default here.
+  updateAudioNote();
 }
 
 function message(text) {
@@ -9143,7 +9171,12 @@ el.tabs.forEach((tab) => {
 
 el.pickerRefresh.addEventListener('click', loadSources);
 el.fallback.addEventListener('change', updateAudioNote);
-el.excludeApp.addEventListener('change', updateAudioNote);
+el.excludeApp.addEventListener('change', () => {
+  // Remembered for as long as this picker is open, so Refresh does not put
+  // Harmony back after somebody deliberately chose otherwise.
+  state.excludeChoice = el.excludeApp.value;
+  updateAudioNote();
+});
 el.audioInput.addEventListener('change', () => {
   harmony.settings.set({ audioInputId: el.audioInput.value }).catch(() => {});
   updateAudioNote();
@@ -9183,6 +9216,7 @@ el.livePriority.addEventListener('change', applyLiveQuality);
  * applySourceChange() replaces the track under the existing connection.
  */
 async function openChangeSource() {
+  state.excludeChoice = null;
   state.changingSource = true;
   state.selectedSource = null;
   el.startStream.disabled = true;

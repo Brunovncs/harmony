@@ -145,6 +145,19 @@ Get-Process |
             });
           }
         }
+        /*
+         * Harmony itself, marked, and always present.
+         *
+         * Its window belongs to this process, so it is normally in the list
+         * already -- but not while the window is minimised to nothing, and
+         * it is the one entry the picker selects by default (a whole-screen
+         * share would otherwise send everybody's voices back into the
+         * channel). Excluding this PID excludes its process tree, which is
+         * where Electron actually plays audio: the audio service is a child.
+         */
+        const self = byPid.get(process.pid) ?? { pid: process.pid, title: 'Harmony' };
+        byPid.set(process.pid, { ...self, name: 'Harmony', self: true });
+
         resolve([...byPid.values()].sort((a, b) => a.name.localeCompare(b.name)));
       },
     );
