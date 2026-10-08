@@ -341,7 +341,7 @@ impl ServerView {
                         .child(
                             tool_button(("stop-share", id), "screen-share-off", false, gpui::white(), t)
                                 .tooltip(tip(tr!("Stop sharing", "Parar de compartilhar"), t))
-                                .on_click(cx.listener(|this, _, window, cx| this.toggle_screen(window, cx))),
+                                .on_click(cx.listener(|this, _, _, cx| this.stop_screen(cx))),
                         )
                     })
                     .when(local && kind == TileKind::Camera, |d| {

@@ -635,13 +635,19 @@ impl ServerView {
                             panel_button("screen-toggle", if screen_on { "screen-share-off" } else { "screen-share" }, screen_on, t)
                                 .tooltip(tip(
                                     if screen_on {
-                                        tr!("Stop sharing", "Parar de compartilhar")
+                                        tr!("Change or stop what you share", "Trocar ou parar o que você compartilha")
                                     } else {
                                         tr!("Share your screen", "Compartilhar a tela")
                                     },
                                     t,
                                 ))
-                                .on_click(cx.listener(|this, _, window, cx| this.toggle_screen(window, cx))),
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                                        cx.stop_propagation();
+                                        this.toggle_screen(e.position, window, cx)
+                                    }),
+                                ),
                         )
                         .child(
                             panel_button("soundpad", "soundboard", false, t)

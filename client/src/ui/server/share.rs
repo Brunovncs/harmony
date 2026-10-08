@@ -2,9 +2,10 @@
 
 use super::ServerView;
 use super::picker::Picker;
+use super::sidebar::{Menu, MenuEntry};
 use crate::ui::camera::CameraDialog;
 use crate::ui::overlay::{self, toast};
-use gpui::{AppContext, Context, Window};
+use gpui::{AppContext, Context, Pixels, Point, Window};
 
 impl ServerView {
     fn voice(&self, cx: &gpui::App) -> Option<gpui::Entity<crate::media::voice::Voice>> {
@@ -29,16 +30,35 @@ impl ServerView {
         });
     }
 
-    pub fn toggle_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Starts a share through the picker. While live it asks instead, so a stray click never
+    /// ends the stream: change what is shared, under the running stream, or stop.
+    pub fn toggle_screen(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(voice) = self.voice(cx) else {
             toast(tr!("Join a voice channel first.", "Entre em um canal de voz primeiro."), cx);
             return;
         };
-        if voice.read(cx).screen_on() {
-            voice.update(cx, |v, cx| v.stop_screen(cx));
+        if !voice.read(cx).screen_on() {
+            self.pick_screen(window, cx);
             return;
         }
-        self.pick_screen(window, cx);
+        let this = cx.entity().downgrade();
+        let items = vec![
+            MenuEntry::item("screen-share", tr!("Change what you share", "Trocar o que você compartilha"), false, move |window, cx| {
+                if let Some(this) = this.upgrade() {
+                    this.update(cx, |this, cx| this.pick_screen(window, cx));
+                }
+            }),
+            MenuEntry::item("screen-share-off", tr!("Stop sharing", "Parar de compartilhar"), true, move |_, cx| {
+                voice.update(cx, |v, cx| v.stop_screen(cx));
+            }),
+        ];
+        overlay::open_menu_above(cx.new(|_| Menu { items }), at, cx);
+    }
+
+    pub fn stop_screen(&mut self, cx: &mut Context<Self>) {
+        if let Some(voice) = self.voice(cx) {
+            voice.update(cx, |v, cx| v.stop_screen(cx));
+        }
     }
 
     pub fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -24,7 +24,7 @@ pub struct Dismiss;
 
 enum Layer {
     Dialog(AnyView),
-    Menu { at: Point<Pixels>, view: AnyView },
+    Menu { at: Point<Pixels>, anchor: gpui::Anchor, view: AnyView },
 }
 
 #[derive(Default)]
@@ -77,6 +77,16 @@ pub fn open_dialog<V: Render + EventEmitter<Dismiss> + Focusable>(view: Entity<V
 
 /// Shows a menu with its corner at `at`. It closes on a click anywhere else.
 pub fn open_menu<V: Render + EventEmitter<Dismiss>>(view: Entity<V>, at: Point<Pixels>, cx: &mut App) {
+    show_menu(view, at, gpui::Anchor::TopLeft, cx);
+}
+
+/// A menu that grows upward from `at`, for buttons along the bottom of the window, where the
+/// button's own tooltip would otherwise sit on the first item.
+pub fn open_menu_above<V: Render + EventEmitter<Dismiss>>(view: Entity<V>, at: Point<Pixels>, cx: &mut App) {
+    show_menu(view, at - gpui::point(px(0.), px(10.)), gpui::Anchor::BottomLeft, cx);
+}
+
+fn show_menu<V: Render + EventEmitter<Dismiss>>(view: Entity<V>, at: Point<Pixels>, anchor: gpui::Anchor, cx: &mut App) {
     let any: AnyView = view.clone().into();
     with_root(cx, move |root, cx| {
         cx.subscribe(&view, |root: &mut Root, v, _: &Dismiss, cx| {
@@ -88,7 +98,7 @@ pub fn open_menu<V: Render + EventEmitter<Dismiss>>(view: Entity<V>, at: Point<P
         })
         .detach();
         root.overlay.layers.retain(|l| !matches!(l, Layer::Menu { .. }));
-        root.overlay.layers.push(Layer::Menu { at, view: any });
+        root.overlay.layers.push(Layer::Menu { at, anchor, view: any });
         cx.notify();
     });
 }
@@ -128,37 +138,38 @@ impl Root {
                         )
                         .into_any_element(),
                 ),
-                Layer::Menu { at, view } => out.push(
-                    deferred(
-                        div()
-                            .id(("menu-catcher", i))
-                            .absolute()
-                            .inset_0()
-                            .occlude()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|root, _, _, cx| {
-                                    root.overlay.layers.retain(|l| !matches!(l, Layer::Menu { .. }));
-                                    cx.notify();
-                                }),
-                            )
-                            .on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener(|root, _, _, cx| {
-                                    root.overlay.layers.retain(|l| !matches!(l, Layer::Menu { .. }));
-                                    cx.notify();
-                                }),
-                            )
-                            .child(
-                                anchored()
-                                    .position(*at)
-                                    .snap_to_window_with_margin(px(8.))
-                                    .child(div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(view.clone())),
-                            ),
+                Layer::Menu { at, anchor, view } => {
+                    out.push(
+                        deferred(
+                            div()
+                                .id(("menu-catcher", i))
+                                .absolute()
+                                .inset_0()
+                                .occlude()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|root, _, _, cx| {
+                                        root.overlay.layers.retain(|l| !matches!(l, Layer::Menu { .. }));
+                                        cx.notify();
+                                    }),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(|root, _, _, cx| {
+                                        root.overlay.layers.retain(|l| !matches!(l, Layer::Menu { .. }));
+                                        cx.notify();
+                                    }),
+                                )
+                                .child(
+                                    anchored().anchor(*anchor).position(*at).snap_to_window_with_margin(px(8.)).child(
+                                        div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(view.clone()),
+                                    ),
+                                ),
+                        )
+                        .with_priority(1)
+                        .into_any_element(),
                     )
-                    .with_priority(1)
-                    .into_any_element(),
-                ),
+                }
             }
         }
         out
