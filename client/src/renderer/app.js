@@ -1782,6 +1782,7 @@ function channelNodes(channel) {
   }
 
   li.addEventListener('click', () => onChannelClick(channel));
+  if (channel.kind === 'voice') acceptMemberDrop(li, channel, li);
 
   // Who is in this voice channel, under it, the way a sidebar shows it.
   //
@@ -1794,6 +1795,9 @@ function channelNodes(channel) {
   const list = document.createElement('li');
   list.className = 'channel-members';
   list.dataset.for = String(channel.id);
+  // Dropping onto the people already in a channel means that channel too;
+  // the highlight goes on its row, which is what the drop is about.
+  acceptMemberDrop(list, channel, li);
   list.append(...members.map((member) => {
     const row = document.createElement('span');
     row.className = 'channel-member';
@@ -1824,6 +1828,30 @@ function channelNodes(channel) {
       event.stopPropagation();
       openPeerMenu(channel.id, member.mid, event);
     });
+
+    /*
+     * Drag somebody to another voice channel to move them.
+     *
+     * Admins only, because that is who the server lets move people -- the
+     * same admin:move the right-click menu's "Move..." sends. Drawing it
+     * for everybody would offer a drag that always ends in "not allowed".
+     */
+    if (isAdmin()) {
+      row.draggable = true;
+      row.title = 'Drag to another voice channel to move, or right-click for controls';
+      row.addEventListener('dragstart', (event) => {
+        event.stopPropagation();
+        dragging = { kind: 'member', userId: member.userId, from: channel.id };
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', `member:${member.userId}`);
+        row.setAttribute('data-dragging', '');
+      });
+      row.addEventListener('dragend', () => {
+        dragging = null;
+        row.removeAttribute('data-dragging');
+        clearDropMarks();
+      });
+    }
     return row;
   }));
 
@@ -1832,6 +1860,37 @@ function channelNodes(channel) {
 
 /** What is being dragged right now, or null. */
 let dragging = null;
+
+/**
+ * Make a node a place a dragged PERSON can be dropped, meaning "move them
+ * into this voice channel". `mark` is what lights up while hovering.
+ */
+function acceptMemberDrop(node, channel, mark) {
+  node.addEventListener('dragover', (event) => {
+    if (dragging?.kind !== 'member' || dragging.from === channel.id) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'move';
+    clearDropMarks();
+    mark.setAttribute('data-drop-into', '');
+  });
+  node.addEventListener('drop', (event) => {
+    if (dragging?.kind !== 'member') return;
+    event.preventDefault();
+    event.stopPropagation();
+    const { userId, from } = dragging;
+    dragging = null;
+    clearDropMarks();
+    if (from !== channel.id) moveMember(userId, channel.id);
+  });
+}
+
+/** The same request as the peer menu's "Move...": the server does the rest. */
+function moveMember(userId, toChannelId) {
+  harmony.realtime
+    .request('admin:move', { userId, toChannelId })
+    .catch((err) => showChannelsError(err.message));
+}
 
 function clearDropMarks() {
   for (const node of el.channelItems.querySelectorAll('[data-drop-before], [data-drop-into]')) {
@@ -8957,11 +9016,17 @@ el.chatSearchClear.addEventListener('click', () => {
  * bottom -- there is no heading below the last heading to drop above.
  */
 el.channelItems.addEventListener('dragover', (event) => {
+  // A person dropped anywhere but a voice channel goes nowhere, and the
+  // cursor should say so rather than promise a move.
   if (!dragging) return;
+  if (dragging.kind === 'member') {
+    clearDropMarks();
+    return;
+  }
   event.preventDefault();
 });
 el.channelItems.addEventListener('drop', (event) => {
-  if (!dragging) return;
+  if (!dragging || dragging.kind === 'member') return;
   event.preventDefault();
   const { kind, id } = dragging;
   dragging = null;

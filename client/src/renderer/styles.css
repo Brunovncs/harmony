@@ -842,9 +842,17 @@ select:focus {
  * group heading the one place in the sidebar where you cannot tell what
  * the drop is about to do.
  */
-.channel-group[data-drop-into] {
+.channel-group[data-drop-into],
+.channel-row[data-drop-into] {
   background: rgb(var(--accent-rgb) / 0.22);
   color: var(--text);
+}
+/* Somebody an admin can drag into another channel. */
+.channel-member[draggable='true'] {
+  cursor: grab;
+}
+.channel-member[data-dragging] {
+  opacity: 0.4;
 }
 /* ---------- who is in a voice channel ---------- */
 
