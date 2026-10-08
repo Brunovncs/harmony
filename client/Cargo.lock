@@ -2900,7 +2900,7 @@ dependencies = [
 
 [[package]]
 name = "harmony"
-version = "4.0.0"
+version = "4.0.1"
 dependencies = [
  "anyhow",
  "async-channel",
