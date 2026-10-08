@@ -240,6 +240,25 @@ body {
   user-select: none;
 }
 
+.scale-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.scale-row input[type='range'] {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+/* Tabular figures, so the number does not jog sideways as it counts past
+   100 while somebody is dragging the slider and watching it. */
+.scale-value {
+  flex: 0 0 3.2em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
 /* ---------- scrollbars ---------- */
 
 /*

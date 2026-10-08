@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('harmony', {
   },
 
   relaunch: invoke('app:relaunch'),
+  setScale: invoke('app:scale'),
 
   /**
    * Fires when the window is minimised or restored.

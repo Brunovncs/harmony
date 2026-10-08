@@ -148,6 +148,20 @@ function createWindow() {
     },
   });
 
+  /*
+   * The zoom, applied on every load rather than once.
+   *
+   * Chromium keeps a zoom level per ORIGIN and reapplies it across
+   * navigations, which sounds like it would save the trouble -- but it
+   * also means a value set once in some earlier version of the app
+   * outlives the setting that asked for it. Setting it from settings.json
+   * at every load makes the file the only thing that decides.
+   *
+   * did-finish-load, not ready-to-show: a zoom factor set before the
+   * document exists is discarded by the load that follows it.
+   */
+  win.webContents.on('did-finish-load', () => applyScale());
+
   win.once('ready-to-show', () => win.show());
   win.loadURL('harmony://app/index.html');
 
@@ -371,6 +385,25 @@ handle('media:keep', (_e, hashes) => {
   mediaCache?.setKeepSet(Array.isArray(hashes) ? hashes : []);
   return true;
 });
+/**
+ * How big everything is drawn.
+ *
+ * Clamped here, which is the only place that can be sure of it: the
+ * setting is a number in a JSON file somebody can edit, and 10% is a
+ * window nobody can read well enough to put right again.
+ */
+const MIN_SCALE = 70;
+const MAX_SCALE = 180;
+
+function applyScale(percent) {
+  const wanted = Number(percent ?? settings.read().uiScale ?? 100);
+  const clamped = Math.min(MAX_SCALE, Math.max(MIN_SCALE, Number.isFinite(wanted) ? wanted : 100));
+  win?.webContents.setZoomFactor(clamped / 100);
+  return clamped;
+}
+
+handle('app:scale', (_e, percent) => applyScale(percent));
+
 handle('media:stats', () => mediaCache?.stats() ?? null);
 
 /**

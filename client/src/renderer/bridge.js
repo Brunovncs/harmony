@@ -34,6 +34,7 @@ export const harmony = {
   },
 
   relaunch: lift(raw.relaunch),
+  setScale: lift(raw.setScale),
   onWindowVisibility: (handler) => raw.onWindowVisibility(handler),
 
   sources: {

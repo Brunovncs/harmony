@@ -97,6 +97,19 @@ const DEFAULTS = {
    */
   recentEmoji: [],
   /*
+   * How big everything is, as a percentage.
+   *
+   * 115 rather than 100, because the first draft of this app was sized for
+   * a developer sitting two feet from a laptop and everyone else reads it
+   * from further away. It is Chromium's own zoom, so it scales the layout
+   * as well as the type: icons, avatars, video controls, the lot.
+   *
+   * Clamped where it is applied rather than here, so a hand-edited
+   * settings.json cannot leave somebody with a window they cannot read
+   * well enough to fix.
+   */
+  uiScale: 115,
+  /*
    * A sound when somebody writes your name.
    *
    * Separate from voiceSounds, because it is a different question: that

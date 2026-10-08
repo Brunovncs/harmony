@@ -152,6 +152,11 @@ const el = {
   chatAttach: $('chat-attach'),
   chatNote: $('chat-note'),
   chatSend: $('chat-send'),
+  uiScale: $('ui-scale'),
+  scaleValue: $('scale-value'),
+  scaleDown: $('scale-down'),
+  scaleUp: $('scale-up'),
+  scaleReset: $('scale-reset'),
   lightbox: $('lightbox'),
   lightboxImg: $('lightbox-img'),
   lightboxName: $('lightbox-name'),
@@ -5222,6 +5227,28 @@ function applySoundpadVolume() {
 /** What is typed in the search box, lower-cased once rather than per clip. */
 let soundpadFilter = '';
 
+/*
+ * How big everything is drawn.
+ *
+ * Main owns the clamp -- it is the only place that can be sure of the
+ * number, since the setting is a value in a file somebody can edit -- and
+ * it hands back what it actually used. So the slider is drawn from main's
+ * answer rather than from what was asked for, and a value out of range
+ * corrects itself on screen instead of lying.
+ */
+const SCALE_DEFAULT = 115;
+
+async function applyScale(percent, { save = true } = {}) {
+  const used = await harmony.setScale(percent);
+  el.uiScale.value = String(used);
+  el.scaleValue.textContent = `${used}%`;
+  if (save) {
+    await harmony.settings.set({ uiScale: used });
+    state.settings = await harmony.settings.get();
+  }
+  return used;
+}
+
 /**
  * Open the soundboard above the button that opened it.
  *
@@ -7823,6 +7850,9 @@ el.voiceConfig.addEventListener('click', () => {
   renderThemes();
   el.voiceSounds.checked = state.settings?.voiceSounds !== false;
   el.mentionSound.checked = state.settings?.mentionSound !== false;
+  // No save: this is drawing the dialog from what is already stored, and
+  // writing it back on every open is a write for nothing.
+  applyScale(state.settings?.uiScale ?? SCALE_DEFAULT, { save: false });
   applyMicTuning();
   startMicMeter();
   refreshVoiceDevices().catch((err) => deviceNote(err.message));
@@ -7989,6 +8019,20 @@ el.chatInput.addEventListener('keydown', (event) => {
     el.chatForm.requestSubmit();
   }
 });
+
+/*
+ * input, not change: the whole point of a size control is watching the app
+ * resize as you drag it. The write to settings.json goes with it, which is
+ * a few writes during a drag and is still cheaper than remembering to
+ * commit on release and getting it wrong when the pointer leaves the
+ * window mid-drag.
+ */
+el.uiScale.addEventListener('input', () => applyScale(Number(el.uiScale.value)));
+
+const nudgeScale = (delta) => applyScale(Number(el.uiScale.value) + delta);
+el.scaleDown.addEventListener('click', () => nudgeScale(-5));
+el.scaleUp.addEventListener('click', () => nudgeScale(5));
+el.scaleReset.addEventListener('click', () => applyScale(SCALE_DEFAULT));
 
 el.mentionSound.addEventListener('change', async () => {
   await harmony.settings.set({ mentionSound: el.mentionSound.checked });

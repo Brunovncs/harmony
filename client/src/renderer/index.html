@@ -906,6 +906,33 @@
           <div class="theme-grid" id="theme-grid"></div>
         </section>
 
+        <!--
+          Size, next to colour, because both are about reading the app
+          rather than about the hardware under it.
+        -->
+        <section class="settings-section">
+          <h3>Size</h3>
+          <p class="muted">
+            Everything at once -- the type, the icons, the pictures and the
+            spacing between them. This is the window's own zoom, so a bigger
+            setting fits less on screen.
+          </p>
+          <div class="scale-row">
+            <button class="ghost small" id="scale-down" title="Smaller">&#8722;</button>
+            <input
+              id="ui-scale"
+              type="range"
+              min="70"
+              max="180"
+              step="5"
+              value="115"
+            />
+            <button class="ghost small" id="scale-up" title="Bigger">&#43;</button>
+            <span class="scale-value" id="scale-value">115%</span>
+            <button class="ghost small" id="scale-reset">Reset</button>
+          </div>
+        </section>
+
         <section class="settings-section">
           <h3>Devices</h3>
           <div class="voice-devices">
