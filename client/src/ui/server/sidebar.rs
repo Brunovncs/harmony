@@ -182,7 +182,14 @@ impl ServerView {
                 .drag_over::<DraggedChannel>(move |s, _, _, _| s.border_t_2().border_color(accent))
                 .on_drop(cx.listener(move |this, d: &DraggedChannel, _, cx| this.move_channel(d.id, Drop::Before(id), cx)))
             });
-        let mut block = div().flex().flex_col().child(row);
+        let mut block = div().id(("channel-block", c.id as u64)).flex().flex_col().rounded(px(radius::INNER + 1.)).child(row);
+        // Admins move people by dropping them on another voice channel, its row or its people.
+        if admin && voice {
+            let tint = t.accent.opacity(0.12);
+            block = block
+                .drag_over::<DraggedPerson>(move |s, d, _, _| if d.from == id { s } else { s.bg(tint) })
+                .on_drop(cx.listener(move |this, d: &DraggedPerson, _, cx| this.move_person(d, id, cx)));
+        }
         if !roster.is_empty() {
             let mut people = div().flex().flex_col().pl(px(30.)).pb(px(4.)).gap(px(1.));
             for m in roster {
@@ -196,11 +203,13 @@ impl ServerView {
     fn voice_member_row(&mut self, channel: ChannelId, m: &Member, t: &Theme, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let speaking = self.is_speaking(channel, m.user_id, cx);
         let me = self.session.read(cx).me.id == m.user_id;
+        let admin = self.session.read(cx).me.role.is_admin();
         let name = self.session.read(cx).display_name(Some(m.user_id), Some(&m.nickname));
         let avatar_img = self.session.update(cx, |s, cx| s.avatar(m.user_id, cx));
         let hover = t.layer_hover;
         let user = m.user_id;
         let mid = m.mid;
+        let (name_for_drag, avatar_for_drag) = (name.clone(), avatar_img.clone());
         div()
             .id(("voice-member", (channel as u64) << 20 | m.user_id as u64))
             .flex()
@@ -225,6 +234,10 @@ impl ServerView {
                         this.peer_menu(channel, user, mid, e.position, window, cx);
                     }),
                 )
+            })
+            .when(admin && !me, |d| {
+                let dragged = DraggedPerson { user, from: channel, name: name_for_drag, avatar: avatar_for_drag };
+                d.cursor_grab().on_drag(dragged, |d, _, _, cx| cx.new(|_| d.clone()))
             })
             .into_any_element()
     }
@@ -466,7 +479,42 @@ impl Render for DraggedChannel {
     }
 }
 
+/// Someone in voice being dragged to another voice channel.
+#[derive(Clone)]
+pub struct DraggedPerson {
+    user: UserId,
+    from: ChannelId,
+    name: String,
+    avatar: Option<std::sync::Arc<gpui::RenderImage>>,
+}
+
+impl Render for DraggedPerson {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let t = crate::theme::current();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .h(px(30.))
+            .px(px(8.))
+            .rounded(px(radius::INNER + 1.))
+            .bg(t.popover)
+            .border_1()
+            .border_color(t.accent)
+            .shadow_lg()
+            .child(avatar(&self.name, self.avatar.clone(), 20., None))
+            .child(body(self.name.clone(), t.text))
+    }
+}
+
 impl ServerView {
+    /// The same `admin:move` the right-click menu's "Move to" sends.
+    fn move_person(&mut self, d: &DraggedPerson, to: ChannelId, cx: &mut Context<Self>) {
+        if d.from != to {
+            super::request(&self.session, "admin:move", serde_json::json!({ "userId": d.user, "toChannelId": to }), cx);
+        }
+    }
+
     /// Moves a channel and sends the whole new order, as the server wants it.
     fn move_channel(&mut self, id: ChannelId, to: Drop, cx: &mut Context<Self>) {
         let s = self.session.read(cx);
