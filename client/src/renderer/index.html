@@ -214,7 +214,8 @@
         <div class="bar-left">
           <!-- Who you are lives at the bottom of the sidebar now; see
                .self-strip. All that is left up here is the server. -->
-          <strong class="brand-small">Harmony</strong>
+          <!-- The server's own name, once it says what it is. -->
+          <strong class="brand-small" id="server-name">Harmony</strong>
           <span class="muted" id="channels-role"></span>
         </div>
         <div class="bar-right">
@@ -226,6 +227,20 @@
             left two buttons for one action. The panel is where everything
             the call can do lives.
           -->
+          <!--
+            Owner only, and hidden for everybody else rather than disabled:
+            a control you can see and cannot use is a question, and the
+            answer ("you are not the owner") is not worth asking everybody
+            on every screen.
+          -->
+          <button
+            class="ghost small"
+            id="server-settings"
+            title="Rename this server, or change its password"
+            hidden
+          >
+            Server
+          </button>
           <button class="ghost small" id="channels-members" title="Show or hide the member list">
             Members
           </button>
@@ -671,6 +686,70 @@
       </div>
       <div class="soundpad-grid" id="soundpad-grid"></div>
       <p class="muted soundpad-empty" id="soundpad-empty" hidden></p>
+    </div>
+
+    <!--
+      Rename the server, or change the key to its front door.
+
+      A dialog of its own rather than a section in Settings: everything in
+      Settings is about THIS MACHINE and takes effect for nobody else,
+      while both of these change the server for everybody at once. Mixing
+      the two would make the colour palette and the door key look like the
+      same kind of decision.
+    -->
+    <dialog id="server-dialog" class="ask">
+      <form method="dialog" id="server-form">
+        <h2>This server</h2>
+        <label class="field">
+          <span>Name</span>
+          <input id="server-name-input" type="text" maxlength="32" autocomplete="off" />
+          <small>What it is called in the title bar, for everybody.</small>
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input
+            id="server-password-input"
+            type="password"
+            autocomplete="new-password"
+            placeholder="Leave blank to keep it as it is"
+          />
+          <small id="server-password-note"></small>
+        </label>
+        <!--
+          Separate from the box above, because "I left it blank" and "I
+          want there to be no password" are different intentions and the
+          same empty box cannot mean both.
+        -->
+        <label class="check">
+          <input type="checkbox" id="server-password-off" />
+          <span>
+            No password at all
+            <small>Anybody who can reach this server can use it.</small>
+          </span>
+        </label>
+        <p class="error" id="server-error" hidden></p>
+        <p class="muted" id="server-note" hidden></p>
+        <div class="ask-buttons">
+          <button type="button" class="ghost" id="server-cancel">Cancel</button>
+          <button type="submit" class="primary" id="server-save">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!--
+      What you get when you right-click somebody in the member list.
+
+      Not the peer menu: that one is about a voice connection -- volume,
+      local mute, force-mute, move -- and most of it means nothing for
+      somebody who is not in a call. This one is about the ACCOUNT, and
+      everything on it is permanent.
+    -->
+    <div class="peer-menu" id="member-menu" hidden>
+      <div class="peer-menu-head">
+        <span class="avatar" id="member-menu-avatar"></span>
+        <strong id="member-menu-name"></strong>
+      </div>
+      <div id="member-menu-body"></div>
     </div>
 
     <!--

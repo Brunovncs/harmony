@@ -408,6 +408,23 @@ export class Realtime {
     }
   }
 
+  /**
+   * Hang up on somebody, everywhere they are connected.
+   *
+   * A socket authenticates once, at hello, and is trusted for its lifetime
+   * -- which is the right design for a push channel and exactly wrong for
+   * an account that has just been deleted. Their sessions are gone, so the
+   * next HTTP request fails, but the socket would go on receiving every
+   * message on the server until they closed the app.
+   */
+  kickUser(userId, reason = 'account removed') {
+    for (const [ws, client] of this.#clients) {
+      if (client.user?.id !== userId) continue;
+      this.#send(ws, { type: 'kicked', reason });
+      try { ws.close(4403, reason); } catch { /* already going */ }
+    }
+  }
+
   /** Send to everyone authenticated. */
   broadcast(payload) {
     for (const [ws, client] of this.#clients) {

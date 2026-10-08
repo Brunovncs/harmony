@@ -109,6 +109,21 @@ const el = {
   avatarButton: $('avatar-button'),
   avatarFile: $('avatar-file'),
   channelsRole: $('channels-role'),
+  serverName: $('server-name'),
+  serverSettings: $('server-settings'),
+  serverDialog: $('server-dialog'),
+  serverForm: $('server-form'),
+  serverNameInput: $('server-name-input'),
+  serverPasswordInput: $('server-password-input'),
+  serverPasswordOff: $('server-password-off'),
+  serverPasswordNote: $('server-password-note'),
+  serverErrorLine: $('server-error'),
+  serverNote: $('server-note'),
+  serverCancel: $('server-cancel'),
+  memberMenu: $('member-menu'),
+  memberMenuAvatar: $('member-menu-avatar'),
+  memberMenuName: $('member-menu-name'),
+  memberMenuBody: $('member-menu-body'),
   channelsMembers: $('channels-members'),
   channelsWatch: $('channels-watch'),
   memberList: $('member-list'),
@@ -1084,7 +1099,17 @@ function ask(spec) {
 }
 
 /** Yes or no, in the same dialog, so nothing depends on window.confirm. */
-async function askConfirm(title, { text, okLabel = 'Delete' } = {}) {
+/**
+ * Yes or no, with the button saying which yes.
+ *
+ * okLabel defaults to 'OK' and every caller passes its own. It used to
+ * default to 'Delete', which was right for the four delete confirmations
+ * that existed at the time and silently wrong for everything added since:
+ * "Make somebody an admin?" offered [Cancel] [Delete]. A default that is
+ * correct for today's callers and dangerous for tomorrow's is worse than
+ * no default at all.
+ */
+async function askConfirm(title, { text, okLabel = 'OK' } = {}) {
   return (await ask({ title, text, okLabel, fields: [] })) !== null;
 }
 
@@ -1247,6 +1272,8 @@ async function enterChannels() {
   // Nothing has happened yet, so nothing else would have called it: the
   // voice panel, the stage and the member column all start from here.
   applyStage();
+  // What the server calls itself, and whether the owner's button appears.
+  loadServerInfo();
   loadSoundpad();
   loadEmojis();
   // Before anybody clicks, not on the click. See scheduleEmojiGrid.
@@ -1457,6 +1484,7 @@ function channelNodes(channel) {
       rowButton('\u2715', 'Delete this channel', async () => {
         if (!await askConfirm(`Delete #${channel.name}?`, {
           text: 'Everything written in it goes too. This cannot be undone.',
+          okLabel: 'Delete',
         })) return;
         try {
           await harmony.api.deleteChannel(state.server, channel.id);
@@ -1605,6 +1633,7 @@ function groupNode(group) {
           // Worth saying plainly: every other delete in this app takes its
           // contents with it, and this one deliberately does not.
           text: 'The channels in it stay, and move back to the top of the list.',
+          okLabel: 'Delete the group',
         })) return;
         try {
           await harmony.api.deleteGroup(state.server, group.id);
@@ -1635,6 +1664,231 @@ function groupNode(group) {
   }
 
   return li;
+}
+
+// ---------------------------------------------------------------------------
+// Right-clicking somebody in the member list
+// ---------------------------------------------------------------------------
+
+function closeMemberMenu() {
+  el.memberMenu.hidden = true;
+}
+
+/**
+ * The account menu.
+ *
+ * Deliberately NOT the peer menu. That one is about a voice connection --
+ * volume, a local mute, a force-mute, moving somebody between channels --
+ * and none of it means anything for a person who is not in a call, which
+ * is most of this list most of the time. Everything here is about the
+ * account, and all of it is permanent.
+ */
+function openMemberMenu(user, event) {
+  closePeerMenu();
+
+  const me = state.auth.user?.id;
+  const theirRole = user.role ?? 'member';
+
+  // The same asymmetry the server enforces: an admin may promote a member,
+  // only the owner may demote one. See POST /api/accounts/:id/role.
+  const canPromote = isAdmin() && theirRole === 'member';
+  const canDemote = isOwner() && theirRole === 'admin';
+  // Owner only, and never the owner. Granting admin is reversible and a
+  // force-mute lasts until it is lifted; this is neither.
+  const canRemove = isOwner() && theirRole !== 'owner' && user.id !== me;
+
+  if (!canPromote && !canDemote && !canRemove) return;
+
+  // The children, not the element: replaceWith would drop the node the
+  // handle points at and the next open would write into a detached one.
+  el.memberMenuAvatar.replaceChildren(
+    ...avatarEl(faceOf(user.id, user.nickname)).childNodes,
+  );
+  el.memberMenuName.textContent = displayOf(user.id, user.nickname);
+
+  const rows = [];
+  const item = (label, title, run, danger = false) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `ghost menu-item${danger ? ' danger' : ''}`;
+    button.textContent = label;
+    button.title = title;
+    button.addEventListener('click', run);
+    return button;
+  };
+
+  if (canPromote || canDemote) {
+    rows.push(item(
+      canPromote ? 'Make admin' : 'Remove admin',
+      canPromote
+        ? 'They can manage channels, mute and move people'
+        : 'Back to an ordinary member',
+      async () => {
+        closeMemberMenu();
+        const next = canPromote ? 'admin' : 'member';
+        if (!await askConfirm(
+          canPromote
+            ? `Make ${displayOf(user.id, user.nickname)} an admin?`
+            : `Remove ${displayOf(user.id, user.nickname)}'s admin?`,
+          {
+            okLabel: canPromote ? 'Make admin' : 'Remove admin',
+            text: canPromote
+              ? 'They will be able to create and delete channels, force-mute and move '
+                + 'anybody, and delete anybody\u0027s messages. Only you can take it back.'
+              : 'They go back to being an ordinary member.',
+          },
+        )) return;
+        try {
+          await harmony.api.setRole(state.server, user.id, next);
+        } catch (err) {
+          showChannelsError(err.message);
+        }
+      },
+    ));
+  }
+
+  if (canRemove) {
+    if (rows.length) rows.push(document.createElement('hr'));
+    rows.push(item(
+      'Delete account',
+      'Removes them and everything they have written',
+      async () => {
+        closeMemberMenu();
+        const who = displayOf(user.id, user.nickname);
+        /*
+         * Two confirmations, and the second one makes them type the name.
+         *
+         * Everything else destructive in this app is one click and a yes,
+         * because everything else is one channel or one message. This is a
+         * person's entire history, there is no undo anywhere in the app,
+         * and the rows in a member list are four pixels apart.
+         */
+        if (!await askConfirm(`Delete ${who}'s account?`, {
+          okLabel: 'Continue',
+          text: 'Their account and every message they have ever written are removed '
+            + 'from the server. Pinned messages and attachments go with them. '
+            + 'This cannot be undone.',
+        })) return;
+
+        const typed = await ask({
+          title: `Type ${user.nickname} to confirm`,
+          text: 'This is the last step.',
+          okLabel: 'Delete the account',
+          fields: [{ name: 'nickname', label: 'Nickname', required: true }],
+        });
+        if (typed?.nickname?.trim().toLowerCase() !== user.nickname) {
+          if (typed) showChannelsError('That is not the right nickname. Nothing was deleted.');
+          return;
+        }
+
+        try {
+          const result = await harmony.api.deleteAccount(state.server, user.id);
+          showChannelsError('');
+          el.chatNote.textContent =
+            `${who} removed, with ${result.messages} message${result.messages === 1 ? '' : 's'}.`;
+          await refreshUsers();
+        } catch (err) {
+          showChannelsError(err.message);
+        }
+      },
+      true,
+    ));
+  }
+
+  el.memberMenuBody.replaceChildren(...rows);
+
+  // Shown off-screen first, because a hidden element has no size and the
+  // clamp below needs one. The same trick as the peer menu.
+  el.memberMenu.style.left = '-9999px';
+  el.memberMenu.style.top = '0px';
+  el.memberMenu.hidden = false;
+  const box = el.memberMenu.getBoundingClientRect();
+  el.memberMenu.style.left = `${Math.max(8, Math.min(event.clientX, window.innerWidth - box.width - 8))}px`;
+  el.memberMenu.style.top = `${Math.max(8, Math.min(event.clientY, window.innerHeight - box.height - 8))}px`;
+}
+
+// ---------------------------------------------------------------------------
+// The server's own name and door
+// ---------------------------------------------------------------------------
+
+/** What the server last said about itself. */
+const serverInfo = { name: 'Harmony', passwordRequired: false, restartRequired: false };
+
+/**
+ * Draw what the server says about itself.
+ *
+ * Called with nothing to re-decide the owner's button alone, which is what
+ * a role change needs: being made owner has to make the control appear
+ * without another round trip.
+ */
+function applyServerInfo(info) {
+  if (info) Object.assign(serverInfo, info);
+  el.serverName.textContent = serverInfo.name;
+  // Shown only to the owner. Hidden rather than disabled: a control you
+  // can see and cannot use is a question nobody else needs asked.
+  el.serverSettings.hidden = !isOwner();
+}
+
+async function loadServerInfo() {
+  try {
+    const { server } = await harmony.api.serverInfo(state.server);
+    applyServerInfo(server);
+  } catch {
+    // Not fatal: the brand falls back to what the markup says.
+  }
+}
+
+function openServerDialog() {
+  el.serverNameInput.value = serverInfo.name;
+  el.serverPasswordInput.value = '';
+  el.serverPasswordOff.checked = false;
+  el.serverPasswordInput.disabled = false;
+  el.serverPasswordNote.textContent = serverInfo.passwordRequired
+    ? 'This server has a password. Leave this blank to keep the one it has.'
+    : 'This server has no password. Type one here to start asking for it.';
+  el.serverErrorLine.hidden = true;
+  el.serverNote.hidden = true;
+  el.serverDialog.showModal();
+  el.serverNameInput.focus();
+}
+
+async function saveServerSettings() {
+  const name = el.serverNameInput.value.trim();
+  const off = el.serverPasswordOff.checked;
+  const typed = el.serverPasswordInput.value;
+
+  const body = { name };
+  // An absent field and an empty string are different answers, and the
+  // server treats them differently on purpose -- so an untouched box must
+  // not be sent at all, or saving a rename would take the door off.
+  if (off) body.password = '';
+  else if (typed) body.password = typed;
+
+  try {
+    const { server } = await harmony.api.updateServer(state.server, body);
+    applyServerInfo(server);
+
+    /*
+     * Tell this client the new key before anything else asks for it.
+     *
+     * The change takes effect on the very next request, including the
+     * ones this client is about to make -- so without this the owner
+     * locks themselves out the moment they press Save.
+     */
+    if (body.password !== undefined) {
+      await harmony.api.setPassword(body.password);
+      await harmony.settings.set({ password: body.password });
+      state.settings = await harmony.settings.get();
+    }
+
+    el.serverDialog.close();
+    el.chatNote.textContent = server.restartRequired
+      ? 'Saved. The media relay keeps its old setting until the server is restarted.'
+      : 'Saved.';
+  } catch (err) {
+    el.serverErrorLine.textContent = err.message;
+    el.serverErrorLine.hidden = false;
+  }
 }
 
 /**
@@ -1677,6 +1931,17 @@ function renderMembers() {
       tag.textContent = user.role;
       li.append(tag);
     }
+
+    // The user object is read from state at click time rather than
+    // captured here, for the same reason the roster rows do it: these rows
+    // are rebuilt on every presence push, and a role captured at draw time
+    // is one promotion out of date.
+    li.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      openMemberMenu(state.users.get(user.id) ?? user, event);
+    });
+    // Promised only to the people for whom the menu has anything on it.
+    if (isAdmin()) li.title = 'Right-click for admin controls';
     return li;
   };
 
@@ -2383,6 +2648,7 @@ function openPeerMenu(channelId, mid, event) {
           ? `Make ${displayOf(userId, member.nickname)} an admin?`
           : `Remove ${displayOf(userId, member.nickname)}'s admin?`,
         {
+          okLabel: canPromote ? 'Make admin' : 'Remove admin',
           text: canPromote
             ? 'They will be able to create and delete channels, force-mute and move anybody, '
               + 'and delete anybody\u0027s messages. Only you can take it back.'
@@ -4327,7 +4593,7 @@ function messageRow(message) {
     remove.className = 'ghost small danger';
     remove.textContent = 'Delete';
     remove.addEventListener('click', async () => {
-      if (!await askConfirm('Delete this message?')) return;
+      if (!await askConfirm('Delete this message?', { okLabel: 'Delete' })) return;
       try {
         await harmony.api.deleteMessage(state.server, message.id);
         // The server pushes message:deleted to everyone, including us.
@@ -4670,7 +4936,7 @@ function renderSoundpad() {
       tool('\u25B6', 'Move right', () => nudgeClip(clip.id, 1), index === clips.length - 1),
       tool('\u270E', 'Rename', () => editClip(clip)),
       tool('\u2715', 'Delete', async () => {
-        if (!await askConfirm(`Delete the clip "${clip.name}"?`)) return;
+        if (!await askConfirm(`Delete the clip "${clip.name}"?`, { okLabel: 'Delete' })) return;
         try {
           await harmony.api.deleteClip(state.server, clip.id);
         } catch (err) {
@@ -5012,9 +5278,44 @@ function onRealtimeEvent(msg) {
       setEmojis(msg.emojis);
       break;
 
+    case 'server':
+      applyServerInfo(msg.server);
+      break;
+
+    /*
+     * Your account is gone.
+     *
+     * The socket is closed by the server immediately after this, so there
+     * is nothing to clean up -- but without a word the app would simply
+     * stop working, with every request failing and no explanation.
+     */
+    case 'kicked':
+      state.auth.user = null;
+      showView('view-connect');
+      showError(msg.reason === 'account removed'
+        ? 'Your account was removed from this server.'
+        : `Disconnected: ${msg.reason}`);
+      break;
+
     case 'soundpad':
       state.soundpad.clips = msg.clips;
       renderSoundpad();
+      break;
+
+    /*
+     * The whole roster at once, because somebody has gone.
+     *
+     * A user:updated cannot say "this person no longer exists" -- it
+     * carries a user -- so a removal replaces the map rather than editing
+     * it. Everything drawn from that map is drawn again.
+     */
+    case 'accounts':
+      state.users = new Map(msg.users.map((u) => [u.id, u]));
+      refreshKeepSet();
+      renderVoiceRoster(state.channels.roster);
+      renderChannels();
+      renderMembers();
+      renderChat();
       break;
 
     case 'user:updated':
@@ -5027,6 +5328,7 @@ function onRealtimeEvent(msg) {
         el.channelsRole.textContent = msg.user.role === 'member' ? '' : msg.user.role;
         // Being made an admin has to reach the controls, not just the badge.
         el.channelAdd.hidden = !isAdmin();
+        applyServerInfo();
         applyVoiceButtons();
       }
       // Names and pictures are drawn from this map in several places, and
@@ -6902,6 +7204,34 @@ function applyMemberList(show) {
   el.channelsMembers.toggleAttribute('data-on', show);
   if (show) renderMembers();
 }
+
+el.serverSettings.addEventListener('click', () => openServerDialog());
+el.serverCancel.addEventListener('click', () => el.serverDialog.close());
+el.serverForm.addEventListener('submit', (event) => {
+  // The dialog's own method="dialog" would close it before the save was
+  // even attempted, and a failure would have nowhere to be shown.
+  event.preventDefault();
+  saveServerSettings();
+});
+el.serverPasswordOff.addEventListener('change', () => {
+  // Typing a password and ticking "no password" is two contradictory
+  // answers, so the box goes away rather than being quietly ignored.
+  el.serverPasswordInput.disabled = el.serverPasswordOff.checked;
+  if (el.serverPasswordOff.checked) el.serverPasswordInput.value = '';
+});
+
+// Same dismissal as the peer menu: pointerdown, captured, so it closes on
+// the way down even if the press lands on something that stops bubbling.
+document.addEventListener('pointerdown', (event) => {
+  if (el.memberMenu.hidden) return;
+  if (el.memberMenu.contains(event.target)) return;
+  closeMemberMenu();
+}, true);
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') closeMemberMenu();
+});
+el.memberItems.addEventListener('scroll', () => closeMemberMenu());
+window.addEventListener('blur', () => closeMemberMenu());
 
 el.channelsMembers.addEventListener('click', async () => {
   const show = el.memberList.hidden;

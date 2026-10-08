@@ -254,6 +254,13 @@ module.exports = {
   roster: (s) => requestJson(s, '/api/accounts'),
   setRole: (s, id, role) =>
     requestJson(s, `/api/accounts/${id}/role`, { method: 'POST', body: { role } }),
+  // Takes the account and everything written under it. Owner only, server
+  // side; the client hides the control for everybody else.
+  deleteAccount: (s, id) =>
+    requestJson(s, `/api/accounts/${id}/delete`, { method: 'POST' }),
+
+  serverInfo: (s) => requestJson(s, '/api/server'),
+  updateServer: (s, body) => requestJson(s, '/api/server', { method: 'POST', body }),
 
   createGroup: (s, name) =>
     requestJson(s, '/api/channels/groups', { method: 'POST', body: { name } }),

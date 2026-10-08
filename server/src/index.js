@@ -13,6 +13,7 @@ import { LoginLimiter, secretsMatch } from './auth.js';
 import { MediaMtxMonitor } from './mediamtx-api.js';
 import { Rooms, normalizeUsername, normalizePath } from './rooms.js';
 import { ensureDataDir, openDatabase, meta } from './db.js';
+import { ServerSettings } from './server-settings.js';
 import { Accounts, claimOwner, ensureOwnerToken, publicUser } from './accounts.js';
 import {
   Channels,
@@ -60,6 +61,14 @@ const mediaSecret = channelSecret(metaStore);
 const chat = new Chat(db, { dataDir: config.dataDir, maxDiskBytes: config.maxDiskBytes });
 const soundpad = new Soundpad(db);
 const emojis = new Emojis(db);
+/*
+ * The name and the door key.
+ *
+ * The environment is still the default; this only looks at server_meta once
+ * the owner has set something there. config.password is read exactly once
+ * more, to seed it, and nothing else in this file should consult it again.
+ */
+const serverSettings = new ServerSettings(metaStore, { envPassword: config.password });
 
 const rooms = new Rooms({ claimTtlMs: config.claimTtlMs });
 const limiter = new LoginLimiter({
@@ -108,7 +117,7 @@ app.use((req, res, next) => {
  * endpoint can be exercised with curl.
  */
 function requirePassword(req, res, next) {
-  if (!config.password) return next();
+  if (!serverSettings.passwordRequired) return next();
 
   const key = req.ip ?? 'unknown';
   const gate = limiter.check(key);
@@ -134,7 +143,7 @@ function requirePassword(req, res, next) {
     });
   }
 
-  if (secretsMatch(offered, config.password)) {
+  if (serverSettings.matches(offered)) {
     limiter.succeed(key);
     return next();
   }
@@ -179,8 +188,8 @@ app.get('/api/health', (req, res) => {
   // attempt -- an unmetered oracle sitting next to a metered one. Offering
   // nothing is still free, because the client probes this endpoint before the
   // user has typed anything.
-  let authed = !config.password;
-  if (config.password) {
+  let authed = !serverSettings.passwordRequired;
+  if (serverSettings.passwordRequired) {
     const offered = req.get('x-harmony-password');
     const key = req.ip ?? 'unknown';
     const gate = limiter.check(key);
@@ -193,7 +202,7 @@ app.get('/api/health', (req, res) => {
       });
     }
     if (offered) {
-      authed = secretsMatch(offered, config.password);
+      authed = serverSettings.matches(offered);
       if (authed) limiter.succeed(key);
       else limiter.fail(key);
     }
@@ -201,10 +210,11 @@ app.get('/api/health', (req, res) => {
   res.json({
     ok: monitor.reachable,
     mediamtx: monitor.reachable ? 'up' : 'down',
-    passwordRequired: Boolean(config.password),
+    passwordRequired: serverSettings.passwordRequired,
     authenticated: authed,
     ...(authed
       ? {
+          name: serverSettings.name,
           signalingBase: config.signalingBase,
           liveStreams: rooms.listLive().length,
           // Lets the client show "create the first account" rather than a
@@ -493,6 +503,69 @@ app.post('/api/accounts/:id/role', requireRole('owner', 'admin'), (req, res) => 
  * the call comes back as "free", and the viewer would silently claim someone
  * else's username. Watching is public, so the watch URL belongs here.
  */
+/**
+ * Delete an account, and everything written under it.
+ *
+ * OWNER ONLY, and not even an admin. Granting admin is reversible and
+ * force-muting somebody lasts until they are unmuted; this takes a person's
+ * whole history off the server and there is no undo anywhere in the app.
+ * The same reasoning already makes removing an admin owner-only.
+ *
+ * The owner cannot be deleted at all, including by themselves: a server
+ * with no owner has no way back short of editing the database by hand.
+ */
+app.post('/api/accounts/:id/delete', requireRole('owner'), (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+  const target = accounts.byId(id);
+  if (!target) return res.status(404).json({ error: 'no_such_user' });
+
+  const result = accounts.remove(id);
+  if (!result.ok) {
+    return res.status(result.error === 'cannot_remove_owner' ? 403 : 404).json({
+      error: result.error,
+      message: result.error === 'cannot_remove_owner'
+        ? 'The owner cannot be removed. Hand ownership over first.'
+        : 'No such account.',
+    });
+  }
+
+  // Their sessions went with the row, so every later request fails -- but a
+  // socket authenticates once and would go on receiving everything.
+  realtime?.kickUser(id);
+  // Everything that named them is now wrong: the member list, every message
+  // they wrote, every roster they were in.
+  realtime?.broadcast({ type: 'accounts', users: accounts.list().map(publicUser) });
+  realtime?.broadcastPresence();
+  console.warn(`[accounts] ${target.nickname} removed by ${req.user.nickname}, `
+    + `${result.messages} messages deleted`);
+  return res.json({ ok: true, messages: result.messages });
+});
+
+// ---------------------------------------------------------------------------
+// The server itself
+// ---------------------------------------------------------------------------
+
+app.get('/api/server', requireLogin, (_req, res) => {
+  res.json({ server: serverSettings.publicView() });
+});
+
+/**
+ * Rename the server, or change the key to its front door.
+ *
+ * Owner only. `password` is applied only when the field is present at all,
+ * so renaming cannot clear the password by omission -- and an empty string
+ * IS a value here, meaning "take the door off", which is why the two cases
+ * have to be told apart rather than both treated as falsy.
+ */
+app.post('/api/server', requireRole('owner'), (req, res) => {
+  if (req.body?.name !== undefined) serverSettings.setName(req.body.name);
+  if (typeof req.body?.password === 'string') serverSettings.setPassword(req.body.password);
+
+  const view = serverSettings.publicView();
+  realtime?.broadcast({ type: 'server', server: view });
+  return res.json({ server: view });
+});
+
 app.get('/api/streams', (_req, res) => {
   res.json({
     streams: rooms.listLive().map((stream) => ({ ...stream, whepUrl: whepUrl(stream.username) })),
@@ -1251,11 +1324,15 @@ let realtime = null;
 const server = app.listen(config.port, config.host, () => {
   console.log(`[harmony] control server on http://${config.host}:${config.port}`);
   console.log(`[harmony] clients will be sent to ${config.signalingBase}`);
+  // serverSettings, not config: the owner may have changed the door from
+  // the client, and a banner that reports the environment would be lying
+  // about the server it just started.
   console.log(
-    config.password
+    serverSettings.passwordRequired
       ? `[harmony] password required — ${config.maxLoginAttempts} tries, then ${config.lockoutMinutes.join('/')} minute lockouts`
       : '[harmony] NO PASSWORD SET — anyone who can reach this server can use it',
   );
+  console.log(`[harmony] this server is called ${serverSettings.name}`);
 });
 
 realtime = new Realtime({

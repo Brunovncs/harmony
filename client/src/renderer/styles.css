@@ -579,6 +579,19 @@ select:focus {
 #member-items .member-row:hover {
   background: rgb(var(--tint-rgb) / 0.06);
 }
+/* Right-clicking is the gesture; left-clicking does nothing, so there is no
+   hand cursor promising otherwise. */
+#member-items .member-row {
+  cursor: default;
+}
+/* Everything on this menu is permanent, and one of the entries deletes a
+   person. It should not look like the volume slider. */
+.peer-menu button.menu-item.danger {
+  color: var(--danger-soft);
+}
+.peer-menu button.menu-item.danger:hover {
+  background: rgb(var(--danger-rgb) / 0.18);
+}
 /* Offline is dimmed rather than hidden or greyscaled-to-nothing: knowing
    somebody exists and is not here is most of what the bottom half is
    for. */

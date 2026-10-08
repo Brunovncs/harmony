@@ -147,6 +147,31 @@ export class Accounts {
       dropSession: db.prepare('DELETE FROM sessions WHERE token_hash = ?'),
       dropUserSessions: db.prepare('DELETE FROM sessions WHERE user_id = ?'),
       expireSessions: db.prepare('DELETE FROM sessions WHERE last_seen < ?'),
+
+      // --- removing an account, below -------------------------------------
+      countMessages: db.prepare('SELECT COUNT(*) AS n FROM messages WHERE user_id = ?'),
+      dropMessageFts: db.prepare(
+        'DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM messages WHERE user_id = ?)',
+      ),
+      // One decrement per MESSAGE, not per distinct file: somebody who posted
+      // the same picture twice holds two references to it.
+      releaseAttachments: db.prepare(`
+        UPDATE uploads SET refs = MAX(0, refs - (
+          SELECT COUNT(*) FROM messages m
+          WHERE m.user_id = ? AND m.attachment_hash = uploads.hash
+        ))
+        WHERE hash IN (
+          SELECT attachment_hash FROM messages
+          WHERE user_id = ? AND attachment_hash IS NOT NULL
+        )
+      `),
+      dropMessages: db.prepare('DELETE FROM messages WHERE user_id = ?'),
+      releaseAvatar: db.prepare('UPDATE uploads SET refs = MAX(0, refs - 1) WHERE hash = ?'),
+      // The clip and the emoji stay. They are server-wide things other
+      // people are using; only the credit for them goes.
+      disownClips: db.prepare('UPDATE soundpad_clips SET uploaded_by = NULL WHERE uploaded_by = ?'),
+      disownEmojis: db.prepare('UPDATE emojis SET uploaded_by = NULL WHERE uploaded_by = ?'),
+      dropUser: db.prepare('DELETE FROM users WHERE id = ?'),
     };
   }
 
@@ -319,6 +344,57 @@ export class Accounts {
 
     this.#q.setDisplayName.run(value, user.id);
     return { ok: true, user: this.#q.byId.get(user.id) };
+  }
+
+  /**
+   * Delete an account and everything written under it.
+   *
+   * ONE place that knows a person's whole footprint, because the pieces are
+   * spread across five tables and three of them have no foreign key back to
+   * users at all:
+   *
+   *   sessions, channel_grants, message_reactions  -- ON DELETE CASCADE,
+   *       so they go on their own and are not mentioned below.
+   *   messages                                     -- references users(id)
+   *       with NO cascade, so deleting the row would be REFUSED outright
+   *       while any message of theirs survives. Deleting them is also what
+   *       was asked for, so this is not a workaround.
+   *   messages_fts                                 -- not a real foreign
+   *       key at all. A search index that still answers with deleted rows
+   *       is the quiet half of this bug.
+   *   uploads.refs                                 -- a count this module
+   *       does not own, so every reference taken has to be given back or
+   *       the files never become evictable.
+   *   soundpad_clips, emojis                       -- reference users(id)
+   *       and would block the delete. The clip and the emoji are shared
+   *       things other people use; only the credit is dropped.
+   *
+   * All in one transaction. Half a deleted account is worse than none.
+   */
+  remove(userId) {
+    const user = this.#q.byId.get(userId);
+    if (!user) return { ok: false, error: 'no_such_user' };
+    // A server with no owner has no way back short of editing the database
+    // by hand -- the same reason the last owner cannot demote themselves.
+    if (user.role === 'owner') return { ok: false, error: 'cannot_remove_owner' };
+
+    const messages = this.#q.countMessages.get(userId).n;
+
+    this.#db.exec('BEGIN');
+    try {
+      this.#q.releaseAttachments.run(userId, userId);
+      this.#q.dropMessageFts.run(userId);
+      this.#q.dropMessages.run(userId);
+      if (user.avatar_hash) this.#q.releaseAvatar.run(user.avatar_hash);
+      this.#q.disownClips.run(userId);
+      this.#q.disownEmojis.run(userId);
+      this.#q.dropUser.run(userId);
+      this.#db.exec('COMMIT');
+    } catch (err) {
+      this.#db.exec('ROLLBACK');
+      throw err;
+    }
+    return { ok: true, user, messages };
   }
 
   setAvatar(userId, hash) {
