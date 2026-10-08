@@ -1,0 +1,539 @@
+//! `settings.json`, in the same place and with the same keys the Electron client used, so an
+//! upgrade keeps the server, the sign-in and every preference. Keys this client does not know
+//! are kept as they were. The passwords and sign-ins in it are sealed for this Windows user (see
+//! `secret`); the plain ones an older client wrote are read and sealed on the spot.
+
+use super::api::normalize_base;
+use super::secret;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Settings {
+    /// The server in use, and who you are on it. With several saved servers these always mirror
+    /// the active one, so the old keys keep meaning what they did.
+    pub server_url: String,
+    pub username: String,
+    /// The server's own password, not the account's.
+    pub password: String,
+    pub session_token: String,
+    /// Every server you connected to, in the rail's order.
+    pub saved_servers: Vec<SavedServer>,
+    pub remember_account: bool,
+    pub media_cache_mb: u64,
+    pub resolution: String,
+    pub framerate: u32,
+    pub priority: String,
+    pub audio_input_id: String,
+    pub voice_input_id: String,
+    pub voice_output_id: String,
+    pub voice_camera_id: String,
+    pub mic_gain: u32,
+    pub mic_sensitivity: u32,
+    pub voice_sounds: bool,
+    pub theme: String,
+    pub custom_theme: Option<CustomTheme>,
+    pub show_members: bool,
+    pub soundpad_volume: u32,
+    pub recent_emoji: Vec<String>,
+    pub ui_scale: u32,
+    pub mention_sound: bool,
+    pub clips_enabled: bool,
+    pub hardware_encoding: String,
+    pub gpu_preference: String,
+    pub window_audio_fallback: String,
+    // New in the native client.
+    /// Asks GitHub for a newer version at start and every few hours.
+    pub check_updates: bool,
+    pub noise_suppression: bool,
+    pub echo_cancellation: bool,
+    pub camera_background: Background,
+    pub custom_backgrounds: Vec<String>,
+    /// "en", "pt", or empty to follow the system.
+    pub language: String,
+}
+
+/// A server in the rail: where it is, who you are there, and its name and picture as last seen,
+/// so the rail draws before anything answers.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SavedServer {
+    pub url: String,
+    pub password: String,
+    pub username: String,
+    pub session_token: String,
+    pub name: String,
+    /// The picture's upload hash, kept in the media cache; empty for none.
+    pub icon: String,
+}
+
+impl SavedServer {
+    /// The address without its scheme, as people type it.
+    pub fn host(&self) -> String {
+        let base = normalize_base(&self.url);
+        base.split_once("://").map(|(_, h)| h.to_string()).unwrap_or(base)
+    }
+}
+
+/// Whether two addresses are the same server, however they were typed.
+pub fn same_server(a: &str, b: &str) -> bool {
+    !a.trim().is_empty() && normalize_base(a).eq_ignore_ascii_case(&normalize_base(b))
+}
+
+impl Settings {
+    pub fn saved_server(&self, url: &str) -> Option<&SavedServer> {
+        self.saved_servers.iter().find(|s| same_server(&s.url, url))
+    }
+
+    /// The saved server the top-level keys point at.
+    pub fn active_server(&self) -> Option<usize> {
+        self.saved_servers.iter().position(|s| same_server(&s.url, &self.server_url))
+    }
+
+    /// After a sign-in: adds the server or refreshes it where it is, and makes it the active one.
+    pub fn remember_server(&mut self, server: SavedServer) {
+        match self.saved_servers.iter_mut().find(|s| same_server(&s.url, &server.url)) {
+            Some(s) => *s = server.clone(),
+            None => self.saved_servers.push(server.clone()),
+        }
+        self.use_server(&server);
+    }
+
+    /// Points the top-level keys at a saved server; false when there is no such server.
+    pub fn switch_server(&mut self, url: &str) -> bool {
+        let Some(server) = self.saved_server(url).cloned() else { return false };
+        self.use_server(&server);
+        true
+    }
+
+    /// Takes a server off the list. When it was the active one the top-level keys are cleared.
+    pub fn forget_server(&mut self, url: &str) -> Option<SavedServer> {
+        let i = self.saved_servers.iter().position(|s| same_server(&s.url, url))?;
+        if self.active_server() == Some(i) {
+            self.use_server(&SavedServer::default());
+        }
+        Some(self.saved_servers.remove(i))
+    }
+
+    pub fn move_server(&mut self, url: &str, to: usize) {
+        let Some(from) = self.saved_servers.iter().position(|s| same_server(&s.url, url)) else { return };
+        let s = self.saved_servers.remove(from);
+        self.saved_servers.insert(to.min(self.saved_servers.len()), s);
+    }
+
+    /// Drops a sign-in the server refused.
+    pub fn forget_token(&mut self, url: &str) {
+        if let Some(s) = self.saved_servers.iter_mut().find(|s| same_server(&s.url, url)) {
+            s.session_token.clear();
+        }
+        if same_server(&self.server_url, url) {
+            self.session_token.clear();
+        }
+    }
+
+    fn use_server(&mut self, s: &SavedServer) {
+        self.server_url = s.url.clone();
+        self.password = s.password.clone();
+        self.username = s.username.clone();
+        self.session_token = s.session_token.clone();
+    }
+
+    /// Carries changes made through the top-level keys (signing out, a new server password)
+    /// into the saved server they describe.
+    fn sync_active(&mut self) {
+        let Some(i) = self.active_server() else { return };
+        let s = &mut self.saved_servers[i];
+        s.password = self.password.clone();
+        s.username = self.username.clone();
+        s.session_token = self.session_token.clone();
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CustomTheme {
+    pub bg: String,
+    pub surface: String,
+    pub text: String,
+    pub accent: String,
+}
+
+/// What replaces the room behind you on camera.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Background {
+    #[default]
+    None,
+    Blur {
+        strength: u32,
+    },
+    /// One of the pictures that ship with Harmony, by name.
+    Builtin {
+        name: String,
+    },
+    /// A picture the person added, by path.
+    Image {
+        path: String,
+    },
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            server_url: String::new(),
+            username: String::new(),
+            password: String::new(),
+            session_token: String::new(),
+            saved_servers: Vec::new(),
+            remember_account: true,
+            media_cache_mb: 512,
+            resolution: String::new(),
+            framerate: 0,
+            priority: "sharp".into(),
+            audio_input_id: String::new(),
+            voice_input_id: String::new(),
+            voice_output_id: String::new(),
+            voice_camera_id: String::new(),
+            mic_gain: 100,
+            mic_sensitivity: 0,
+            voice_sounds: true,
+            theme: "midnight".into(),
+            custom_theme: None,
+            show_members: true,
+            soundpad_volume: 100,
+            recent_emoji: Vec::new(),
+            ui_scale: 100,
+            mention_sound: true,
+            clips_enabled: false,
+            hardware_encoding: "auto".into(),
+            gpu_preference: "auto".into(),
+            window_audio_fallback: "silent".into(),
+            check_updates: true,
+            noise_suppression: true,
+            echo_cancellation: true,
+            camera_background: Background::None,
+            custom_backgrounds: Vec::new(),
+            language: String::new(),
+        }
+    }
+}
+
+/// `%APPDATA%\Harmony`, where Electron kept `userData`. `HARMONY_DATA_DIR` moves it, for
+/// running more than one copy side by side.
+pub fn data_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("HARMONY_DATA_DIR") {
+        return PathBuf::from(dir);
+    }
+    let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    base.join("Harmony")
+}
+
+pub struct Store {
+    path: PathBuf,
+    /// The file as read, so keys this client does not know survive a save.
+    raw: Map<String, Value>,
+    /// Keys whose value did not parse, with the default used instead. The file keeps what it
+    /// had until the setting is actually changed.
+    unread: Map<String, Value>,
+    /// Each secret's sealed form, so a save (one per slider step) neither calls DPAPI again nor
+    /// rewrites a secret that did not change.
+    sealed: HashMap<String, String>,
+    pub values: Settings,
+}
+
+/// Visits every secret in the file's shape: the server password and the sign-in, at the top and
+/// in each saved server.
+fn each_secret(map: &mut Map<String, Value>, f: &mut impl FnMut(&mut String)) {
+    let mut visit = |m: &mut Map<String, Value>| {
+        for key in ["password", "sessionToken"] {
+            if let Some(Value::String(s)) = m.get_mut(key) {
+                f(s);
+            }
+        }
+    };
+    visit(map);
+    if let Some(Value::Array(list)) = map.get_mut("savedServers") {
+        for s in list.iter_mut().filter_map(Value::as_object_mut) {
+            visit(s);
+        }
+    }
+}
+
+/// The file with its secrets opened, and whether any was still unsealed. One that does not open
+/// (sealed by another Windows user, or damaged) reads as empty: signing in again replaces it.
+fn open_secrets(raw: &Map<String, Value>, sealed: &mut HashMap<String, String>) -> (Map<String, Value>, bool) {
+    let mut opened = raw.clone();
+    let mut unsealed = false;
+    each_secret(&mut opened, &mut |s| {
+        if !secret::is_sealed(s) {
+            unsealed |= !s.is_empty();
+            return;
+        }
+        match secret::open(s) {
+            Some(plain) => {
+                sealed.insert(plain.clone(), std::mem::take(s));
+                *s = plain;
+            }
+            None => {
+                log::warn!("settings.json: a saved password or sign-in did not open; it is dropped");
+                s.clear();
+            }
+        }
+    });
+    (opened, unsealed)
+}
+
+/// Reads each known key on its own, so one bad value costs that setting and not the rest.
+fn read_leniently(raw: &Map<String, Value>) -> (Settings, Map<String, Value>) {
+    let Ok(Value::Object(mut merged)) = serde_json::to_value(Settings::default()) else { return Default::default() };
+    let mut unread = Map::new();
+    for (k, v) in raw {
+        let Some(default) = merged.insert(k.clone(), v.clone()) else {
+            merged.remove(k);
+            continue;
+        };
+        if serde_json::from_value::<Settings>(Value::Object(merged.clone())).is_err() {
+            log::warn!("settings.json: {k} did not parse; using the default");
+            merged.insert(k.clone(), default.clone());
+            unread.insert(k.clone(), default);
+        }
+    }
+    (serde_json::from_value(Value::Object(merged)).unwrap_or_default(), unread)
+}
+
+impl Store {
+    pub fn load() -> Store {
+        Store::load_from(data_dir().join("settings.json"))
+    }
+
+    pub fn load_from(path: PathBuf) -> Store {
+        let raw: Map<String, Value> = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let mut sealed = HashMap::new();
+        let (opened, unsealed) = open_secrets(&raw, &mut sealed);
+        let (mut values, unread) = read_leniently(&opened);
+        values.ui_scale = values.ui_scale.clamp(70, 180);
+        if values.framerate == 0 {
+            values.framerate = 30;
+        }
+        // A file from before the rail knew one server; it becomes the first saved one.
+        if values.saved_servers.is_empty() && !values.server_url.trim().is_empty() {
+            values.saved_servers.push(SavedServer {
+                url: values.server_url.clone(),
+                password: values.password.clone(),
+                username: values.username.clone(),
+                session_token: values.session_token.clone(),
+                ..Default::default()
+            });
+        }
+        // What a save would write for the unread keys, so they are left alone until changed.
+        let unread = match serde_json::to_value(&values) {
+            Ok(Value::Object(now)) => unread.keys().filter_map(|k| Some((k.clone(), now.get(k)?.clone()))).collect(),
+            _ => unread,
+        };
+        let mut store = Store { path, raw, unread, sealed, values };
+        // Secrets an older client left in the clear are not left there until some setting changes.
+        if unsealed && secret::SEALS {
+            store.save();
+        }
+        store
+    }
+
+    pub fn save(&mut self) {
+        self.values.sync_active();
+        let Value::Object(fresh) = serde_json::to_value(&self.values).unwrap_or(Value::Null) else { return };
+        // Compared with `unread` as it is, in the clear, and written sealed.
+        let mut stored = fresh.clone();
+        let sealed = &mut self.sealed;
+        each_secret(&mut stored, &mut |s| {
+            if !s.is_empty() {
+                *s = sealed.entry(std::mem::take(s)).or_insert_with_key(|plain| secret::seal(plain)).clone();
+            }
+        });
+        for (k, v) in fresh {
+            if self.unread.get(&k) == Some(&v) {
+                continue;
+            }
+            self.unread.remove(&k);
+            if let Some(v) = stored.remove(&k) {
+                self.raw.insert(k, v);
+            }
+        }
+        if let Some(dir) = self.path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let text = serde_json::to_string_pretty(&Value::Object(self.raw.clone())).unwrap_or_default();
+        // Write beside it and rename, so a crash mid-write never leaves half a file.
+        let tmp = self.path.with_extension("json.part");
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, &self.path);
+        }
+    }
+
+    pub fn update(&mut self, f: impl FnOnce(&mut Settings)) {
+        f(&mut self.values);
+        self.save();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_keys_survive_a_save() {
+        let dir = std::env::temp_dir().join(format!("harmony-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{"serverUrl":"pi.local:8080","quality":"high","uiScale":400}"#).unwrap();
+        let mut store = Store::load_from(path.clone());
+        assert_eq!(store.values.server_url, "pi.local:8080");
+        assert_eq!(store.values.ui_scale, 180);
+        store.update(|s| s.username = "predo".into());
+        let back: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back["quality"], "high");
+        assert_eq!(back["username"], "predo");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn scratch(name: &str, contents: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("harmony-settings-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, contents).unwrap();
+        (dir, path)
+    }
+
+    fn server(url: &str, user: &str, token: &str, name: &str) -> SavedServer {
+        SavedServer { url: url.into(), username: user.into(), session_token: token.into(), name: name.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn one_server_files_become_the_first_saved_server() {
+        let (dir, path) = scratch(
+            "migrate",
+            r#"{"serverUrl":"pi.local:8080","username":"predo","sessionToken":"tok","password":"door","quality":"high"}"#,
+        );
+        let mut store = Store::load_from(path.clone());
+        assert_eq!(store.values.saved_servers.len(), 1);
+        let s = &store.values.saved_servers[0];
+        assert_eq!(
+            (s.url.as_str(), s.username.as_str(), s.session_token.as_str(), s.password.as_str()),
+            ("pi.local:8080", "predo", "tok", "door")
+        );
+        assert_eq!(store.values.active_server(), Some(0));
+        store.save();
+        let back: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back["savedServers"][0]["url"], "pi.local:8080");
+        assert_eq!(back["serverUrl"], "pi.local:8080");
+        assert_eq!(back["quality"], "high");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_bad_value_costs_only_its_own_setting() {
+        let (dir, path) = scratch(
+            "lenient",
+            r#"{"serverUrl":"pi.local:8080","username":"predo","sessionToken":"tok","theme":"onyx","uiScale":1.5,"micGain":null,"framerate":"x"}"#,
+        );
+        let mut store = Store::load_from(path.clone());
+        let v = &store.values;
+        assert_eq!(
+            (v.server_url.as_str(), v.username.as_str(), v.session_token.as_str(), v.theme.as_str()),
+            ("pi.local:8080", "predo", "tok", "onyx")
+        );
+        assert_eq!((v.ui_scale, v.mic_gain, v.framerate), (100, 100, 30));
+        store.save();
+        let back: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!((back["uiScale"].clone(), back["micGain"].clone(), back["framerate"].clone()), (1.5.into(), Value::Null, "x".into()));
+        assert_eq!(back["sessionToken"].as_str().and_then(secret::open).as_deref(), Some("tok"));
+        store.update(|s| s.mic_gain = 80);
+        let back: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!((back["micGain"].clone(), back["uiScale"].clone()), (80.into(), 1.5.into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_top_level_keys_follow_the_active_server() {
+        let mut s = Settings::default();
+        s.remember_server(server("pi.local:8080", "predo", "a", "Pi"));
+        s.remember_server(server("http://box:9000/", "lis", "b", "Box"));
+        assert_eq!((s.server_url.as_str(), s.username.as_str(), s.session_token.as_str()), ("http://box:9000/", "lis", "b"));
+        assert!(s.switch_server("http://pi.local:8080"));
+        assert_eq!((s.username.as_str(), s.session_token.as_str()), ("predo", "a"));
+        // Signing in again refreshes the entry where it is.
+        s.remember_server(server("PI.local:8080/", "predo", "c", "Pi renamed"));
+        assert_eq!(s.saved_servers.len(), 2);
+        assert_eq!(s.saved_servers[0].name, "Pi renamed");
+        // Signing out through the old keys reaches the saved server.
+        s.session_token.clear();
+        s.sync_active();
+        assert_eq!(s.saved_servers[0].session_token, "");
+        assert_eq!(s.saved_servers[1].session_token, "b");
+        s.move_server("box:9000", 0);
+        assert_eq!(s.saved_servers[0].name, "Box");
+        s.forget_token("box:9000");
+        assert_eq!(s.saved_servers[0].session_token, "");
+        assert_eq!(s.forget_server("pi.local:8080").map(|s| s.name), Some("Pi renamed".into()));
+        assert_eq!((s.server_url.as_str(), s.username.as_str()), ("", ""));
+        assert_eq!(s.active_server(), None);
+    }
+
+    #[test]
+    fn secrets_are_sealed_on_disk_and_read_back() {
+        let (dir, path) = scratch(
+            "sealed",
+            r#"{"serverUrl":"pi.local:8080","username":"predo","sessionToken":"tok","password":"door","quality":"high",
+                "savedServers":[{"url":"pi.local:8080","username":"predo","sessionToken":"tok","password":"door"},
+                                {"url":"box:9000","username":"lis","sessionToken":"tok2","password":"","name":"Box"}]}"#,
+        );
+        let store = Store::load_from(path.clone());
+        let v = &store.values;
+        assert_eq!((v.session_token.as_str(), v.password.as_str()), ("tok", "door"));
+        assert_eq!((v.saved_servers[1].session_token.as_str(), v.saved_servers[1].password.as_str()), ("tok2", ""));
+
+        // Sealed the moment it was read, without waiting for a setting to change.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let back: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(back["quality"], "high");
+        assert_eq!(back["savedServers"][1]["password"], "");
+        if secret::SEALS {
+            assert!(!text.contains("\"tok") && !text.contains("\"door"), "{text}");
+            assert!(secret::is_sealed(back["sessionToken"].as_str().unwrap()));
+        }
+
+        // Read back, and saved again without sealing anew.
+        let mut again = Store::load_from(path.clone());
+        assert_eq!(again.values, store.values);
+        again.update(|s| s.mic_gain = 80);
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["sessionToken"], back["sessionToken"]);
+        assert_eq!(after["savedServers"][1]["sessionToken"], back["savedServers"][1]["sessionToken"]);
+        again.update(|s| s.session_token = "new".into());
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["savedServers"][0]["sessionToken"].as_str().and_then(secret::open).as_deref(), Some("new"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_secret_that_does_not_open_costs_only_itself() {
+        let (dir, path) = scratch(
+            "unopened",
+            r#"{"serverUrl":"pi.local:8080","username":"predo","sessionToken":"dpapi:00ff","password":"door","theme":"onyx"}"#,
+        );
+        let store = Store::load_from(path);
+        let v = &store.values;
+        assert_eq!((v.session_token.as_str(), v.password.as_str(), v.theme.as_str()), ("", "door", "onyx"));
+        assert_eq!(v.saved_servers[0].session_token, "");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn backgrounds_round_trip() {
+        let b = Background::Blur { strength: 12 };
+        let s = serde_json::to_string(&b).unwrap();
+        assert_eq!(s, r#"{"kind":"blur","strength":12}"#);
+        assert_eq!(serde_json::from_str::<Background>(&s).unwrap(), b);
+    }
+}

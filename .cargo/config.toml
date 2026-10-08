@@ -1,0 +1,3 @@
+# libwebrtc ships built against the static CRT (/MT), so everything links against it too.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,14 +1,14 @@
 {
   "name": "harmony",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "private": true,
-  "description": "Low-latency screen sharing: a relay-only WebRTC server for Raspberry Pi and an Electron client",
+  "description": "Low-latency screen sharing: a relay-only WebRTC server for Raspberry Pi and a native desktop client",
   "scripts": {
-    "install:all": "npm --prefix ./server install && npm --prefix ./client install",
+    "install:all": "npm --prefix ./server install",
     "server": "npm --prefix ./server start",
-    "client": "npm --prefix ./client start",
-    "start": "npm --prefix ./client start",
-    "build:client": "npm --prefix ./client run build"
+    "client": "cargo run --manifest-path client/Cargo.toml",
+    "start": "cargo run --manifest-path client/Cargo.toml",
+    "build:client": "cargo build --release --manifest-path client/Cargo.toml"
   },
   "license": "MIT"
 }

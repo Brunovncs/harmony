@@ -11,7 +11,7 @@ shaped this way — this file is the procedure.
 > The full caveat is at the bottom of the [README](README.md#disclaimer-vibe-coded).
 
 - [Part 1 — the server](#part-1--the-server)
-- [Part 2 — the client](#part-2--the-client)
+- [Part 2: the client](#part-2-the-client)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -135,6 +135,17 @@ Two settings actually matter; the rest have working defaults.
 | **`HARMONY_SIGNALING_URL`** | Where **clients** reach MediaMTX's WHIP/WHEP endpoint, e.g. `https://stream.example.com:8444`. May point at a reverse proxy or a tunnel. |
 | **`MTX_WEBRTCADDITIONALHOSTS`** | Your public hostname or static IP. MediaMTX advertises this as an ICE candidate. **Without it, nobody outside your LAN can connect** — remote viewers only ever see the server's private address. |
 | **`HARMONY_PASSWORD`** | A shared password for the whole server. Leave it unset and the server is open to anyone who can reach it. See below. |
+
+### A server with more than one address
+
+When people reach the server by different addresses, say a LAN IP at home and a
+Tailscale IP from outside, one fixed `HARMONY_SIGNALING_URL` leaves one of the
+groups without media. Set `HARMONY_SIGNALING_URL=auto` instead and each client is
+sent to MediaMTX on the same host it used to reach Harmony, on port 8889. For
+another scheme, port or path, write the URL with `auto` as its host, like
+`https://auto:8444`. A reverse proxy in front of the control server has to pass
+the original `Host` header on for this to work. Keep every address in
+`MTX_WEBRTCADDITIONALHOSTS` as well, so the media itself has a candidate on each.
 
 ### Setting a password
 
@@ -356,16 +367,11 @@ curl -s https://stream.example.com:8444/api/health   # from anywhere else
 ```
 
 `/api/health` reporting `mediamtx: true` means the two processes can see each
-other. It says nothing about whether anyone can reach you — for that, run the
-end-to-end check from a client machine, on a different network if you can:
-
-```bash
-HARMONY_SERVER=https://stream.example.com:8444 node client/test/verify-deployment.mjs
-```
-
-It publishes a synthetic stream, watches it back with a second client, and
-prints the ICE candidates the server advertised — which is the thing that
-actually decides whether outsiders can connect.
+other. It says nothing about whether anyone can reach you. For that, sign in
+from a client machine, on a different network if you can, and run Settings,
+Advanced, **Test the connection**: it publishes a tiny stream the way a real
+share does and reports the server, the media server, STUN and the media path
+one step at a time, with the candidate pair that won.
 
 ### The API
 
@@ -403,149 +409,79 @@ sudo userdel harmony
 
 ---
 
-# Part 2 — the client
+# Part 2: the client
 
-## Running from source
-
-```bash
-cd client
-npm install
-npm start
-```
-
-Needs Node 20+ and whatever `electron` pulls down (~200 MB on first install).
+The client is a native Windows app written in Rust, with [GPUI](https://www.gpui.rs/)
+for the window and Google's libwebrtc (through LiveKit's Rust bindings) for the
+media. It talks to the same server, over the same API, as the Electron client of
+3.x did, and reads the same `settings.json`, so an upgrade keeps the server, the
+sign-in and every preference.
 
 ## Building
 
-```bash
-npm run build          # -> dist/Harmony-<version>-setup.exe, ~12 s, ~108 MB
-npm run build:release  # the same, ~75 s, ~86 MB -- for the copy you hand out
-npm run build:zip      # a plain zip of the app, for running without installing
-npm run build:all      # release installer plus a Linux AppImage and a macOS dmg
-```
-
-Since 3.0.0 the Windows build is a **per-user installer**: one click, no admin
-rights, no UAC prompt, installed to `%LOCALAPPDATA%\Programs\Harmony`. Settings
-live in `%APPDATA%` as before and survive upgrades and uninstalls.
-
-It replaced the self-extracting portable .exe of 2.x, which unpacked ~300 MB of
-Chromium into `%TEMP%` on **every launch** before the app could start, and had
-Windows Defender scan all of it each time as freshly written, unsigned
-executables. Measured on the same machine:
-
-| | 2.9.1 portable | 3.0.0 installed |
-| --- | --- | --- |
-| launch to a visible window | ~6.6 s | ~0.1 s |
-| launch to a usable app | ~4.5 s | ~0.2 s |
-| `npm run build` | 77 s | 12 s |
-
-The build time is 7-Zip. electron-builder archives the installer payload at
-`-mx=9` regardless of the `compression` setting; `scripts/build.js` sets
-`ELECTRON_BUILDER_COMPRESSION_LEVEL` (3 for `build`, 9 for `build:release`),
-which is the only override it honours. The measurements behind the two levels
-are in that file.
-
-**Antivirus and SmartScreen.** Defender's own scan finds nothing in either the
-installer or the installed files. What remains is SmartScreen's "Windows
-protected your PC" on a downloaded, unsigned installer -- that is about the
-missing publisher signature, not about the contents, and only code signing
-removes it. The build already avoids the other common triggers: it never
-requests elevation (`requestedExecutionLevel: asInvoker`) and does not ship
-electron-builder's `elevate.exe` helper (`packElevateHelper: false`).
-
-Essentially all of that size is the Chromium runtime — the app itself is under a
-megabyte. The build trims it by shipping only the `en-US` locale (Chromium
-carries 55, ~48 MB), deleting `dxcompiler.dll` and `dxil.dll` (27 MB of DirectX
-shader compilation for WebGPU, which Harmony does not use), and compressing at
-7-Zip level 9 for `build:release`. If a trimmed file ever turns out to be needed on some machine, the list
-is one array in [client/scripts/after-pack.js](client/scripts/after-pack.js).
-Verify any change to it against a packaged build, not just `npm start`:
+You need [Rust](https://rustup.rs/) (stable, the MSVC toolchain) and the Visual
+Studio Build Tools with the C++ workload and a Windows SDK. libwebrtc ships
+prebuilt for MSVC only, which is why the GNU toolchain will not do.
 
 ```bash
-HARMONY_BIN=client/dist/win-unpacked/Harmony.exe npm --prefix client test
+cargo run --manifest-path client/Cargo.toml                    # run it
+cargo build --release --manifest-path client/Cargo.toml        # client/target/release/harmony.exe
 ```
 
-Cross-building has the usual limits: a Windows `.exe` builds anywhere, a macOS
-`.dmg` really wants macOS, and an AppImage wants Linux.
+The first build downloads libwebrtc (about 200 MB) and takes several minutes;
+later ones take seconds. `.cargo/config.toml` at the repository root links
+everything against the static C runtime, which libwebrtc requires. The release
+binary is one `harmony.exe` of about 66 MB with nothing beside it: fonts, icons,
+the camera backgrounds and the segmentation model are all inside.
 
-### The native audio module
+Without `fxc.exe` (it comes with the Windows SDK), build with
+`--profile local`: GPUI then compiles its shaders at startup instead of ahead of
+time.
 
-`loopback-capture` is an **optional** dependency, and deliberately so — the build
-succeeds without it on every platform. It is what provides true per-application
-audio on Windows through the WASAPI process-loopback API. Without it, a window
-share falls back to whatever the user picks in the client (silent by default, so
-other applications' sound never leaks into a stream by accident).
+## What the client does itself
 
-It ships as a prebuilt binary, so no Visual Studio toolchain is needed. One thing
-matters for packaging: it resolves its `.node` file from the filesystem via the
-`bindings` package, which cannot see inside an asar archive. `asarUnpack` in
-[client/electron-builder.yml](client/electron-builder.yml) is what makes it work
-in a packaged build — if you change that file, keep the entry.
+**Audio.** WebRTC's audio device module is not used. The client captures the
+microphone and plays the speakers itself (`cpal`), and runs the audio processing
+module (echo cancellation, noise suppression) on the microphone with the mix the
+speakers play as its reference. That is what makes per-person volume up to 350%,
+deafening that spares the soundpad, and the noise gate possible.
 
-### Hardware encoding
+**Screen sound.** Through Windows' process loopback (Windows 10 2004 or later):
+a screen share sends everything the computer plays except Harmony itself, so
+viewers never hear the call back; a window share can send only that
+application's sound.
 
-Nothing to configure. On Windows, Chromium routes WebRTC's H.264 encoding
-through Media Foundation, which uses NVENC, AMF or Quick Sync depending on the
-driver — measured at 18–46% less encode time than the software path, with the
-margin depending on how busy the picture is. Hardware decoding is on for viewers
-too.
+**Hardware encoding.** Cameras and screens ask libwebrtc for the GPU's H.264
+encoder and fall back to OpenH264 in software when there is none. Settings,
+Advanced turns the GPU off for the one case that justifies it: a driver whose
+stream looks fine locally and corrupt to every viewer. H.264 is offered High
+profile first, as 3.x did, because NVIDIA's encoder and decoder refuse
+baseline.
 
-Software H.264 (OpenH264) is the automatic fallback when no hardware encoder is
-available, so a machine without one still works.
+**Camera backgrounds.** Blur, the six pictures in `client/assets/backgrounds`
+(drawn by `cargo run --example backgrounds`, so they can be remade), or a
+picture of your own. MediaPipe's selfie segmenter (Apache 2.0) runs on the CPU
+through tract, every other frame at 256 x 256, in about 17 ms; the mask is
+smoothed over time and used to blend the person over the new background before
+the frame is encoded.
 
-The **Encode on the GPU** checkbox on the connect screen turns it off, for the
-one case that justifies it: a driver that produces a stream looking fine locally
-and corrupt to every viewer. It is a Chromium command-line switch, so it applies
-on restart rather than live, and the app offers the restart.
+## First run
 
-`encoderImplementation` is absent from this Electron build's WebRTC stats, so
-the app reports the GPU's *capability* rather than claiming to know which
-encoder a given stream used. If you measure this yourself, query
-`getGPUFeatureStatus()` only after a window exists — before that it reports
-`disabled_software` regardless of the truth.
-
-### First run
-
-The client asks for the control-server address — `https://stream.example.com:8444`,
-or `192.168.1.50:8080` on a LAN — and a username. That one URL is all it needs;
-the control server hands it the WHIP/WHEP endpoints and the ICE servers.
-
-The address is remembered, so a built `.exe` can be handed to someone who then
-only types a name.
+The client asks for the control server's address (`https://stream.example.com:8444`,
+or `192.168.1.50:8080` on a LAN), a username and a password. That one URL is all
+it needs; the control server hands it the WHIP/WHEP endpoints and the ICE
+servers. With "Remember me" on, later launches go straight in.
 
 ## Tests
 
 ```bash
-npm --prefix server test    # reservation, accounts, channels, chat, soundpad
-npm --prefix client test    # launches the app, drives it over CDP
-npm --prefix client run test:ui   # clicks through the channels view
-
-MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:e2e
-MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:channel-video
-MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:voice
+npm --prefix server test                       # reservation, accounts, channels, chat, soundpad
+cargo test --manifest-path client/Cargo.toml   # protocol types, settings, markdown, emoji, audio, video
 ```
 
-Counts are deliberately not written down here — they went stale every release.
-Each suite prints its own total.
-
-The e2e suite is the real thing: it starts MediaMTX and the control server, then
-drives two Electron clients over the DevTools Protocol — one publishes its screen
-over WHIP, the other enters the same username and must end up decoding that video
-over WHEP. Nothing is mocked. It needs a MediaMTX binary; download one from
-[the releases page](https://github.com/bluenviron/mediamtx/releases) for your
-machine's architecture.
-
-To check a **packaged** build, which is where asar breaks native modules and
-custom protocols:
-
-```bash
-HARMONY_BIN=client/dist/win-unpacked/Harmony.exe npm --prefix client test
-```
-
-One gotcha if you run these from an environment that sets it: `ELECTRON_RUN_AS_NODE=1`
-makes Electron start as plain Node and every test fails confusingly. The harness
-clears it for the processes it spawns.
-
+`cargo run --manifest-path client/Cargo.toml -- --smoke` opens the window, waits
+a moment and exits 0, for a check that the GPU and the window come up on a given
+machine.
 ---
 
 # Troubleshooting
@@ -553,7 +489,7 @@ clears it for the processes it spawns.
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | Works on the LAN, nothing from outside | `MTX_WEBRTCADDITIONALHOSTS` unset, so only private candidates are advertised | Set it, restart `mediamtx` |
-| Viewer gets audio, video stays "connecting" | Almost always UDP 8189 not forwarded | Forward it; verify with `verify-deployment.mjs` |
+| Viewer gets audio, video stays "connecting" | Almost always UDP 8189 not forwarded | Forward it; verify with the client's connection test |
 | Every WebRTC session fails, log says `netlinkrib: address family not supported` | Systemd sandboxing blocked netlink, which MediaMTX needs to enumerate interfaces | `RestrictAddressFamilies` must include `AF_NETLINK` (the shipped unit does) |
 | MediaMTX exits at startup complaining about a config key | Version mismatch — keys are added and removed between releases | Use the pinned version; `MEDIAMTX_VERSION` in `install.sh` |
 | `403` on publish | The username is live and held by someone else | By design: `overridePublisher: no` plus the control server's token claim |
@@ -563,7 +499,7 @@ clears it for the processes it spawns.
 | Caddy will not start, port 80 in use | It binds 80 for redirects even on a high-port site | `auto_https disable_redirects` |
 | Certificate stops renewing | DNS token expired | Replace it in `/etc/letsencrypt/cloudflare.ini`, then `sudo certbot renew --dry-run` |
 | Everything works, then breaks hours later | Public IP moved | Check `harmony-ip-watch.timer` is active and your DDNS is current |
-| Stream is 5–10 fps | Usually the client's bitrate ceiling, not the network | Raise the quality preset; read the ⚠ line in the client's stats for `bandwidth` vs `cpu` |
+| Stream is 5–10 fps | Usually the client's bitrate ceiling, not the network | Pick a higher resolution or frame rate in the share picker; the presets set the bitrate ceiling |
 
 ## When a client still cannot connect
 
@@ -581,9 +517,9 @@ sharing is measured in megabits per second, so treat any free tier as a handful
 of hours rather than a default path. Only clients that cannot connect otherwise
 will use it. `server/.env.example` lists the free tiers that work here.
 
-The client has a **Test connection** button on the connect screen that walks
-health → session → STUN → SDP → media and reports which step failed, which is
-usually faster than guessing.
+The client's connection test (Settings, Advanced) walks health, session, STUN,
+SDP and media and reports which step failed, which is usually faster than
+guessing.
 
 ## Security notes
 

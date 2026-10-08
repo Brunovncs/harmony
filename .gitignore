@@ -34,6 +34,9 @@ dist/
 out/
 *.tsbuildinfo
 
+# The desktop client's Cargo output.
+target/
+
 # MediaMTX is fetched by server/install.sh at the pinned version.
 mediamtx
 mediamtx.exe

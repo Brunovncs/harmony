@@ -1,0 +1,92 @@
+[package]
+name = "harmony"
+description = "Harmony desktop client: voice, screen sharing and text chat for a group of friends"
+version = "4.0.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+authors = ["Pedro Lucas Miguel"]
+
+[[bin]]
+name = "harmony"
+path = "src/main.rs"
+
+[dependencies]
+# GPUI as published by the gpui-kit maintainers (`gpui-pre-*` snapshots of Zed). Pinned exactly:
+# its API moves with Zed.
+gpui = { package = "gpui-pre", version = "=0.3.7" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = ["font-kit"] }
+# LiveKit's bindings to Google's libwebrtc: peer connections, the audio processing module (echo
+# cancellation, noise suppression), desktop capture and libyuv.
+libwebrtc = "0.3.51"
+
+anyhow = "1"
+async-channel = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+cpal = "0.18"
+dirs = "7"
+emojis = "0.9"
+futures = "0.3"
+hex = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+nokhwa = { version = "0.10", default-features = false, features = ["input-msmf"] }
+parking_lot = "0.12"
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "charset", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+smallvec = "1"
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "wav", "ogg", "vorbis", "flac", "pcm"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
+tract-onnx = "0.23"
+unicode-segmentation = "1"
+url = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Security_Cryptography",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_Devices_FunctionDiscovery",
+] }
+windows-core = "0.62"
+
+[build-dependencies]
+embed-resource = "3"
+
+[profile.dev.package."*"]
+# Media code is unusable unoptimised: decoding, scaling and segmentation run every frame.
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# `cargo build --profile local`: a release build for machines without fxc.exe. GPUI's Windows
+# backend precompiles its shaders in release builds; with debug assertions on for that one crate
+# it compiles them at startup instead.
+[profile.local]
+inherits = "release"
+
+[profile.local.package.gpui-pre-windows]
+debug-assertions = true
+
+[profile.local.build-override]
+debug-assertions = true

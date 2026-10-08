@@ -1,5 +1,9 @@
 # Dual-GPU weirdness
 
+> These notes come from the Electron client of 3.x. The native client of 4.0 keeps what they
+> found about the H.264 profile (High first, see `client/src/media/rtc.rs`) and its own preview
+> is a small, slow copy rather than the full capture; the Chromium switches no longer apply.
+
 Notes from tracking down why a WebRTC screen share on a hybrid-graphics Windows
 laptop cost far more than it should have.
 
