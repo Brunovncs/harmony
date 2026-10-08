@@ -307,6 +307,10 @@ module.exports = {
   // Your own only; the server refuses anybody else's, admin or not.
   editMessage: (s, id, body) =>
     requestJson(s, `/api/messages/${id}/edit`, { method: 'POST', body: { body } }),
+  // An absent hash means "take the file off", which the server refuses if
+  // it would leave the message with nothing in it.
+  setAttachment: (s, id, body) =>
+    requestJson(s, `/api/messages/${id}/attachment`, { method: 'POST', body }),
   // A toggle, not an add: the server decides, because clicking an emoji
   // somebody else already chose has to add to it rather than replace it.
   react: (s, id, emoji, on) =>

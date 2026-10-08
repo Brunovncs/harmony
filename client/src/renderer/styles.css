@@ -1995,6 +1995,7 @@ button.danger {
  */
 .attachment {
   display: block;
+  position: relative;
   margin-top: 0.25rem;
   max-width: min(420px, 100%);
 }
@@ -2013,17 +2014,126 @@ button.danger {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Quiet until the row is hovered, like the other per-message controls --
-   a column of download arrows reads as a list of things to do. */
-.attachment-save {
-  flex: 0 0 auto;
-  opacity: 0.45;
+/*
+ * Save and replace, floating over the file's top-right corner.
+ *
+ * On the attachment rather than in the message badge above it, because
+ * that badge is about the MESSAGE and these are about the FILE. On a
+ * message with a picture and a sentence the two sets answer different
+ * questions, and one row of six buttons makes you read all six to find
+ * either.
+ *
+ * .attachment carries position: relative for this, and nothing else.
+ */
+.attachment-tools {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.4rem;
+  display: flex;
+  gap: 0.1rem;
+  padding: 0.15rem;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
   transition: opacity 90ms ease-out;
 }
-.chat-msg:hover .attachment-save,
-.attachment-save:focus-visible,
-.attachment-save:disabled {
+/* pointer-events as well as opacity, for the same reason the message
+   badge needs it: invisible buttons that still take clicks land the click
+   somewhere nobody can see. */
+.chat-msg:hover .attachment-tools,
+.attachment-tools:focus-within {
   opacity: 1;
+  pointer-events: auto;
+}
+
+/*
+ * A file with no preview -- a PDF, a text file -- has nothing to float
+ * over but its own filename, so the buttons go on the end of that line
+ * instead. Floating them there would cover the one thing the row says.
+ */
+.attachment-tools.inline {
+  position: static;
+  margin-left: auto;
+  padding: 0;
+  background: none;
+  border: 0;
+  box-shadow: none;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* A picture that opens. The cursor is the only thing that says so before
+   the pointer has been there long enough for a tooltip. */
+.chat-msg img.expandable {
+  cursor: zoom-in;
+}
+
+/* ---------- a picture, full size ---------- */
+
+/*
+ * Over everything, including the popovers.
+ *
+ * Not a <dialog>: a modal one traps focus and makes the rest of the app
+ * inert, which is right for a question and heavy-handed for looking at a
+ * photograph.
+ */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem 2rem 4rem;
+  background: rgb(0 0 0 / 0.82);
+  cursor: zoom-out;
+}
+.lightbox img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+  box-shadow: 0 10px 40px rgb(0 0 0 / 0.6);
+}
+/*
+ * The name and the controls, on the backdrop below the picture rather than
+ * on top of it. A bar over the image covers the part of it somebody opened
+ * the image to see.
+ */
+.lightbox-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 1rem;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  max-width: calc(100% - 2rem);
+  padding: 0.3rem 0.5rem;
+  border-radius: 999px;
+  background: rgb(0 0 0 / 0.6);
+  border: 1px solid rgb(255 255 255 / 0.12);
+  cursor: default;
+}
+.lightbox-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82rem;
+  color: #fff;
+  opacity: 0.8;
+}
+/* The bar sits on black whatever the palette is, so these two cannot take
+   their colour from --tint-rgb like every other .msg-tool. */
+.lightbox-bar .msg-tool {
+  color: #fff;
+}
+.lightbox-bar .msg-tool:hover {
+  background: rgb(255 255 255 / 0.18);
 }
 .chat-msg[data-pinned] {
   box-shadow: inset 3px 0 0 var(--accent);

@@ -808,6 +808,35 @@
     </div>
 
     <!--
+      A picture, full size.
+
+      Its own layer rather than a <dialog>: a modal dialog traps focus and
+      puts an inert layer over the app, which is right for a question and
+      heavy-handed for looking at a photograph. Click anywhere, or press
+      Escape, and it is gone.
+    -->
+    <div class="lightbox" id="lightbox" hidden>
+      <img id="lightbox-img" alt="" />
+      <div class="lightbox-bar">
+        <span class="lightbox-name" id="lightbox-name"></span>
+        <button
+          type="button"
+          class="msg-tool"
+          id="lightbox-save"
+          data-glyph="&#11015;"
+          title="Save a copy"
+        >Save</button>
+        <button
+          type="button"
+          class="msg-tool"
+          id="lightbox-close"
+          data-glyph="&#10005;"
+          title="Close"
+        >Close</button>
+      </div>
+    </div>
+
+    <!--
       The emoji picker.
 
       One popover for two jobs: putting an emoji in what you are typing, and

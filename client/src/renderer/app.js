@@ -152,6 +152,11 @@ const el = {
   chatAttach: $('chat-attach'),
   chatNote: $('chat-note'),
   chatSend: $('chat-send'),
+  lightbox: $('lightbox'),
+  lightboxImg: $('lightbox-img'),
+  lightboxName: $('lightbox-name'),
+  lightboxSave: $('lightbox-save'),
+  lightboxClose: $('lightbox-close'),
   chatPending: $('chat-pending'),
   chatPendingThumb: $('chat-pending-thumb'),
   chatPendingName: $('chat-pending-name'),
@@ -4620,12 +4625,18 @@ function attachmentNode(message) {
   const url = harmony.mediaUrl(message.attachmentHash);
   const wrap = document.createElement('span');
   wrap.className = 'attachment';
+  const previewable = ['image', 'video', 'audio'].includes(message.mediaType);
 
   if (message.mediaType === 'image') {
     const img = document.createElement('img');
     img.src = url;
     img.alt = message.attachmentName ?? 'attachment';
     img.loading = 'lazy';
+    // Only images. A video has controls of its own and a click on it means
+    // play, which is not something to take away for a bigger picture.
+    img.className = 'expandable';
+    img.title = 'Click to expand';
+    img.addEventListener('click', () => openLightbox(message));
     wrap.append(img);
   } else if (message.mediaType === 'video') {
     const video = document.createElement('video');
@@ -4649,13 +4660,32 @@ function attachmentNode(message) {
   // something derived from the content type.
   name.textContent = message.attachmentName ?? 'attachment';
   name.title = name.textContent;
+  bar.append(name);
+  wrap.append(bar);
+
+  /*
+   * The two things you do to a file, floating over its top-right corner.
+   *
+   * On the attachment rather than in the message badge above, because
+   * that badge is about the MESSAGE -- react, pin, edit the words, delete
+   * the lot -- and these are about the file. On a message with a picture
+   * and a sentence, the two sets answer different questions and putting
+   * them in one row makes you read all six to find either.
+   */
+  const tools = document.createElement('span');
+  // Floating over the preview where there is one; on the end of the
+  // filename line where there is not, since a PDF has nothing to float
+  // over but the one thing the row says.
+  tools.className = previewable ? 'attachment-tools' : 'attachment-tools inline';
 
   const save = document.createElement('button');
   save.type = 'button';
-  save.className = 'ghost tiny attachment-save';
-  save.textContent = '\u2b07';
+  save.className = 'msg-tool';
+  save.dataset.glyph = '\u2b07';
+  save.textContent = 'Save';
   save.title = 'Save a copy';
-  save.addEventListener('click', async () => {
+  save.addEventListener('click', async (event) => {
+    event.stopPropagation();
     save.disabled = true;
     try {
       const result = await harmony.media.save(
@@ -4677,10 +4707,90 @@ function attachmentNode(message) {
       save.disabled = false;
     }
   });
+  tools.append(save);
 
-  bar.append(name, save);
-  wrap.append(bar);
+  // Your own only, the same rule the server enforces for editing the
+  // words: swapping somebody's picture under their name puts something in
+  // their mouth, while deleting the message is visible to everyone.
+  if (message.userId === state.auth.user?.id) {
+    const swap = document.createElement('button');
+    swap.type = 'button';
+    swap.className = 'msg-tool';
+    swap.dataset.glyph = '\u270E';
+    swap.textContent = 'Replace';
+    swap.title = 'Replace this file';
+    swap.addEventListener('click', (event) => {
+      event.stopPropagation();
+      replaceAttachment(message);
+    });
+    tools.append(swap);
+  }
+
+  if (previewable) wrap.append(tools);
+  else bar.append(tools);
   return wrap;
+}
+
+/**
+ * Pick a new file for a message that already has one.
+ *
+ * Its own hidden input, created and thrown away per use rather than one
+ * shared with the composer: the composer's input sets the PENDING
+ * attachment for the next message, and sharing it would mean one change
+ * event with two possible meanings.
+ */
+function replaceAttachment(message) {
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.hidden = true;
+  document.body.append(picker);
+
+  picker.addEventListener('change', async () => {
+    const file = picker.files?.[0] ?? null;
+    picker.remove();
+    if (!file) return;
+    try {
+      showChannelsError('');
+      el.chatNote.textContent = `Uploading ${file.name}\u2026`;
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const upload = await harmony.media.upload(state.server, bytes, file.type);
+      await harmony.api.setAttachment(state.server, message.id, {
+        hash: upload.hash, name: file.name,
+      });
+      el.chatNote.textContent = '';
+      // The server pushes message:updated to everyone, us included.
+    } catch (err) {
+      el.chatNote.textContent = '';
+      showChannelsError(err.message);
+    }
+  }, { once: true });
+
+  picker.click();
+}
+
+/**
+ * A picture, full size, over everything.
+ *
+ * The <img> src is set to the SAME harmony:// URL the thumbnail uses, so
+ * the file is already in the cache and already decoded -- opening one is
+ * instant and costs no second download.
+ */
+let lightboxOf = null;
+
+function openLightbox(message) {
+  lightboxOf = message;
+  el.lightboxImg.src = harmony.mediaUrl(message.attachmentHash);
+  el.lightboxImg.alt = message.attachmentName ?? 'attachment';
+  el.lightboxName.textContent = message.attachmentName ?? 'attachment';
+  el.lightbox.hidden = false;
+}
+
+function closeLightbox() {
+  el.lightbox.hidden = true;
+  // Dropped, or the decoded bitmap of the last picture anybody looked at
+  // stays in memory for as long as the app is open.
+  el.lightboxImg.removeAttribute('src');
+  lightboxOf = null;
 }
 
 /**
@@ -7967,6 +8077,28 @@ el.chatFile.addEventListener('change', () => {
   if (file) setPendingFile(file);
   // Reset, so picking the same file twice in a row still fires 'change'.
   el.chatFile.value = '';
+});
+
+// Anywhere on the backdrop closes it, including the picture: at full size
+// the picture IS most of the backdrop, and having to find an edge to click
+// is the thing that makes a lightbox feel like a trap.
+el.lightbox.addEventListener('click', () => closeLightbox());
+el.lightboxClose.addEventListener('click', () => closeLightbox());
+el.lightboxSave.addEventListener('click', async (event) => {
+  event.stopPropagation();
+  const message = lightboxOf;
+  if (!message) return;
+  try {
+    const result = await harmony.media.save(
+      message.attachmentHash, message.attachmentName ?? '',
+    );
+    if (result.saved) el.chatNote.textContent = `Saved ${result.name}.`;
+  } catch (err) {
+    showChannelsError(err.message);
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !el.lightbox.hidden) closeLightbox();
 });
 
 el.chatPendingClear.addEventListener('click', () => {

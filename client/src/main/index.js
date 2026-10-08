@@ -446,6 +446,7 @@ handle('api:post-message', (_e, s, id, body) => api.postMessage(s, id, body));
 handle('api:pin-message', (_e, s, id, pinned) => api.pinMessage(s, id, pinned));
 handle('api:delete-message', (_e, s, id) => api.deleteMessage(s, id));
 handle('api:edit-message', (_e, s, id, body) => api.editMessage(s, id, body));
+handle('api:set-attachment', (_e, s, id, body) => api.setAttachment(s, id, body));
 handle('api:search', (_e, s, id, q) => api.search(s, id, q));
 handle('api:delete-account', (_e, s, id) => api.deleteAccount(s, id));
 handle('api:server-info', (_e, s) => api.serverInfo(s));

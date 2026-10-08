@@ -163,6 +163,10 @@ export class Chat {
       ),
       deleteFts: db.prepare('DELETE FROM messages_fts WHERE rowid = ?'),
       editMessage: db.prepare('UPDATE messages SET body = ?, edited_at = ? WHERE id = ?'),
+      setAttachment: db.prepare(
+        'UPDATE messages SET attachment_hash = ?, attachment_name = ?, media_type = ?, '
+        + 'edited_at = ? WHERE id = ?',
+      ),
       deleteMessage: db.prepare('DELETE FROM messages WHERE id = ?'),
       messageById: db.prepare(`
         SELECT m.*, u.nickname FROM messages m JOIN users u ON u.id = m.user_id
@@ -517,6 +521,58 @@ export class Chat {
     if (/\p{Cf}/u.test(value.replaceAll('\u200d', ''))) return null;
     if ([...value].length > 16) return null;
     return value;
+  }
+
+  /**
+   * Swap the file on a message, or take it off.
+   *
+   * The reference counting is the whole of this. An upload is shared by
+   * everything that points at it, so putting a new file on a message means
+   * taking a reference AND giving the old one back -- miss the second half
+   * and the old file is never evictable, miss the first and it can be swept
+   * out from under the message that is now showing it.
+   *
+   * The FTS row carries media_type, so it is rewritten too: searching for
+   * "image" has to stop finding a message whose image has become a video.
+   *
+   * Removing is allowed only when there are words left, which is the same
+   * rule post() and edit() apply -- a message has to be something.
+   */
+  setAttachment(id, { hash = null, name = null } = {}) {
+    const message = this.#q.messageById.get(id);
+    if (!message) return { ok: false, error: 'no_such_message' };
+
+    let mediaType = null;
+    if (hash) {
+      const upload = this.#q.upload.get(hash);
+      if (!upload) return { ok: false, error: 'no_such_upload' };
+      mediaType = mediaTypeOf(upload.content_type);
+    } else if (!message.body.trim()) {
+      return { ok: false, error: 'empty_message' };
+    }
+
+    const previous = message.attachment_hash ?? null;
+    if (previous === hash) return { ok: true, message, unchanged: true };
+
+    this.#db.exec('BEGIN');
+    try {
+      this.#q.setAttachment.run(
+        hash,
+        hash ? Chat.cleanFilename(name) : null,
+        mediaType,
+        Date.now(),
+        id,
+      );
+      if (hash) this.#q.addRef.run(hash);
+      if (previous) this.#q.dropRef.run(previous);
+      this.#q.deleteFts.run(id);
+      this.#q.insertFts.run(id, message.body, message.nickname, mediaType ?? '');
+      this.#db.exec('COMMIT');
+    } catch (err) {
+      this.#db.exec('ROLLBACK');
+      throw err;
+    }
+    return { ok: true, message: this.#q.messageById.get(id) };
   }
 
   history(channelId, { before = Number.MAX_SAFE_INTEGER, limit = PAGE_SIZE } = {}) {

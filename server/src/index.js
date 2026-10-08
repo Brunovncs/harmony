@@ -943,6 +943,46 @@ app.post('/api/messages/:id/edit', requireLogin, (req, res) => {
   return res.json({ message });
 });
 
+/**
+ * Change the file on a message, or take it off.
+ *
+ * Your own only, the same rule editing follows and for the same reason:
+ * swapping somebody's picture under their name is putting something in
+ * their mouth, while deleting the message is visible to everyone.
+ */
+app.post('/api/messages/:id/attachment', requireLogin, (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+  const existing = chat.get(id);
+  if (!existing) return res.status(404).json({ error: 'no_such_message' });
+  if (!readableChannel(req, existing.channel_id)) {
+    return res.status(404).json({ error: 'no_such_channel' });
+  }
+  if (existing.user_id !== req.user.id) {
+    return res.status(403).json({
+      error: 'forbidden',
+      message: 'You can only change your own messages.',
+    });
+  }
+
+  const result = chat.setAttachment(id, {
+    hash: req.body?.hash ?? null,
+    name: req.body?.name ?? null,
+  });
+  if (!result.ok) {
+    const messages = {
+      no_such_upload: 'Upload the file first.',
+      empty_message: 'Removing the file would leave nothing. Write something first.',
+      no_such_message: 'No such message.',
+    };
+    return res.status(result.error === 'no_such_message' ? 404 : 400)
+      .json({ error: result.error, message: messages[result.error] });
+  }
+
+  const message = oneForClient(result.message);
+  toChannelReaders(existing.channel_id, { type: 'message:updated', message });
+  return res.json({ message });
+});
+
 app.post('/api/messages/:id/delete', requireLogin, (req, res) => {
   const id = Number.parseInt(req.params.id, 10);
 

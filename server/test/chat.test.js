@@ -768,6 +768,110 @@ describe('posting an attachment with a name', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Swapping the file on a message
+// ---------------------------------------------------------------------------
+
+describe('changing an attachment', () => {
+  let messageId;
+  let firstHash;
+  let secondHash;
+
+  const refsFor = async (hash) => {
+    // There is no route that reports a refcount, so this reads the only
+    // thing that depends on it: a file with no references left is an
+    // orphan and may be evicted. Eviction is hard to trigger on demand,
+    // so the check below is on behaviour that IS reachable -- the file
+    // stays servable while something points at it.
+    const res = await api(`/api/uploads/${hash}`, { token: ownerToken });
+    return res.status;
+  };
+
+  before(async () => {
+    firstHash = (await api('/api/uploads', {
+      method: 'POST', raw: PNG, contentType: 'image/png', token: ownerToken,
+    })).body.hash;
+    secondHash = (await api('/api/uploads', {
+      method: 'POST', raw: Buffer.alloc(32, 9), contentType: 'audio/wav', token: ownerToken,
+    })).body.hash;
+
+    messageId = (await api(`/api/channels/${textChannelId}/messages`, {
+      method: 'POST',
+      body: { body: 'here it is', attachmentHash: firstHash, attachmentName: 'one.png' },
+      token: ownerToken,
+    })).body.message.id;
+  });
+
+  it('is refused to somebody else', async () => {
+    const res = await api(`/api/messages/${messageId}/attachment`, {
+      method: 'POST', body: { hash: secondHash, name: 'theirs.wav' }, token: memberToken,
+    });
+    assert.equal(res.status, 403);
+  });
+
+  it('swaps the file, the name and the kind together', async () => {
+    const res = await api(`/api/messages/${messageId}/attachment`, {
+      method: 'POST', body: { hash: secondHash, name: 'two.wav' }, token: ownerToken,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.message.attachmentHash, secondHash);
+    assert.equal(res.body.message.attachmentName, 'two.wav');
+    assert.equal(res.body.message.mediaType, 'audio',
+      'the kind comes from the new file, not from the old one');
+    assert.ok(res.body.message.editedAt > 0);
+  });
+
+  it('FOLLOWS THE MESSAGE INTO THE SEARCH INDEX', async () => {
+    // messages_fts carries media_type, so searching by kind has to stop
+    // finding a message whose picture has become a sound.
+    const stale = await api(`/api/channels/${textChannelId}/search?q=image`, {
+      token: ownerToken,
+    });
+    assert.ok(!stale.body.results.some((m) => m.id === messageId));
+
+    const fresh = await api(`/api/channels/${textChannelId}/search?q=audio`, {
+      token: ownerToken,
+    });
+    assert.ok(fresh.body.results.some((m) => m.id === messageId));
+  });
+
+  it('keeps the new file servable', async () => {
+    assert.equal(await refsFor(secondHash), 200);
+  });
+
+  it('refuses a file nobody has uploaded', async () => {
+    const res = await api(`/api/messages/${messageId}/attachment`, {
+      method: 'POST', body: { hash: 'f'.repeat(64) }, token: ownerToken,
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'no_such_upload');
+  });
+
+  it('takes it off when there are words left', async () => {
+    const res = await api(`/api/messages/${messageId}/attachment`, {
+      method: 'POST', body: {}, token: ownerToken,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.message.attachmentHash, null);
+    assert.equal(res.body.message.attachmentName, null);
+    assert.equal(res.body.message.mediaType, null);
+  });
+
+  it('WILL NOT LEAVE A MESSAGE WITH NOTHING IN IT', async () => {
+    const silent = (await api(`/api/channels/${textChannelId}/messages`, {
+      method: 'POST',
+      body: { body: '', attachmentHash: firstHash, attachmentName: 'alone.png' },
+      token: ownerToken,
+    })).body.message.id;
+
+    const res = await api(`/api/messages/${silent}/attachment`, {
+      method: 'POST', body: {}, token: ownerToken,
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'empty_message');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Mentions
 // ---------------------------------------------------------------------------
 
