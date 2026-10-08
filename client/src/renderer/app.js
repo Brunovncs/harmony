@@ -1493,7 +1493,15 @@ function closeRowMenu() {
  * @param {Array<{label: string, title: string, run: Function, danger?: boolean}>} items
  * @param {MouseEvent} event
  */
-function openRowMenu(label, items, event) {
+/**
+ * @param {string} label
+ * @param {{label: string, title?: string, danger?: boolean, run: () => void}[]} items
+ * @param {MouseEvent|{clientX: number, clientY: number}} event  where to open it
+ * @param {{above?: Element}} [options]  open ABOVE this element instead, left
+ *   edges aligned -- for a menu that belongs to a button rather than to a
+ *   point the pointer happened to be at.
+ */
+function openRowMenu(label, items, event, { above = null } = {}) {
   closePeerMenu();
   closeMemberMenu();
 
@@ -1517,8 +1525,11 @@ function openRowMenu(label, items, event) {
   el.rowMenu.style.top = '0px';
   el.rowMenu.hidden = false;
   const box = el.rowMenu.getBoundingClientRect();
-  el.rowMenu.style.left = `${Math.max(8, Math.min(event.clientX, window.innerWidth - box.width - 8))}px`;
-  el.rowMenu.style.top = `${Math.max(8, Math.min(event.clientY, window.innerHeight - box.height - 8))}px`;
+  const anchor = above?.getBoundingClientRect();
+  const x = anchor ? anchor.left : event.clientX;
+  const y = anchor ? anchor.top - box.height - 6 : event.clientY;
+  el.rowMenu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - box.width - 8))}px`;
+  el.rowMenu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - box.height - 8))}px`;
 }
 
 /*
@@ -2586,7 +2597,7 @@ function applyVoiceButtons() {
 
   const sharing = state.share.target?.channelId === state.voice.channelId
     && Boolean(state.voice.channelId);
-  setButtonLabel(el.voiceScreen, sharing ? 'Stop sharing' : 'Share screen here');
+  setButtonLabel(el.voiceScreen, sharing ? 'Change source or stop sharing' : 'Share screen here');
   el.voiceScreen.toggleAttribute('data-on', sharing);
 
   el.voiceSoundboard.toggleAttribute('data-on', !el.soundpad.hidden);
@@ -6569,7 +6580,31 @@ async function enterPicker() {
  * state.share rather than reading it off state.session.
  */
 async function shareScreenHere() {
-  if (state.share.target) return stopBroadcast();
+  /*
+   * Already sharing: ask, rather than stop.
+   *
+   * The same button starts a share and used to end it on the next press,
+   * which made "I want to show a different window" a stop, a restart and a
+   * second trip through the picker -- with everybody's tile going away and
+   * coming back in between. Changing the source keeps the stream up and
+   * swaps the picture under it.
+   */
+  if (state.share.target) {
+    openRowMenu('Your stream', [
+      {
+        label: 'Change source',
+        title: 'Show a different screen or window without ending the stream',
+        run: () => openChangeSource(),
+      },
+      {
+        label: 'Stop streaming',
+        title: 'End the stream for everybody watching',
+        danger: true,
+        run: () => stopBroadcast(),
+      },
+    ], { clientX: 0, clientY: 0 }, { above: el.voiceScreen });
+    return undefined;
+  }
   if (!state.voice.channelId) {
     showChannelsError('Join a voice channel first.');
     return undefined;
@@ -7268,7 +7303,10 @@ async function applySourceChange() {
   try {
     await changeLiveSource(source);
     state.changingSource = false;
-    showView('view-broadcast');
+    // A channel share lives in the channel; only a flat share has a
+    // broadcast screen to go back to.
+    showView(state.share.target ? 'view-channels' : 'view-broadcast');
+    if (state.share.target) renderChannelVideo();
   } catch (err) {
     el.audioNote.textContent =
       err.name === 'NotAllowedError' ? 'That source was not allowed.' : err.message;
@@ -8613,6 +8651,11 @@ document.addEventListener('pointerdown', (event) => {
   if (el.soundpad.hidden) return;
   if (el.soundpad.contains(event.target)) return;
   if (el.voiceSoundboard.contains(event.target)) return;
+  // A clip's right-click menu, and the hotkey recorder it opens, both act on
+  // the soundpad -- closing it under them would hide the very badge the
+  // person is setting.
+  if (el.rowMenu.contains(event.target)) return;
+  if (el.hotkeyRecorder.contains(event.target)) return;
   closeSoundpad();
 }, true);
 document.addEventListener('keydown', (event) => {
@@ -9067,19 +9110,30 @@ el.picker.addEventListener('cancel', (event) => {
 });
 el.livePriority.addEventListener('change', applyLiveQuality);
 
-el.changeSource.addEventListener('click', async () => {
+/**
+ * Reopen the picker to swap what a running stream shows.
+ *
+ * From the broadcast screen's "Change source" and, for a share into a voice
+ * channel, from the screen button's menu. Either way nothing is torn down:
+ * applySourceChange() replaces the track under the existing connection.
+ */
+async function openChangeSource() {
   state.changingSource = true;
   state.selectedSource = null;
   el.startStream.disabled = true;
   el.startStream.textContent = 'Use this source';
   el.pickerBack.textContent = 'Back to stream';
-  el.pickerUsername.textContent = state.session.username;
+  el.pickerUsername.textContent = state.share.target
+    ? `#${state.share.target.name}`
+    : state.session.username;
   pickSegmented(el.resolution, el.liveResolution.value);
   pickSegmented(el.framerate, el.liveFramerate.value);
   openPicker();
   await loadSources();
   updateAudioNote();
-});
+}
+
+el.changeSource.addEventListener('click', () => openChangeSource());
 
 /** Chromium reads the adapter switch once, at startup, so this needs a restart. */
 async function setGpuPreference(value) {
