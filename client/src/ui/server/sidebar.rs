@@ -223,7 +223,7 @@ impl ServerView {
             .child(
                 div().flex_1().min_w(px(0.)).truncate().text_size(px(13.)).text_color(if speaking { t.text } else { t.text2 }).child(name),
             )
-            .when(m.publishes("s"), |d| d.child(live_chip(t)))
+            .when(m.publishes("s"), |d| d.child(live_chip(t, false)))
             .when(m.publishes("c"), |d| d.child(icon("camera", 13., t.text3)))
             .when(m.muted || m.force_muted, |d| d.child(icon("mic-off", 13., if m.force_muted { t.critical } else { t.text3 })))
             .when(m.deafened, |d| d.child(icon("headphones-off", 13., t.text3)))
@@ -563,9 +563,10 @@ pub fn badge_text(s: &'static str, fg: gpui::Hsla, bg: gpui::Hsla) -> gpui::Div 
         .child(s)
 }
 
-/// The red LIVE chip on someone sharing their screen.
-pub fn live_chip(t: &Theme) -> gpui::Div {
-    chip(tr!("Live", "Ao vivo"), gpui::white(), t.critical)
+/// The red LIVE chip on someone sharing their screen. Over video it sits on a dark backdrop
+/// whatever the palette, so it takes a red light enough to read there.
+pub fn live_chip(t: &Theme, over_video: bool) -> gpui::Div {
+    chip(tr!("Live", "Ao vivo"), if over_video { gpui::rgb(0xff6b78).into() } else { t.critical })
 }
 
 // A simple menu of actions.

@@ -8,16 +8,17 @@
 use gpui::{Hsla, Rgba, WindowAppearance, rgb};
 use std::cell::Cell;
 
-pub const FONT: &str = "Geist";
+/// Figtree: open, round and friendly at small sizes, the nearest free cut to Discord's gg sans.
+pub const FONT: &str = "Figtree";
 pub const MONO: &str = "Geist Mono";
 
 /// The fonts the window draws with, so it looks the same everywhere.
 pub fn fonts() -> Vec<std::borrow::Cow<'static, [u8]>> {
     vec![
-        include_bytes!("../assets/fonts/Geist-Regular.ttf").as_slice().into(),
-        include_bytes!("../assets/fonts/Geist-Medium.ttf").as_slice().into(),
-        include_bytes!("../assets/fonts/Geist-SemiBold.ttf").as_slice().into(),
-        include_bytes!("../assets/fonts/Geist-Bold.ttf").as_slice().into(),
+        include_bytes!("../assets/fonts/Figtree-Regular.ttf").as_slice().into(),
+        include_bytes!("../assets/fonts/Figtree-Medium.ttf").as_slice().into(),
+        include_bytes!("../assets/fonts/Figtree-SemiBold.ttf").as_slice().into(),
+        include_bytes!("../assets/fonts/Figtree-Bold.ttf").as_slice().into(),
         include_bytes!("../assets/fonts/GeistMono-Regular.ttf").as_slice().into(),
         include_bytes!("../assets/fonts/GeistMono-Medium.ttf").as_slice().into(),
         include_bytes!("../assets/fonts/GeistMono-SemiBold.ttf").as_slice().into(),

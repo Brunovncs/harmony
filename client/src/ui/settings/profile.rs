@@ -160,14 +160,10 @@ impl Settings {
             (Some((Some(ch), _, _)), true) => (trf!("In voice · {}", "Na voz · {}", ch), t.success),
             _ => (tr!("Online", "Online").to_string(), t.success),
         };
-        let (role_name, role_color, role_bg, role_note) = match me.role {
-            Role::Owner => {
-                (tr!("Owner", "Dono"), t.caution, t.tint(t.caution), tr!("Full control of this server", "Controle total deste servidor"))
-            }
-            Role::Admin => (tr!("Admin", "Admin"), t.accent, t.accent_soft, tr!("Helps run this server", "Ajuda a cuidar deste servidor")),
-            Role::Member => {
-                (tr!("Member", "Membro"), t.text2, t.well, tr!("Chats, talks and shares here", "Conversa, fala e compartilha aqui"))
-            }
+        let (role_name, role_color, role_note) = match me.role {
+            Role::Owner => (tr!("Owner", "Dono"), t.caution, tr!("Full control of this server", "Controle total deste servidor")),
+            Role::Admin => (tr!("Admin", "Admin"), t.accent, tr!("Helps run this server", "Ajuda a cuidar deste servidor")),
+            Role::Member => (tr!("Member", "Membro"), t.text2, tr!("Chats, talks and shares here", "Conversa, fala e compartilha aqui")),
         };
 
         // The header: a band in the accent, your picture over it, your name and where you stand.
@@ -271,7 +267,7 @@ impl Settings {
                             .items_center()
                             .gap(px(8.))
                             .child(mono(format!("@{}", me.nickname), t.text2))
-                            .child(chip(role_name, role_color, role_bg))
+                            .child(chip(role_name, role_color))
                             .child(
                                 div()
                                     .flex()
@@ -421,8 +417,8 @@ impl Settings {
                     .child(div().flex_1().min_w(px(0.)).child(body(what, if ok { t.text } else { t.text3 })))
                     .when(!ok, |d| {
                         d.child(match need {
-                            1 => chip(tr!("Admin", "Admin"), t.text3, t.well),
-                            _ => chip(tr!("Owner", "Dono"), t.text3, t.well),
+                            1 => chip(tr!("Admin", "Admin"), t.text3),
+                            _ => chip(tr!("Owner", "Dono"), t.text3),
                         })
                     }),
             );

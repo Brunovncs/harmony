@@ -26,9 +26,9 @@ use crate::widgets::*;
 use chat::ChatView;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Point, Render, StatefulInteractiveElement, StyleRefinement, Styled, Subscription, WeakEntity,
-    Window, div,
+    AnimationExt, AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SpringAnimation, SpringConfig, StatefulInteractiveElement,
+    StyleRefinement, Styled, Subscription, WeakEntity, Window, div,
 };
 use sidebar::{Menu, MenuEntry};
 use std::collections::{HashMap, HashSet};
@@ -48,6 +48,8 @@ pub struct ServerView {
     chats: HashMap<ChannelId, Entity<ChatView>>,
     pub call: Option<Entity<Call>>,
     pub focused_tile: Option<Entity<crate::media::video::Tile>>,
+    /// The pointer is on the connection dot, which opens to say what it means.
+    link_hover: bool,
     /// The channel list draws again whenever this view is notified (the session, the call and
     /// who speaks all notify it); the member list only when the session changes.
     sidebar: Entity<Panel>,
@@ -132,6 +134,7 @@ impl ServerView {
             chats: HashMap::new(),
             call: None,
             focused_tile: None,
+            link_hover: false,
             sidebar,
             members,
             focus: cx.focus_handle(),
@@ -440,8 +443,18 @@ impl ServerView {
         let picture = self.session.update(cx, |s, cx| s.server_picture(cx));
         let s = self.session.read(cx);
         let role = s.me.role;
-        let link = s.link.clone();
+        let up = s.link == Link::Up;
+        // Before the first snapshot the link is coming up, not coming back.
+        let first = s.channels.is_empty();
         let show_members = prefs(cx).show_members;
+        let (state, color) = match (up, first) {
+            (true, _) => (tr!("Connected", "Conectado"), t.success),
+            (false, true) => (tr!("Connecting…", "Conectando…"), t.caution),
+            (false, false) => (tr!("Reconnecting…", "Reconectando…"), t.caution),
+        };
+        // Connected, it is only the dot; it opens on hover, and stays open while something is wrong.
+        let open = !up || self.link_hover;
+        let text2 = t.text2;
         div()
             .flex()
             .items_center()
@@ -450,27 +463,41 @@ impl ServerView {
             .px(px(GUTTER + 4.))
             .child(admin::mark(picture, t))
             .child(admin::entry(s.server_name.clone(), role, t, cx))
-            .when(role == Role::Owner, |d| d.child(chip(tr!("Owner", "Dono"), t.caution, t.tint(t.caution))))
-            .when(role == Role::Admin, |d| d.child(chip(tr!("Admin", "Admin"), t.accent, t.accent_soft)))
+            // Down a touch, to sit on the name's letters as the gear does.
+            .when(role.is_admin(), |d| d.child(admin::role_chip(role, t).relative().top(px(1.))))
             .child(div().flex_1())
             .children(crate::ui::updates::button(cx))
             .child(
-                // Texel's live pill: a glowing dot and a short word.
+                // Texel's live pill: a glowing dot, and the word beside it when there is something to say.
                 div()
+                    .id("link")
                     .flex()
                     .items_center()
-                    .gap(px(8.))
                     .h(px(28.))
-                    .px(px(10.))
+                    .px(px(9.))
                     .rounded_full()
                     .border_1()
-                    .border_color(if link == Link::Up { t.success.opacity(0.35) } else { t.caution.opacity(0.45) })
-                    .child(status_dot(if link == Link::Up { t.success } else { t.caution }, true))
-                    .child(div().font_family(crate::theme::MONO).text_size(px(11.)).text_color(t.text2).child(if link == Link::Up {
-                        tr!("Connected", "Conectado")
-                    } else {
-                        tr!("Reconnecting…", "Reconectando…")
-                    })),
+                    .child(status_dot(color, true))
+                    .on_hover(cx.listener(|this, on: &bool, _, cx| {
+                        this.link_hover = *on;
+                        cx.notify();
+                    }))
+                    .with_spring("link-open", SpringAnimation::new(SpringConfig::new(420., 41., 1.)).to(open), move |d, phase| {
+                        let p = phase.0.clamp(0., 1.);
+                        // The label's width is not known before layout; 120 is room for the longest.
+                        d.border_color(color.opacity(0.4 * p)).child(
+                            div()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .ml(px(8. * p))
+                                .max_w(px(120. * p))
+                                .opacity(p)
+                                .font_family(crate::theme::MONO)
+                                .text_size(px(11.))
+                                .text_color(text2)
+                                .child(state),
+                        )
+                    }),
             )
             .child(
                 tool_button("toggle-members", "users", show_members, if show_members { t.accent } else { t.text2 }, t)
@@ -609,9 +636,10 @@ impl ServerView {
                 .mx(px(8.))
                 .p(px(10.))
                 .rounded(px(radius::CARD))
-                .bg(t.tint(color))
+                // The state shows in the edge alone; the card stays the colour of the one below it.
+                .bg(t.layer)
                 .border_1()
-                .border_color(color.opacity(0.3))
+                .border_color(color.opacity(0.65))
                 .child(
                     div()
                         .flex()

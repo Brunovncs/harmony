@@ -678,7 +678,7 @@ impl ChatView {
                                 .child(stamp.clone())
                                 .tooltip(tip(full.clone(), &t)),
                         )
-                        .when(m.pinned, |d| d.child(chip(tr!("Pinned", "Fixada"), t.accent, t.accent_soft)))
+                        .when(m.pinned, |d| d.child(chip(tr!("Pinned", "Fixada"), t.accent)))
                         .when(m.edited_at.is_some(), |d| {
                             d.child(div().text_size(px(11.)).text_color(t.text3).child(tr!("(edited)", "(editada)")))
                         }),

@@ -4,7 +4,8 @@ Everything here ships inside `harmony.exe`.
 
 | What | Where | Licence |
 | --- | --- | --- |
-| Geist and Geist Mono, by Vercel | `assets/fonts/` | SIL Open Font License 1.1, in `assets/fonts/OFL.txt` |
+| Figtree, by Erik Kennedy and the Figtree Project Authors (static Regular to Bold instances of the variable font, cut down to Latin, Greek and Cyrillic) | `assets/fonts/Figtree-*.ttf` | SIL Open Font License 1.1, in `assets/fonts/OFL.txt` |
+| Geist Mono, by Vercel | `assets/fonts/GeistMono-*.ttf` | SIL Open Font License 1.1, in `assets/fonts/OFL.txt` |
 | MediaPipe selfie segmentation, by Google, as converted to ONNX by onnx-community | `assets/models/selfie_segmentation.onnx` | Apache 2.0 |
 | Lucide icons, by the Lucide contributors (path data, every icon but `soundboard` and `blur`) | `src/icons.rs` | ISC, below |
 | The text field, the theme's Windows accent reader and the widget patterns, from OpenController by Brunovncs | `src/text_field.rs`, `src/theme.rs`, `src/widgets.rs` | MIT |

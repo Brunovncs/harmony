@@ -87,7 +87,8 @@ pub fn entry(name: String, role: Role, t: &Theme, cx: &mut Context<super::Server
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
         .child(title(name, t.text))
-        .child(icon("settings", 15., t.text2))
+        // Centred on the letters rather than on the line box, whose descender room sits below them.
+        .child(icon("settings", 15., t.text2).relative().top(px(1.5)))
         .tooltip(tip(tr!("Server settings", "Configurações do servidor"), t))
         .on_click(cx.listener(|this, _, window, cx| open(this.session.clone(), window, cx)))
         .into_any_element()
@@ -406,9 +407,9 @@ impl ServerAdmin {
 
         let required = info.as_ref().map(|i| i.password_required);
         let status = match required {
-            Some(true) => chip(tr!("On", "Ativada"), t.success, t.tint(t.success)),
-            Some(false) => chip(tr!("Off", "Desativada"), t.text2, t.layer_hover),
-            None => chip("…", t.text3, t.layer_hover),
+            Some(true) => chip(tr!("On", "Ativada"), t.success),
+            Some(false) => chip(tr!("Off", "Desativada"), t.text2),
+            None => chip("…", t.text3),
         };
         let mut door_card = card(t)
             .child(
@@ -1280,11 +1281,11 @@ fn lock_note(reason: &'static str, t: &Theme) -> gpui::Div {
         .child(div().text_size(px(text::CAPTION.0)).line_height(px(text::CAPTION.1)).text_color(t.text3).child(reason))
 }
 
-fn role_chip(role: Role, t: &Theme) -> gpui::Div {
+pub fn role_chip(role: Role, t: &Theme) -> gpui::Div {
     match role {
-        Role::Owner => chip(tr!("Owner", "Dono"), t.caution, t.tint(t.caution)),
-        Role::Admin => chip(tr!("Admin", "Admin"), t.accent, t.accent_soft),
-        Role::Member => chip(tr!("Member", "Membro"), t.text2, t.layer_hover),
+        Role::Owner => chip(tr!("Owner", "Dono"), t.caution),
+        Role::Admin => chip(tr!("Admin", "Admin"), t.accent),
+        Role::Member => chip(tr!("Member", "Membro"), t.text2),
     }
 }
 

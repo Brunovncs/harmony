@@ -1,4 +1,4 @@
-//! The interface's icons, drawn as line art on a 24 by 24 grid with one stroke width, so they
+//! The interface's icons, drawn as line art on a 24 by 24 grid with one light stroke, so they
 //! look the same on every system. The shapes are Lucide's (ISC licence), except the brand mark,
 //! the soundboard and the blur. Each is turned into an SVG image in the colour asked for, once,
 //! and kept.
@@ -132,7 +132,7 @@ fn svg(name: &str, color: Hsla) -> String {
     let c = color.to_rgb();
     let hex = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="#{:02x}{:02x}{:02x}" stroke-opacity="{:.3}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{}</svg>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="#{:02x}{:02x}{:02x}" stroke-opacity="{:.3}" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">{}</svg>"##,
         hex(c.r),
         hex(c.g),
         hex(c.b),

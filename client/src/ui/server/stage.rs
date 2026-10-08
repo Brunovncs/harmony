@@ -189,7 +189,7 @@ impl ServerView {
                         }))
                         .when(m.muted || m.force_muted, |d| d.child(icon("mic-off", 14., if m.force_muted { t.critical } else { t.text3 })))
                         .when(m.deafened, |d| d.child(icon("headphones-off", 14., t.text3)))
-                        .when(m.publishes("s"), |d| d.child(live_chip(t))),
+                        .when(m.publishes("s"), |d| d.child(live_chip(t, false))),
                 )
                 .when(m.user_id != me && gain != 1., |d| {
                     d.child(mono(trf!("{:.0}% for you", "{:.0}% para você", gain * 100.), if gain > 1. { t.caution } else { t.text3 }))
@@ -312,7 +312,7 @@ impl ServerView {
                     .py(px(4.))
                     .rounded(px(7.))
                     .bg(gpui::black().opacity(0.55))
-                    .when(kind == TileKind::Screen, |d| d.child(live_chip(t)))
+                    .when(kind == TileKind::Screen, |d| d.child(live_chip(t, true)))
                     .child(div().text_size(px(12.5)).text_color(gpui::white()).child(if local {
                         trf!("{} (you)", "{} (você)", name)
                     } else {

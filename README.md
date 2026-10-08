@@ -88,7 +88,8 @@ TLS, dynamic IPs, ports and troubleshooting are covered in
 [LiveKit's libwebrtc bindings](https://github.com/livekit/rust-sdks) ·
 [tract](https://github.com/sonos/tract) ·
 [MediaPipe selfie segmentation](https://huggingface.co/onnx-community/mediapipe_selfie_segmentation) ·
-[Geist](https://vercel.com/font) ·
+[Figtree](https://github.com/erikdkennedy/figtree) ·
+[Geist Mono](https://vercel.com/font) ·
 [Lucide](https://lucide.dev/)
 
 ## Credits and license

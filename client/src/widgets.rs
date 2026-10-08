@@ -162,20 +162,26 @@ pub fn tool_button(id: impl Into<ElementId>, glyph: &'static str, on: bool, colo
         .child(icon(glyph, 17., color))
 }
 
-/// A small label with a tinted background: a role, a state.
-pub fn chip(s: impl Into<SharedString>, fg: Hsla, bg: Hsla) -> Div {
+/// A small label in a dashed outline, see-through so it sits lightly on any surface: a role, a
+/// state, live.
+pub fn chip(s: impl Into<SharedString>, color: Hsla) -> Div {
     div()
         .flex()
         .flex_none()
         .items_center()
-        .h(px(18.))
-        .px(px(6.))
-        .rounded(px(5.))
-        .bg(bg)
+        .h(px(16.))
+        .px(px(5.))
+        // Mono capitals ride high in their line; this centres the letters themselves.
+        .pt(px(2.))
+        .rounded(px(4.))
+        .border_1()
+        .border_dashed()
+        .border_color(color.opacity(0.55))
         .font_family(MONO)
-        .text_size(px(10.))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(fg)
+        .text_size(px(9.5))
+        .line_height(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(color.opacity(0.9))
         .child(s.into().to_uppercase())
 }
 
@@ -302,18 +308,13 @@ fn ring_over(color: Hsla, radius: f32, outset: f32) -> Div {
 }
 
 /// Lights up a card or a video tile while its person speaks: its edge and a ring just inside it
-/// in the success colour, and a soft glow. The element must be `relative` with a 1 px border.
+/// in the success colour, and nothing else, so the inside keeps its own colour. The element must
+/// be `relative` with a 1 px border.
 pub fn speaking<E: Styled + ParentElement>(el: E, on: bool, radius: f32, t: &Theme) -> E {
     if !on {
         return el;
     }
-    el.border_color(t.success).child(ring_over(t.success, radius - 1., 0.)).shadow(vec![gpui::BoxShadow {
-        color: t.success.opacity(0.25),
-        offset: gpui::point(px(0.), px(0.)),
-        blur_radius: px(14.),
-        spread_radius: px(0.),
-        inset: false,
-    }])
+    el.border_color(t.success).child(ring_over(t.success, radius - 1., 0.))
 }
 
 /// A horizontal slider. `value` is 0..=1 along the track; `on_change` gets the new value while
