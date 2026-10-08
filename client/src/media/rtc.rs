@@ -44,23 +44,31 @@ pub fn factory() -> &'static PeerConnectionFactory {
     FACTORY.get_or_init(PeerConnectionFactory::default)
 }
 
+/// TURN relays only, never STUN. Every connection goes to the media server, which advertises its
+/// own address and learns ours from the first packet, so a public address from STUN adds nothing,
+/// and it costs: where STUN's IPv6 lookups fail, gathering never completes and every offer waited
+/// out the timeout. Servers since 3.0.1 send none; this covers one that still does.
+fn relays(ice: &[IceServer]) -> Vec<pcf::IceServer> {
+    ice.iter()
+        .filter_map(|s| {
+            let urls: Vec<String> = s.urls.iter().filter(|u| !is_stun(u)).cloned().collect();
+            (!urls.is_empty()).then(|| pcf::IceServer {
+                urls,
+                username: s.username.clone().unwrap_or_default(),
+                password: s.credential.clone().unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+fn is_stun(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    u.starts_with("stun:") || u.starts_with("stuns:")
+}
+
 fn config(ice: &[IceServer]) -> RtcConfiguration {
     let mut c = RtcConfiguration::default();
-    c.ice_servers = ice
-        .iter()
-        .map(|s| pcf::IceServer {
-            urls: s.urls.clone(),
-            username: s.username.clone().unwrap_or_default(),
-            password: s.credential.clone().unwrap_or_default(),
-        })
-        .collect();
-    if c.ice_servers.is_empty() {
-        c.ice_servers.push(pcf::IceServer {
-            urls: vec!["stun:stun.l.google.com:19302".into()],
-            username: String::new(),
-            password: String::new(),
-        });
-    }
+    c.ice_servers = relays(ice);
     c.continual_gathering_policy = pcf::ContinualGatheringPolicy::GatherOnce;
     c
 }
@@ -272,7 +280,7 @@ struct Gathering {
 }
 
 /// Waits for gathering to finish, up to 4 s as the old client did; once host candidates are in,
-/// a slow or unreachable STUN server only gets until 1.5 s.
+/// a slow TURN server only gets until 1.5 s. Without STUN or TURN it completes in a blink.
 async fn wait_for_ice(pc: &PeerConnection, g: &Gathering) {
     let start = std::time::Instant::now();
     loop {
@@ -498,6 +506,22 @@ mod tests {
 
     fn cap(mime: &str, fmtp: &str) -> RtpCodecCapability {
         RtpCodecCapability { channels: None, clock_rate: Some(90000), mime_type: mime.into(), sdp_fmtp_line: Some(fmtp.into()) }
+    }
+
+    #[test]
+    fn only_turn_survives() {
+        let server = |urls: &[&str]| IceServer {
+            urls: urls.iter().map(|u| u.to_string()).collect(),
+            username: Some("u".into()),
+            credential: Some("p".into()),
+        };
+        let out = relays(&[
+            server(&["stun:stun.l.google.com:19302", "STUNS:x:5349"]),
+            server(&["stun:a:3478", "turn:relay.example:3478?transport=udp"]),
+        ]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].urls, vec!["turn:relay.example:3478?transport=udp".to_string()]);
+        assert_eq!(out[0].username, "u");
     }
 
     #[test]

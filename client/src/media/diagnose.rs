@@ -1,5 +1,5 @@
 //! "Test the connection": when someone can't stream, where does it break? The control server,
-//! STUN, or the media path look the same from outside. This walks the path a real share takes,
+//! the network path, or the media path look the same from outside. This walks the path a real share takes,
 //! with a tiny throwaway stream on your own camera path, and says which step failed.
 
 use super::rtc::{self, VideoParams};
@@ -37,7 +37,7 @@ pub async fn run(api: Api, report: impl Fn(Step) + Send + Sync) -> Outcome {
     let reach = tr!("Reach the Harmony server", "Acessar o servidor do Harmony");
     let media = tr!("Media server is running", "Servidor de mídia no ar");
     let reserve = tr!("Reserve a test stream", "Reservar uma transmissão de teste");
-    let stun = tr!("Discover your public address (STUN)", "Descobrir seu endereço público (STUN)");
+    let stun = tr!("Gather this computer's network addresses", "Reunir os endereços de rede deste computador");
     let send = tr!("Send video to the server", "Enviar vídeo ao servidor");
 
     step(reach, None, String::new());
@@ -80,20 +80,8 @@ pub async fn run(api: Api, report: impl Fn(Step) + Send + Sync) -> Outcome {
 
     step(stun, None, String::new());
     let types = rtc::candidate_types(&session.ice_servers).await;
-    let srflx = types.iter().any(|t| t == "srflx");
-    step(
-        stun,
-        Some(srflx),
-        if srflx {
-            types.join(", ")
-        } else {
-            trf!(
-                "only {} · UDP may be blocked",
-                "só {} · o UDP pode estar bloqueado",
-                if types.is_empty() { tr!("none", "nenhum").into() } else { types.join(", ") }
-            )
-        },
-    );
+    // No STUN on purpose (see `rtc::relays`): host addresses are all the media server needs.
+    step(stun, Some(!types.is_empty()), if types.is_empty() { tr!("none", "nenhum").into() } else { types.join(", ") });
 
     step(send, None, String::new());
     let source = NativeVideoSource::new(VideoResolution { width: 160, height: 90 }, false);
@@ -133,17 +121,10 @@ pub async fn run(api: Api, report: impl Fn(Step) + Send + Sync) -> Outcome {
             }
             let outcome = if !connected {
                 step(send, Some(false), tr!("no working network path was found", "nenhum caminho de rede funcionou").into());
-                fail(if srflx {
-                    tr!(
-                        "Signaling works but media can't get through: your network blocks the media ports. A TURN relay would be needed.",
-                        "A sinalização funciona, mas a mídia não passa: sua rede bloqueia as portas de mídia. Seria preciso um relay TURN."
-                    )
-                } else {
-                    tr!(
-                        "UDP looks blocked on your network. The server also offers a TCP path; if this still fails, a TURN relay would be needed.",
-                        "O UDP parece bloqueado na sua rede. O servidor também oferece um caminho por TCP; se ainda falhar, seria preciso um relay TURN."
-                    )
-                })
+                fail(tr!(
+                    "Signaling works but media can't get through: something between you and the server blocks the media port (8189, UDP and TCP). A TURN relay would be needed.",
+                    "A sinalização funciona, mas a mídia não passa: algo entre você e o servidor bloqueia a porta de mídia (8189, UDP e TCP). Seria preciso um relay TURN."
+                ))
             } else {
                 tokio::time::sleep(Duration::from_millis(1500)).await;
                 let (via, tcp, rtt) = describe(&link.stats().await);
