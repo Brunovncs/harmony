@@ -1193,18 +1193,18 @@ select:focus {
 /*
  * Past 100% the audio is being amplified rather than turned down, which can
  * distort. Two signals rather than one, because the slider and the number
- * are read at different moments: the track turns amber as you drag, and the
- * number stays amber afterwards when you are wondering why someone clips.
+ * are read at different moments: the slider turns amber as you drag (see
+ * input[type='range'][data-boosted]), and the number stays amber afterwards
+ * when you are wondering why someone clips.
  */
-.peer-volume[data-boosted] {
-  accent-color: var(--warn);
-}
-.peer-volume-label[data-boosted] {
+.peer-volume-label[data-boosted],
+.volume-value[data-boosted] {
   color: var(--warn);
   opacity: 1;
   font-weight: 600;
 }
-.peer-volume-label[data-boosted]::after {
+.peer-volume-label[data-boosted]::after,
+.volume-value[data-boosted]::after {
   content: ' \26A0';
 }
 .voice-devices {
@@ -2887,10 +2887,6 @@ button.danger {
 }
 .channel-tile .tile-volume {
   width: 4.5rem;
-  accent-color: var(--accent);
-}
-.channel-tile .tile-volume[data-boosted] {
-  accent-color: var(--warn);
 }
 /* Minimized: still there, still live, out of the way. */
 .channel-tile[data-small] video {
@@ -3818,8 +3814,20 @@ button.tiny:disabled {
   width: 64px;
   height: 3px;
 }
+/*
+ * The exact level beside each tile's slider. Wide enough for "350% \26A0" so
+ * the buttons after it do not jog sideways as you drag past 100.
+ */
+.tile-volume-label {
+  min-width: 4.2em;
+  font-size: 12px;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
 /* A small tile has no room for a slider; the buttons still fit. */
 .tile.compact .tile-volume,
+.tile.compact .tile-volume-label,
 .tile.compact .tile-meta {
   display: none;
 }
@@ -3915,11 +3923,6 @@ button.tiny:disabled {
   pointer-events: auto;
 }
 
-/* Above 100% is amplification, not just loudness -- say so quietly. */
-.boosted {
-  color: var(--accent);
-  font-variant-numeric: tabular-nums;
-}
 
 /* ---------- modal picker ---------- */
 
@@ -4059,13 +4062,28 @@ button.tiny:disabled {
 
 /* ---------- volume ---------- */
 
+/*
+ * --fill and --mark come from showVolume(): how far along the value is, and
+ * where 100% sits. A slider that never sets them gets a plain track -- --mark
+ * defaults off the left edge, so no tick, and --fill to nothing.
+ */
 input[type='range'] {
+  --fill: 0%;
+  --mark: -10%;
+  --fill-color: var(--accent);
   -webkit-appearance: none;
   appearance: none;
   width: 130px;
   height: 4px;
   border-radius: 2px;
-  background: var(--border);
+  background:
+    linear-gradient(
+      to right,
+      transparent calc(var(--mark) - 1px),
+      var(--text) calc(var(--mark) - 1px) calc(var(--mark) + 1px),
+      transparent calc(var(--mark) + 1px)
+    ),
+    linear-gradient(to right, var(--fill-color) var(--fill), var(--border) var(--fill));
   outline: none;
 }
 input[type='range']::-webkit-slider-thumb {
@@ -4074,12 +4092,17 @@ input[type='range']::-webkit-slider-thumb {
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--fill-color);
   cursor: pointer;
 }
+/* Amplifying rather than attenuating. */
+input[type='range'][data-boosted] {
+  --fill-color: var(--warn);
+}
 
-#volume-label {
-  min-width: 42px;
+#volume-label,
+#mosaic-volume-label {
+  min-width: 4.2em;
   font-variant-numeric: tabular-nums;
 }
 

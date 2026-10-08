@@ -2743,14 +2743,27 @@ function voiceRow(member) {
  * distort and is the first thing to suspect when somebody sounds bad. It is
  * worth making impossible to miss rather than leaving it to be read off a
  * slider position.
+ *
+ * Every volume slider in the app goes through here, so they all read the same:
+ * the exact percentage beside the slider, the track filled up to the thumb, a
+ * tick where 100% is, and amber -- thumb, fill and number -- once past it.
+ *
+ * The amber used to be `accent-color`, which did nothing at all: the
+ * sliders are drawn by hand (`appearance: none`), and accent-color only
+ * reaches the native one. The fill and the tick are painted from two custom
+ * properties set here, because a range input has no CSS-visible value.
  */
-function applyPeerVolumeLook(volume, label, percent, muted) {
-  volume.value = String(percent);
-  const boosted = percent > 100;
-  volume.toggleAttribute('data-boosted', boosted && !muted);
-  label.toggleAttribute('data-boosted', boosted && !muted);
+function showVolume(slider, label, percent, muted = false) {
+  slider.value = String(percent);
+  const max = Number(slider.max) || 100;
+  const boosted = percent > 100 && !muted;
+  slider.style.setProperty('--fill', `${(percent / max) * 100}%`);
+  slider.style.setProperty('--mark', `${(100 / max) * 100}%`);
+  slider.toggleAttribute('data-boosted', boosted);
+  if (!label) return;
+  label.toggleAttribute('data-boosted', boosted);
   label.textContent = muted ? 'muted' : `${percent}%`;
-  label.title = boosted && !muted
+  label.title = boosted
     ? 'Louder than the original. Amplified audio can distort.'
     : '';
 }
@@ -2814,7 +2827,7 @@ function openPeerMenu(channelId, mid, event) {
 
     const paint = () => {
       const muted = state.voice.peerMuted(userId);
-      applyPeerVolumeLook(volume, label, asPercent(state.voice.peerGain(userId)), muted);
+      showVolume(volume, label, asPercent(state.voice.peerGain(userId)), muted);
       mute.textContent = muted ? 'Unmute for me' : 'Mute for me';
       mute.toggleAttribute('data-on', muted);
     };
@@ -2830,7 +2843,7 @@ function openPeerMenu(channelId, mid, event) {
     volume.addEventListener('input', () => {
       const percent = Number(volume.value);
       state.voice.setPeerGain(userId, percent / 100);
-      applyPeerVolumeLook(volume, label, percent, false);
+      showVolume(volume, label, percent, false);
     });
 
     paint();
@@ -3669,12 +3682,15 @@ function renderChannelVideo() {
       volume.max = String(asPercent(MAX_GAIN));
       volume.value = String(asPercent(state.voice.tileGain(key)));
       volume.title = 'Volume for this share';
+      const level = document.createElement('span');
+      level.className = 'tile-volume-label volume-value';
 
       const apply = (percent) => {
         state.voice.setTileGain(key, percent / 100);
-        volume.toggleAttribute('data-boosted', percent > 100);
+        showVolume(volume, level, percent);
         muteBtn.innerHTML = percent === 0 ? '&#128263;' : '&#128266;';
       };
+      showVolume(volume, level, Number(volume.value));
       volume.addEventListener('input', (event) => {
         event.stopPropagation();
         apply(Number(volume.value));
@@ -3686,7 +3702,7 @@ function renderChannelVideo() {
         apply(next);
       });
 
-      controls.append(muteBtn, volume);
+      controls.append(muteBtn, volume, level);
     }
 
     const bigBtn = document.createElement('button');
@@ -5385,7 +5401,7 @@ function applySoundpadVolume() {
   // Reuses the per-person treatment, including the amber warning past 100%:
   // a clip amplified three and a half times is exactly as likely to distort
   // as a person is, and it is the same slider doing the same thing.
-  applyPeerVolumeLook(el.soundpadVolume, el.soundpadVolumeLabel, percent, false);
+  showVolume(el.soundpadVolume, el.soundpadVolumeLabel, percent, false);
   el.soundpadMute.innerHTML = percent === 0 ? '&#128263;' : '&#128266;';
   el.soundpadMute.title = percent === 0 ? 'Unmute the soundpad' : 'Mute the soundpad';
   el.soundpadMute.toggleAttribute('data-on', percent === 0);
@@ -7102,8 +7118,7 @@ async function enterMosaic(usernames = null) {
     return state.auth.user ? 'Back to channels' : 'Leave';
   })();
   el.mosaicGrid.replaceChildren();
-  el.mosaicVolume.value = '100';
-  el.mosaicVolumeLabel.textContent = '100%';
+  showVolume(el.mosaicVolume, el.mosaicVolumeLabel, 100);
   el.mosaicMute.innerHTML = '&#128266;';
   showView('view-mosaic');
 
@@ -7295,8 +7310,10 @@ function openTile({ username, whepUrl }) {
   volume.className = 'tile-volume';
   volume.min = '0';
   volume.max = String(asPercent(MAX_GAIN));
-  volume.value = '100';
   volume.title = `Volume for ${username}`;
+  const level = document.createElement('span');
+  level.className = 'tile-volume-label volume-value';
+  showVolume(volume, level, 100);
 
   // Maximize fills the mosaic with this one stream but stays inside the window,
   // so the rest of the app -- and everything else on the desktop -- is still
@@ -7330,7 +7347,7 @@ function openTile({ username, whepUrl }) {
   clipBtn.title = `Save the last ${CLIP_SECONDS} seconds`;
   clipBtn.hidden = true;
 
-  controls.append(muteBtn, volume, clipBtn, maxBtn, fsBtn, closeBtn);
+  controls.append(muteBtn, volume, level, clipBtn, maxBtn, fsBtn, closeBtn);
   bar.append(dot, name, meta, controls);
 
   tile.append(video, status, bar);
@@ -7366,6 +7383,7 @@ function openTile({ username, whepUrl }) {
     entry.muted = !entry.muted;
     muteBtn.innerHTML = entry.muted ? '&#128263;' : '&#128266;';
     muteBtn.title = `${entry.muted ? 'Unmute' : 'Mute'} ${username}`;
+    showVolume(volume, level, Number(volume.value), entry.muted);
     applyTileAudio();
   });
 
@@ -7377,6 +7395,7 @@ function openTile({ username, whepUrl }) {
       entry.muted = false;
       muteBtn.innerHTML = '&#128266;';
     }
+    showVolume(volume, level, Number(volume.value), entry.muted);
     applyTileAudio();
   });
 
@@ -7531,9 +7550,7 @@ function applyWatchAudio() {
   el.remote.dataset.gain = String(gain);
   el.remote.dataset.muted = String(muted);
 
-  el.volume.value = String(asPercent(volume));
-  el.volumeLabel.textContent = `${asPercent(volume)}%`;
-  el.volumeLabel.classList.toggle('boosted', volume > 1);
+  showVolume(el.volume, el.volumeLabel, asPercent(volume), muted);
   el.toggleMute.innerHTML = muted ? '&#128263;' : '&#128266;';
   el.toggleMute.title = muted ? 'Unmute' : 'Mute';
 }
@@ -7996,7 +8013,7 @@ el.voiceScreen.addEventListener('click', () => shareScreenHere());
  * 'input' so it still moves under the finger.
  */
 el.soundpadVolume.addEventListener('input', () => {
-  applyPeerVolumeLook(
+  showVolume(
     el.soundpadVolume, el.soundpadVolumeLabel, Number(el.soundpadVolume.value), false,
   );
 });
@@ -8752,8 +8769,7 @@ el.mosaicMute.addEventListener('click', () => {
 el.mosaicVolume.addEventListener('input', () => {
   const value = Number(el.mosaicVolume.value);
   state.mosaic.master.volume = value / 100;
-  el.mosaicVolumeLabel.textContent = `${value}%`;
-  el.mosaicVolumeLabel.classList.toggle('boosted', value > 100);
+  showVolume(el.mosaicVolume, el.mosaicVolumeLabel, value);
   if (value > 0 && state.mosaic.master.muted) {
     state.mosaic.master.muted = false;
     el.mosaicMute.innerHTML = '&#128266;';
