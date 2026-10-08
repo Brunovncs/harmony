@@ -125,6 +125,16 @@ function registerProtocol() {
   });
 }
 
+/**
+ * How long to wait, after the page has loaded, for a first frame that may
+ * never come.
+ *
+ * Long enough that the normal path always wins it -- ready-to-show lands
+ * within a frame or two of the load -- and short enough that somebody
+ * staring at a taskbar icon does not conclude the app is broken.
+ */
+const WINDOW_SHOW_GRACE_MS = 2000;
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1180,
@@ -162,7 +172,45 @@ function createWindow() {
    */
   win.webContents.on('did-finish-load', () => applyScale());
 
-  win.once('ready-to-show', () => win.show());
+  /*
+   * Show the window, and do not let the GPU have a veto.
+   *
+   * ready-to-show fires when the renderer has produced its FIRST FRAME,
+   * which makes it the right moment to reveal a window created with
+   * show: false -- no white flash, no half-drawn layout. It is not a
+   * guarantee. A GPU process that cannot start, or cannot create its
+   * caches, leaves a renderer that has loaded and parsed everything and
+   * never composited anything, and the event simply never arrives.
+   *
+   * Seen on this machine: twelve Electron processes alive, the page loaded
+   * and responding over the debugger, "Unable to move the cache: Access is
+   * denied" from the GPU cache, and not one window handle between them.
+   * From outside it looks exactly like the app failing to start, and the
+   * logs say nothing because nothing failed.
+   *
+   * So the first frame is the preferred cue and not the only one: whichever
+   * of the two happens first wins, and after the load there is a last
+   * resort on a timer. A window showing a frame late is a flicker; a window
+   * that never shows is a bug report.
+   */
+  let shown = false;
+  const reveal = (why) => {
+    if (shown || win?.isDestroyed()) return;
+    shown = true;
+    win.show();
+    if (why !== 'ready-to-show') {
+      console.warn(`[window] shown on ${why} -- the first frame never arrived.`);
+    }
+  };
+
+  win.once('ready-to-show', () => reveal('ready-to-show'));
+  win.webContents.once('did-finish-load', () => {
+    // Not immediately: ready-to-show usually lands a few frames after the
+    // load, and showing here first would give up the flicker-free reveal
+    // on every single launch to cover a case that is rare.
+    setTimeout(() => reveal('a timer after the page loaded'), WINDOW_SHOW_GRACE_MS);
+  });
+
   win.loadURL('harmony://app/index.html');
 
   /**
