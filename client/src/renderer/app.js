@@ -250,6 +250,7 @@ const el = {
   micMeterMark: $('mic-meter-mark'),
   voiceSounds: $('voice-sounds'),
   themeGrid: $('theme-grid'),
+  themeCustom: $('theme-custom'),
   voiceCamera: $('voice-camera'),
   voiceCam: $('voice-cam'),
   voiceScreen: $('voice-screen'),
@@ -3140,23 +3141,187 @@ const THEMES = [
 
 const DEFAULT_THEME = 'midnight';
 
+/*
+ * The Custom palette.
+ *
+ * Four colours somebody picks, and everything else in the variable block
+ * worked out from them. Asking for all seventeen would be asking people to
+ * hand-tune a hover state; asking for four is asking what they want the app
+ * to look like. The derived ones follow the same relationships the built-in
+ * palettes were drawn with -- borders a step from the panel towards the
+ * text, muted text partway back to the background.
+ */
+const CUSTOM_FIELDS = [
+  { key: 'bg', label: 'Background', variable: '--bg' },
+  { key: 'surface', label: 'Panels', variable: '--surface' },
+  { key: 'text', label: 'Text', variable: '--text' },
+  { key: 'accent', label: 'Accent', variable: '--accent' },
+];
+
+/** Every property a custom palette writes, so switching away can remove them all. */
+const CUSTOM_VARIABLES = [
+  '--bg', '--surface', '--surface-2', '--border', '--border-strong', '--text', '--muted',
+  '--accent', '--accent-rgb', '--accent-hover', '--tint-rgb', '--video-bg',
+  '--danger', '--danger-soft', '--danger-rgb', '--live', '--live-rgb', '--warn',
+];
+
+const hexToRgb = (hex) => {
+  const n = Number.parseInt(String(hex).replace('#', '').padEnd(6, '0').slice(0, 6), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+const rgbToHex = (rgb) => `#${rgb.map((v) => Math.round(v).toString(16).padStart(2, '0')).join('')}`;
+/** a, moved t of the way towards b. */
+const mixHex = (a, b, t) => {
+  const x = hexToRgb(a);
+  const y = hexToRgb(b);
+  return rgbToHex(x.map((v, i) => v + (y[i] - v) * t));
+};
+const isLight = (hex) => {
+  const [r, g, b] = hexToRgb(hex);
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 > 0.5;
+};
+
+/** The whole variable block, from the four colours somebody picked. */
+function customPalette({ bg, surface, text, accent }) {
+  const light = isLight(bg);
+  const vars = {
+    '--bg': bg,
+    '--surface': surface,
+    '--surface-2': mixHex(surface, text, 0.06),
+    '--border': mixHex(surface, text, 0.13),
+    '--border-strong': mixHex(surface, text, 0.24),
+    '--text': text,
+    '--muted': mixHex(text, bg, 0.4),
+    '--accent': accent,
+    '--accent-rgb': hexToRgb(accent).join(' '),
+    '--accent-hover': mixHex(accent, light ? '#000000' : '#ffffff', 0.14),
+    // The one that decides whether every hover lightens or darkens. See the
+    // comment at the top of styles.css.
+    '--tint-rgb': light ? '0 0 0' : '255 255 255',
+    '--video-bg': mixHex(bg, '#000000', light ? 0.88 : 0.5),
+  };
+  // Status colours are not picked -- red has to stay red -- but they have to
+  // read against the background, so a light one gets the light palette's.
+  if (light) {
+    Object.assign(vars, {
+      '--danger': '#c4303a', '--danger-soft': '#c4303a', '--danger-rgb': '196 48 58',
+      '--live': '#1a9550', '--live-rgb': '26 149 80', '--warn': '#9a6a00',
+    });
+  }
+  return vars;
+}
+
+/** The four colours of whatever palette is on screen right now. */
+function currentColours() {
+  const style = getComputedStyle(document.documentElement);
+  const read = (name) => {
+    const value = style.getPropertyValue(name).trim();
+    return /^#[0-9a-f]{6}$/i.test(value) ? value : '#000000';
+  };
+  return Object.fromEntries(CUSTOM_FIELDS.map((f) => [f.key, read(f.variable)]));
+}
+
 /**
  * Put a palette on.
  *
  * Tolerant of a name it does not know -- a settings file written by a later
  * build, or edited by hand -- because the alternative is an app that opens
  * with no colours at all over a spelling mistake.
+ *
+ * Custom is the one palette that is not in the stylesheet: its colours are
+ * written onto <html> as inline custom properties, which outrank every
+ * :root[data-theme] block. Any other palette removes them again, or they
+ * would go on outranking it.
  */
-function applyTheme(id) {
+function applyTheme(id, custom = state.settings?.customTheme) {
+  const root = document.documentElement;
+  for (const name of CUSTOM_VARIABLES) root.style.removeProperty(name);
+
+  if (id === 'custom' && custom) {
+    root.dataset.theme = 'custom';
+    for (const [name, value] of Object.entries(customPalette(custom))) {
+      root.style.setProperty(name, value);
+    }
+    return 'custom';
+  }
   const theme = THEMES.some((t) => t.id === id) ? id : DEFAULT_THEME;
-  document.documentElement.dataset.theme = theme;
+  root.dataset.theme = theme;
   return theme;
+}
+
+/** The Custom swatch's bands, painted from its own colours. */
+function customBands(colours) {
+  return colours ? [colours.bg, colours.surface, colours.accent] : ['#444444', '#666666', '#888888'];
+}
+
+/** Save the custom colours, a moment after the last change. */
+let customSaveTimer = null;
+function saveCustomTheme(colours) {
+  clearTimeout(customSaveTimer);
+  customSaveTimer = setTimeout(async () => {
+    await harmony.settings.set({ theme: 'custom', customTheme: colours });
+    state.settings = await harmony.settings.get();
+  }, 300);
+}
+
+/**
+ * The four pickers, shown while Custom is the palette.
+ *
+ * Applied on every movement of a picker, not on close, so the app itself is
+ * the preview -- the point of choosing your own colours is seeing them on
+ * the thing they colour.
+ */
+function renderCustomEditor(current) {
+  el.themeCustom.hidden = current !== 'custom';
+  if (current !== 'custom') return;
+
+  const colours = { ...state.settings.customTheme };
+  el.themeCustom.replaceChildren(...CUSTOM_FIELDS.map((field) => {
+    const label = document.createElement('label');
+    const input = document.createElement('input');
+    input.type = 'color';
+    input.value = colours[field.key];
+    input.addEventListener('input', () => {
+      colours[field.key] = input.value;
+      applyTheme('custom', colours);
+      const swatch = el.themeGrid.querySelector('[data-theme="custom"] .theme-bands');
+      customBands(colours).forEach((c, i) => {
+        if (swatch?.children[i]) swatch.children[i].style.background = c;
+      });
+      saveCustomTheme({ ...colours });
+    });
+    const name = document.createElement('span');
+    name.textContent = field.label;
+    label.append(input, name);
+    return label;
+  }), (() => {
+    // A way back from a palette that turned out unreadable, which a
+    // colour picker makes easy to do by accident.
+    const reset = document.createElement('button');
+    reset.type = 'button';
+    reset.className = 'ghost small theme-custom-reset';
+    reset.textContent = 'Start again from Midnight';
+    reset.addEventListener('click', async () => {
+      applyTheme(DEFAULT_THEME);
+      const fresh = currentColours();
+      state.settings.customTheme = fresh;
+      applyTheme('custom', fresh);
+      await harmony.settings.set({ theme: 'custom', customTheme: fresh });
+      state.settings = await harmony.settings.get();
+      renderThemes();
+    });
+    return reset;
+  })());
 }
 
 function renderThemes() {
   const current = applyTheme(state.settings?.theme ?? DEFAULT_THEME);
+  const offered = [
+    ...THEMES,
+    { id: 'custom', name: 'Custom', bands: customBands(state.settings?.customTheme) },
+  ];
 
-  el.themeGrid.replaceChildren(...THEMES.map((theme) => {
+  el.themeGrid.replaceChildren(...offered.map((theme) => {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'theme-swatch';
@@ -3178,6 +3343,10 @@ function renderThemes() {
 
     button.append(bands, name);
     button.addEventListener('click', async () => {
+      // The first time, Custom starts from the palette you were on.
+      if (theme.id === 'custom' && !state.settings.customTheme) {
+        state.settings.customTheme = currentColours();
+      }
       // Applied before it is saved. Writing settings is a round trip
       // through the main process, and a palette that takes a beat to appear
       // feels like a click that missed.
@@ -3185,11 +3354,17 @@ function renderThemes() {
       for (const other of el.themeGrid.children) {
         other.toggleAttribute('data-on', other.dataset.theme === theme.id);
       }
-      await harmony.settings.set({ theme: theme.id });
+      renderCustomEditor(theme.id);
+      await harmony.settings.set({
+        theme: theme.id,
+        ...(theme.id === 'custom' ? { customTheme: state.settings.customTheme } : {}),
+      });
       state.settings = await harmony.settings.get();
+      if (theme.id === 'custom') renderThemes();
     });
     return button;
   }));
+  renderCustomEditor(current);
 }
 
 /** Devices seen at the last enumeration, so a change can be compared. */

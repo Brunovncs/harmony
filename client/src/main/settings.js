@@ -80,6 +80,13 @@ const DEFAULTS = {
    * them on a snapshot of how it looked the day they picked it.
    */
   theme: 'midnight',
+  /*
+   * The four colours of the Custom palette, used when theme is 'custom'.
+   * Empty until somebody first picks Custom, which then starts from
+   * whatever palette they were on -- a blank editor would be a worse
+   * starting point than the colours they were already looking at.
+   */
+  customTheme: null,
   // The member column on the right. On by default: it is the answer to
   // "is anybody around", which is the question people open the app with.
   showMembers: true,

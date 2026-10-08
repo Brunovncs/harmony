@@ -3132,6 +3132,46 @@ button.danger {
   flex: 1 1 0;
 }
 
+/* The Custom palette's four colours, one picker each. */
+.theme-custom {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+.theme-custom label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.theme-custom input[type='color'] {
+  flex: none;
+  width: 1.8rem;
+  height: 1.8rem;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+.theme-custom input[type='color']::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+.theme-custom input[type='color']::-webkit-color-swatch {
+  border: none;
+  border-radius: 5px;
+}
+.theme-custom-reset {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+
 /* ---------- tuning the microphone ---------- */
 
 .mic-tuning {
