@@ -8,7 +8,7 @@ shaped this way — this file is the procedure.
 > **This project was entirely vibecoded and is recreational.** It has no
 > authentication, no security review and no high availability. Deploy it for
 > yourself and people you trust, not for anything that matters when it breaks.
-> The full caveat is at the top of the [README](README.md#harmony).
+> The full caveat is at the bottom of the [README](README.md#disclaimer-vibe-coded).
 
 - [Part 1 — the server](#part-1--the-server)
 - [Part 2 — the client](#part-2--the-client)

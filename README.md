@@ -1,663 +1,70 @@
 # Harmony
 
-> [!WARNING]
-> ## 🤖 This project was entirely vibecoded
->
-> **Every line of this repository — client, server, tests and these docs — was
-> written by an AI coding assistant, prompted by a human who did not review it
-> line by line.** It is a recreational project, built for fun and for a handful
-> of friends to share screens with. Treat it accordingly.
->
-> It does work: it has been run in production for a small group, the test suites
-> are real (they drive two actual Electron clients through a real media server,
-> nothing mocked), and the measurements quoted throughout this README were taken
-> rather than guessed. But *working* and *production-grade* are different claims,
-> and only the first one is being made here.
->
-> **Before you put this anywhere that matters, know what it does not have:**
->
-> - **The shared password still decides *whether* you are in, not *who* you
->   are.** It is optional and off by default; without it, anyone who can reach
->   the server can broadcast or watch. Accounts (below) sit *behind* that
->   password and give per-person identity, but the shared secret is still a
->   house key: do not hand it to people you would not hand a house key.
-> - **Account passwords are scrypt-hashed, and that is the extent of it.** There
->   is no email, no recovery, no second factor and no lockout across addresses.
->   An owner who forgets their password edits the database by hand.
-> - **No security review, no audit, no fuzzing.** Untrusted input reaches a
->   media server and a native Windows audio module. Nobody has attacked this on
->   purpose.
-> - **No rate limiting, no abuse controls, no quotas.** A single client can
->   saturate your upload.
-> - **No high availability.** One host, no redundancy, no failover, no backups.
-> - **No stability guarantees.** No versioning policy, no migration path, no
->   promise that tomorrow's commit will not break your setup.
->
-> Use it on a LAN, or among people you trust, and enjoy it. If you need screen
-> sharing that carries real consequences when it fails, use something with an
-> operations team behind it. **No warranty — see [LICENSE](LICENSE).**
-
-**Self-hosted screen sharing with sub-second latency, on hardware you already
-have.** Sub-second glass to glass, because nothing is ever transcoded and there
-is no playback buffer to scrub.
-
-**Type a username to start sharing under it.** Type a name someone else is
-already using, and you watch them instead. That is the whole interaction model,
-and on a server where nobody has registered it is still the *entire* interaction
-model — no sign-up, no profile.
-
-**Accounts are optional, and they are how a name becomes yours.** Register once
-and the nickname is permanently yours: nobody else can stream under it, and the
-server stops honouring anonymous claims the moment the first account exists. The
-first person to present the owner key printed in the server log becomes the
-owner, and can make other people admins.
-
-**Once you are signed in there are channels.** Voice channels where everyone
-hears everyone and sees everyone's camera and screen, text channels with
-attachments, pinning and substring search, an admin-managed soundpad that plays
-for the whole channel, and a profile picture. Names are typed however you like
-— "Game Night" is stored as `gamenight`, because a name becomes part of a URL.
-
-## Demo
-
-<!--
-  This is a GIF, not the .mp4, because GitHub will not play a video committed
-  to a repository: raw.githubusercontent.com serves repo files as
-  `Content-Type: application/octet-stream` with `X-Content-Type-Options:
-  nosniff`, and that header forbids the browser from treating it as video/mp4.
-  A <video> tag pointed at a file in this repo cannot work, relative or
-  absolute. GIFs render inline and have no such problem.
-
-  Regenerate after replacing preview_video.mp4 (crop removes the pillarbox):
-    ffmpeg -i media/preview_video.mp4 -vf "crop=1592:1080:154:0,fps=15,\
-    scale=1280:-1:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff:\
-    max_colors=232[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:\
-    diff_mode=rectangle" -loop 0 media/preview.gif
--->
-
-![Harmony: choosing a screen, setting quality and priority, going live, then watching two other streams side by side in the mosaic](media/preview.gif)
-
-<sub>38 seconds, no sound. The same clip at full 1080p60 **with** audio:
-[preview_video.mp4](media/preview_video.mp4) (2 MB).</sub>
+**Self-hosted, low-latency screen sharing and voice chat for a group of friends.**
+A small Discord you run yourself: voice channels with screen and camera sharing,
+text channels, and sub-second latency, because the server only relays video and
+never re-encodes it.
 
 <p align="center">
-  <img src="media/home_screen.png" alt="The connect screen: server address, username, a clipping toggle, and a list of who is live now" width="32%">
-  <img src="media/streamer_view.png" alt="Broadcasting: live preview with a stats line showing resolution, frame rate, bitrate and encode time" width="32%">
-  <img src="media/mosaic_view.png" alt="The mosaic: two live streams at once, each tile with its own volume slider and fullscreen button" width="32%">
+  <img src="media/home_screen.png" alt="The connect screen" width="32%">
+  <img src="media/server_view.png" alt="A server: channels, chat and members" width="32%">
+  <img src="media/streamer_view.png" alt="Choosing what to share: source, resolution and frame rate" width="32%">
 </p>
-<p align="center">
-  <sub>Connect · broadcast with live stats · watch several streams at once</sub>
-</p>
-
-```
-Desktop client (Electron)                    Server (x86-64 or arm64 Linux)
-┌────────────────────────┐                  ┌──────────────────────────────┐
-│ desktopCapturer        │   WHIP over TLS  │ Harmony control server :8080 │
-│   screen │ window      │ ─── signaling ─► │   • username reservation     │
-│ loopback-capture       │                  │   • MediaMTX auth hook       │
-│   system │ per-process │                  │   • live stream list         │
-│ RTCPeerConnection      │   SRTP over UDP  │ MediaMTX :8889 / :8189       │
-│   H.264, GPU encoded   │ ═══ media ═════► │   pure packet relay          │
-└────────────────────────┘                  └──────────────────────────────┘
-          ▲   WHEP + SRTP                                  │
-          └────────────── viewers ─────────────────────────┘
-```
-
-## What the server needs
-
-Almost nothing, and that is the whole design. **The server never touches a
-pixel** — it does not decode, encode, transcode, re-mux or write to disk. The
-broadcaster's GPU encodes H.264 and the server forwards the resulting RTP packets
-untouched, so its cost per stream is a socket and a memcpy rather than a video
-pipeline.
-
-| | |
-| --- | --- |
-| **CPU** | Any 64-bit Linux box. **x86-64 and arm64** both work, as do armv7 and armv6. No GPU, no hardware encoder, no AVX. |
-| **RAM** | 512 MB is comfortable. Nothing is buffered server-side. |
-| **Disk** | ~150 MB installed. Nothing is recorded. |
-| **Real ceiling** | **Your upload bandwidth.** Every viewer of every stream is a separate copy out of the server: one 8 Mbps broadcaster with three viewers is 24 Mbps up. |
-
-Run in production on a **Raspberry Pi 5** (8 GB, Ubuntu 26.04 aarch64); the
-relay and control server also run on **x86-64** on every pass of the e2e suite.
-A mini-PC, an old laptop, a VPS or a NAS will all do — and a VPS with real upload
-bandwidth is the better choice if your home connection is thin, because bandwidth
-is the only resource this is ever short of.
-
-The client is where the actual work happens: it encodes on the GPU and decodes
-one stream per tile you open.
-
----
 
 ## Features
 
-### Sharing
+- **Screen, window or capture-card sharing** at up to native resolution and
+  120 fps, H.264 encoded on your GPU. Per-app audio on Windows.
+- **Voice channels** with cameras and screen shares, per-person volume up to
+  350%, mute, deafen and an admin soundpad.
+- **Text channels** with Markdown, attachments, reactions, custom emoji,
+  mentions, pins and search.
+- **Accounts and roles**: owner, admins and members, with optional
+  password-locked channels.
+- **Runs on almost anything.** The server never decodes a frame, so a
+  Raspberry Pi is plenty; upload bandwidth is the only real limit.
 
-- **Screens, windows, and cameras or capture cards** — anything the OS exposes as
-  a video input.
-- **Audio follows what you share.** A whole screen sends system audio; a single
-  window sends only that application's audio (Windows); a capture card takes its
-  sound from an audio input you pick beside it.
-- **Exclude one app from a screen share** — typically a voice-chat client, so your
-  friends do not hear themselves.
-- **Change what you are sharing, mid-stream**, without interrupting viewers.
-  Quality and encoder priority are live too.
-- **Hear your own outgoing audio** with the 🎧 button, for capture cards and
-  microphones.
-- **Hide the preview** while staying live. Drawing your own screen back at you
-  is GPU work on top of whatever you are sharing, which is what makes a game
-  feel stuttery at a high frame rate. It also detaches automatically while the
-  window is minimised.
-- **Five quality presets**, from 720p30/3 Mbps through 1080p60/12 Mbps to
-  native-resolution 60 fps at 25 Mbps, and a **priority** switch deciding what
-  the encoder sacrifices when the budget runs out — *Sharp* keeps resolution so
-  text stays readable, *Smooth* keeps frame rate so motion stays fluid.
-- **GPU encoding and decoding** (NVENC, AMF, Quick Sync) is used automatically
-  where the driver offers it, with software H.264 as the automatic fallback. The
-  stats line names the encoder actually in use — read from the connection, not
-  guessed — so `NVENC encode` means NVENC really is running.
-- **Dual-GPU warning.** On a laptop with two GPUs, Harmony checks whether it is
-  in the cross-adapter trap that costs roughly 10% of the machine, and tells you
-  how to get out of it. See [DUAL_GPU_WEIRDNESS.md](DUAL_GPU_WEIRDNESS.md).
+## Quick start
 
-### Watching
-
-- **Mosaic view** — watch every live stream at once, or hand-pick a few. The grid
-  fits tiles to the window in both directions and reflows as people come and go.
-- **Independent audio per tile**, each with its own mute and volume, scaled by a
-  master slider in the footer. Nothing is exclusive.
-- **Maximize one tile** (⤢) to fill the grid with a single stream while staying
-  inside the window — so the rest of your desktop is still there. **Esc** or the
-  same button goes back.
-- **Fullscreen any tile** with the ⛶ button or a double-click; **Esc** or ✕ to
-  leave. It is the real Fullscreen API, so it covers the taskbar.
-- **Close a stream** (✕) you are not interested in. The connection is torn down
-  rather than hidden, and it stays closed — the grid will not quietly reopen it
-  three seconds later.
-- **Broadcast and watch at the same time.** Your own stream is left out of the
-  grid — the preview already shows it, and pulling it back down would spend the
-  bandwidth twice.
-- **Add a stream from inside a stream**: watching one person, pick another, and
-  they appear beside them.
-
-### Channels
-
-- **Voice channels** with a microphone that stays published while muted — muting
-  disables the track rather than tearing the path down, so push-to-talk costs
-  nothing and unmuting is instant. **Deafen** silences everyone, including
-  screen-share audio, without hanging up, and mutes you too.
-- **The sidebar shows who is in each voice channel**, with their pictures — so
-  you can see who is where before deciding to join, the same way you would in
-  Discord.
-- **A green ring while somebody is talking**, from an AnalyserNode on each
-  incoming stream with two thresholds rather than one. A single threshold
-  makes the ring strobe, because the gaps between syllables really are
-  silence.
-- **Per-person indicators**: muted, muted by an admin, camera on, sharing a
-  screen — the same glyphs in the sidebar and in the voice pane, from one
-  helper, so the two can never disagree.
-- **Turn one person up or down, or mute them just for you**, from 0 to 350%.
-  Past 100% the audio is being amplified rather than attenuated, so the slider
-  and the reading both turn amber: it is the first thing to suspect when
-  somebody sounds distorted. It is local — nothing is sent, and the person you
-  muted is never told. The setting follows the person rather than their slot,
-  so it survives their reconnect.
-- **Pick your microphone and your output**, remembered between runs and
-  hot-pluggable. A saved device is a preference, not a requirement: unplug a
-  headset mid-call and it falls back to the system default while keeping the
-  choice, so plugging it back in picks it up again on its own. Switching
-  microphone swaps the track on the live session rather than republishing, so
-  nobody else's subscription is disturbed.
-- **A mosaic of the channel.** Joining a voice channel opens a tile for every
-  camera and screen share in it, automatically, from the roster. Click one to
-  blow it up. These are channel-scoped paths (`vc-<channel>-<slot>-c`), so a
-  stream shared into a password-protected channel is unreachable by somebody
-  who was never admitted — unlike the flat namespace, which has no way to say
-  that.
-- **A camera and a screen share at once**, on separate paths. MediaMTX's WHIP
-  cannot renegotiate an added track, so a combined path would mean tearing the
-  session down and cutting everyone's audio to turn a camera on.
-- **Text channels** with attachments, pinning and search across message text,
-  author and media type. Search is a trigram index, so it matches substrings;
-  queries under three characters fall back to a plain scan and the UI says
-  which ran.
-- **An admin soundpad.** The server broadcasts "play clip X" and every client
-  plays its own cached copy — never mixed into anyone's microphone, which
-  would re-encode music through a 32 kbps speech codec, duck it against the
-  clicker's echo cancellation, and go silent for a force-muted user.
-- **Profile pictures**, downscaled to a 256-pixel square by the client before
-  upload and served from the local cache over `harmony://app/media/<hash>`.
-- **Admin controls**: create, rename, password, reorder and delete channels;
-  reorder soundpad clips; force-mute a microphone; move someone to another
-  channel or disconnect them; delete any message. A force-mute is enforced by
-  the auth hook refusing the publish, not by the kick — a kicked path is
-  immediately re-publishable.
-- **Passwords per channel**, asked once. A correct one is remembered as a
-  grant; removing the channel's password drops every grant, so re-adding one
-  later does not silently readmit everybody.
-
-### Clips
-
-- **Save the last 30 seconds** of any feed you are sending *or* watching, as an
-  MP4 in `Videos/Harmony Clips`. Off by default; one toggle on the connect screen
-  turns it on for every feed.
-- **Nothing is re-encoded.** The buffer taps WebRTC's *encoded* frames, so a clip
-  costs a memcpy rather than a second H.264 encode per feed.
-
-### Connecting
-
-- **An optional server password.** Off by default. Set one and nothing but the
-  health check answers without it — including the media, since watch URLs then
-  carry a token of their own. Wrong guesses are rate limited on an escalating
-  ladder: three costs 5 minutes, then 10, 30, 60. The client asks the server
-  whether a password is wanted and only shows the box if it is.
-- **Works on networks that block UDP**, via an ICE-TCP fallback on the same port —
-  no TURN relay, no third party, no per-gigabyte bill.
-- **A connection test** on the connect screen walks health → session → STUN → SDP
-  → media and tells you which step failed.
-- **A per-user installer**, no admin rights and no UAC prompt, that opens in a
-  fraction of a second. Enter a server address once and it is remembered.
-
----
-
-## Getting started
-
-**Server, with Docker:**
+**Server** (any 64-bit Linux, x86-64 or arm64):
 
 ```bash
-docker run -d --name harmony \
-  -p 8080:8080 -p 8889:8889 -p 8189:8189/udp -p 8189:8189/tcp \
-  -e MTX_WEBRTCADDITIONALHOSTS=stream.example.com \
-  -e HARMONY_SIGNALING_URL=https://stream.example.com:8444 \
-  pedrolucasmiguel/harmony-server:2.3.0
+sudo server/install.sh
 ```
 
-`linux/amd64` and `linux/arm64`, so the same tag runs on a mini-PC or a
-Raspberry Pi. Compose and `docker run` examples are in [docker/](docker/) —
-read the note there about **not remapping the media ports**, which negotiate
-perfectly and then play nothing.
+or with Docker. See [docker/](docker/).
 
-**Server, without Docker:** clone the repo onto any Linux box, run
-`sudo server/install.sh`, set two environment variables, forward port 8189 (UDP
-**and** TCP). The installer picks the right MediaMTX build for your
-architecture.
+**Client** (Windows):
 
-**Client:** `cd client && npm install && npm run build` gives you
-`dist/Harmony-3.0.0-setup.exe` in about 12 seconds. `npm run build:release`
-takes about 75 seconds and makes a smaller installer (~86 MB instead of ~108 MB),
-for the copy you hand out.
+```bash
+cd client && npm install && npm run build   # -> dist/Harmony-<version>-setup.exe
+```
 
-The full procedure — TLS on a line whose ISP blocks 80 and 443, dynamic IPs,
-packaging, tests and a troubleshooting table — is in
+TLS, dynamic IPs, ports and troubleshooting are covered in
 **[DEPLOYMENT.md](DEPLOYMENT.md)**.
-
----
-
-## Why it is built this way
-
-**Relay, never transcode.** This is not a micro-optimisation, and the constraint
-that forced it is worth stating plainly: the Raspberry Pi 5 has *no hardware
-H.264 encoder at all* (the Pi 4's was dropped), so a design that transcoded would
-have been capped at a few frames per second there. Building for the weakest
-plausible host is why it now runs on anything — an arm64 SBC, an x86-64 mini-PC,
-a cheap VPS — and why adding viewers costs bandwidth rather than CPU.
-
-**Two independent locks on a username.** A short-lived token claim in the control
-server covers the seconds between picking a name and the first packet arriving;
-`overridePublisher: no` in MediaMTX means that even with a valid token, a second
-publisher cannot take a live path away from whoever holds it. Neither lock
-depends on the other being correct.
-
-One wrinkle worth knowing, because it is measured in the e2e suite: MediaMTX
-answers a WHIP offer *before* it decides whether that publisher may have the
-path. A rejected second publisher therefore gets a perfectly successful handshake
-and then streams into nothing. So the client does not trust the `201` — after
-publishing it waits for the control server to confirm the stream is actually
-live, and reports a clear error if it never appears.
-
-**Liveness is never tracked, only observed.** The control server polls MediaMTX
-and mirrors what it reports. If a broadcaster's laptop sleeps, the connection
-drops, MediaMTX forgets the path, and the stream disappears on its own. There is
-no bookkeeping to leak.
-
-This still holds now that there is a database. Only genuinely durable things are
-stored — accounts, roles, and what people have written down. Who is live and who
-is connected stays derived from reality, so a restart rebuilds it rather than
-reconciling it against a table that can be wrong.
-
-**Media and signaling are separated on purpose.** Signaling is ordinary HTTP and
-goes through a reverse proxy or a Cloudflare Tunnel happily. Media is UDP and
-cannot: `cloudflared` has no public UDP support, so a tunnel alone would give you
-a connection that negotiates perfectly and then plays nothing. The media port has
-to be forwarded.
-
-**Per-application audio is Windows-only.** Chromium's loopback capture is
-system-wide; capturing a single app needs the Windows WASAPI process-loopback API
-through the optional native `loopback-capture` module. On macOS and Linux a window
-share falls back to whatever you pick in the client — silent by default, so other
-applications' sound never leaks into a stream by accident.
-
----
-
-## Notes from building it
-
-Things that were surprising, measured rather than assumed, and worth knowing
-before you change the code.
-
-<details>
-<summary><b>Chromium throttles a renderer you cannot see — down to 1 fps</b></summary>
-
-A minimised or covered window drags the encoder to a few frames per second, which
-looks exactly like a network problem and is not. The client disables it with
-`backgroundThrottling: false` plus three matching command-line switches. If you
-fork the client, keep them.
-
-Separately, **low frame rates are usually a bitrate ceiling.** Measured on a
-1080p screen full of motion: *Sharp* at a 4 Mbps ceiling gives ~31 fps at full
-resolution, and raising the ceiling to 10 Mbps takes it to ~58 fps still at 1080p.
-Raise the preset before reaching for *Smooth*.
-</details>
-
-<details>
-<summary><b><code>encodedInsertableStreams</code> is not free to leave switched on</b></summary>
-
-With the flag set and nothing reading the encoded stream, Chromium keeps encoding
-and sends *nothing at all* — measured at 178 frames encoded, 0 bytes sent. So the
-flag is only set on connections whose frames something will actually read, which
-is why toggling clips takes effect on the **next** stream rather than the current
-one.
-</details>
-
-<details>
-<summary><b>Clips carry Opus audio in MP4</b></summary>
-
-Legal, and it plays in Chromium, VLC, ffmpeg and anything browser-based — but a
-few older Windows players will show video with no sound. Converting to AAC would
-need a decode/encode pass, which is the one cost this design exists to avoid.
-
-Memory is simply bitrate × 30 s per stream: ~11 MB at the Low preset, ~30 MB at
-Balanced, ~94 MB at Ultra, with a hard 192 MB ceiling and the oldest frames
-dropped continuously.
-</details>
-
-<details>
-<summary><b>ICE-TCP instead of a TURN relay</b></summary>
-
-MediaMTX leaves its TCP media listener off by default, because TCP carries
-real-time media badly — one lost packet stalls everything behind it, so a
-congested link degrades into growing delay rather than dropped frames. That is
-the right default for a server where everyone can use UDP, and the wrong one for
-a self-hosted tool whose users sit on corporate and campus networks that drop UDP
-outright. ICE only falls back to it when UDP fails, so it costs nothing when it
-is not needed. Verified by stripping every UDP candidate from the server's answer
-and confirming the session still connected.
-</details>
-
-<details>
-<summary><b>The published audio track is created once and never replaced</b></summary>
-
-Everything feeds a Web Audio mixer behind it. That is what lets you switch from a
-screen to a webcam mid-stream without renegotiating: `replaceTrack()` changes the
-video sender in place, and the audio change is just the mixer listening to
-something else.
-</details>
-
-<details>
-<summary><b>WASAPI excludes one process tree per capture</b></summary>
-
-`PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE` takes a single target. That
-platform limit is why the audio-exclusion picker is single-select rather than a
-list of checkboxes — not a simplification.
-</details>
-
-<details>
-<summary><b>"My game reports 200 fps but feels like 20" while streaming</b></summary>
-
-High frame rate with bad *pacing* is a different problem from low frame rate,
-and on Windows it usually is not the encoder. Three things stack up:
-
-**1. Mixed refresh rates are the big one, and it is not Harmony's doing.**
-When a second monitor runs at a different refresh rate, DWM can tie desktop
-composition to the lower of the two, and anything animating on the slow monitor
-— a video preview, for instance — drags the game's presentation with it. The
-frame counter stays high because frames are still being produced; they are just
-delivered on someone else's schedule. The fixes that actually work are at the OS
-level: match the refresh rates, run the game **borderless** rather than
-exclusive fullscreen, or move the second display to the integrated GPU.
-
-**2. Harmony keeps painting when a normal app would stop — deliberately.**
-The three anti-throttling switches that keep the encoder alive while you look at
-the game (see below) also stop Chromium from backing off when its window is
-covered or parked on another monitor. So the preview kept being composited at
-full rate, forever, on the same GPU as the game.
-
-That part is fixed: **Hide preview** detaches the video element, and the window
-detaches it automatically while minimised. Both keep streaming — detaching
-`srcObject` stops the painting, while the sender holds the track independently
-of anything displaying it. Verified end to end: the server received
-**+1220 KB while the preview was hidden**. Mosaic tiles pause while minimised
-for the same reason.
-
-**3. H.264 was being encoded and decoded on the CPU, on a machine with a
-perfectly good NVENC sitting idle.** Chromium offers H.264 constrained baseline
-first, and NVIDIA's encoder and decoder do not accept baseline at all. One
-change — preferring High profile — moved an entire stream onto the hardware:
-
-| NVIDIA engine | baseline (before) | High (now) |
-| --- | --- | --- |
-| videoencode | **0.00%** | **19.03%** |
-| videodecode | **0.00%** | **3.67%** |
-
-**4. On a two-GPU laptop, Chromium cannot composite across GPUs on Windows.**
-If Harmony renders on the discrete GPU while its window sits on a display wired
-to the integrated one, every frame is copied between adapters — and it shows up
-as the desktop compositor's cost, not Harmony's. Measured on a hybrid laptop:
-**25% of a GPU, falling to 1.5%** once the panel was wired straight to the
-discrete GPU. Harmony now warns about this on the connect screen, because no
-setting inside the app can fix it — it is a MUX / Advanced Optimus switch.
-
-Worth ruling out first: minimise Harmony entirely. If the stutter goes away, it
-was compositing (1, 2 and 4). If it does not, it is contention.
-
-The full investigation, with the measurement commands, the dead ends and the
-numbers, is in **[DUAL_GPU_WEIRDNESS.md](DUAL_GPU_WEIRDNESS.md)**.
-
-**It is not a canvas.** The preview is a `<video>` element fed the capture
-stream directly — the only canvas in the client is a 160×90 test pattern used by
-*Test my connection*.
-</details>
-
-<details>
-<summary><b>NVENC, AMF and Quick Sync are already in use — there is nothing to integrate</b></summary>
-
-This gets asked a lot, so it is worth writing down with numbers. On Windows,
-Chromium already routes WebRTC's H.264 encoding through Media Foundation's
-VideoEncodeAccelerator, which is a front end for whichever vendor encoder the
-driver provides: **NVENC** on NVIDIA, **AMF/VCE** on AMD, **Quick Sync** on
-Intel. There is no flag to switch on and no vendor SDK to link against.
-
-Measured here by running the identical encode twice, once with Chromium's
-hardware encoding disabled (1920×1080, H.264, `contentHint: 'detail'`, 8 Mbps
-ceiling):
-
-| Source | GPU | CPU only | Difference |
-| --- | --- | --- | --- |
-| Synthetic canvas, heavy motion | 5.3 ms/frame | 9.9 ms/frame | **−46%** |
-| Real screen share | 8.1 ms/frame | 9.9 ms/frame | **−18%** |
-
-The margin depends on the content — a busy frame is where the GPU pulls ahead.
-Hardware **decoding** is on by default for viewers too.
-
-**Software H.264 is the automatic fallback.** Chromium drops to OpenH264 on the
-CPU when no hardware encoder exists or it fails to initialise, so a machine with
-no usable GPU encoder still streams; it just spends more CPU doing it. Verified
-by forcing the software path and checking it still encodes and sends.
-
-**What Chromium will not tell you is which encoder a given stream ended up on.**
-`encoderImplementation` is in the WebRTC stats spec, but it is absent from this
-Electron build's `outbound-rtp` — confirmed by dumping every field the stats
-object exposes, not by assuming. So the client reports the *capability*, from
-`app.getGPUFeatureStatus()`, and the broadcast stats line ends in `GPU encode` or
-`CPU encode`. A capability is an honest thing to report; a guess is not.
-
-**One trap, which this project fell into before catching it.**
-`getGPUFeatureStatus()` answers `disabled_software` until the GPU process has
-reported, and that takes about 300 ms after the window loads — measured:
-
-```
-  17ms  app ready              video_encode=disabled_software
-  66ms  did-finish-load        video_encode=disabled_software   <- the UI asks here
- 170ms  +100ms                 video_encode=disabled_software
- 382ms  +300ms                 video_encode=enabled
-```
-
-The client asks during start-up, which lands in the middle of that, so reading
-once and keeping the answer reported "no GPU encoder" for the entire session on
-a machine that was encoding on its GPU the whole time — Task Manager showing
-18% Video Encode while the app insisted there was none. It now waits for the GPU
-process to report (bounded, since a machine with no hardware encoder never
-flips), caches the settled answer, and re-checks when a broadcast starts.
-
-If you go measuring this yourself, do not trust a single early read.
-</details>
-
-<details>
-<summary><b>Almost all of the download is Chromium, not this app</b></summary>
-
-Harmony's own code plus its two runtime dependencies is under a megabyte, so
-shrinking the build means shrinking what Electron ships. Three measures took the
-2.x portable .exe from 95.7 MB to 82.2 MB:
-
-| Change | Saved (uncompressed) |
-| --- | --- |
-| `electronLanguages: [en-US]` — Chromium ships 55 locale files | ~48 MB |
-| Dropping `dxcompiler.dll` + `dxil.dll` — DirectX shader compilation for WebGPU, which this app has no use for | 27 MB |
-| `compression: maximum` | — |
-
-The 20 MB `LICENSES.chromium.html` stays: it is a licence-compliance
-requirement, and it is text, so it compresses to almost nothing. `vk_swiftshader.dll`
-also stays — it is only 6 MB, and it is what renders on a machine with no usable
-GPU driver.
-
-If a removal ever breaks a machine, the list is one array in
-[client/scripts/after-pack.js](client/scripts/after-pack.js).
-</details>
-
-<details>
-<summary><b>Fit tiles to the window in both dimensions, not just width</b></summary>
-
-The mosaic tries every column count and keeps whichever makes each 16:9 tile
-largest while still fitting the height. Sizing on width alone — the obvious
-approach, and the first one here — had a real consequence: four tiles in two
-columns of a wide window made rows taller than the window, and the bottom row's
-volume and fullscreen controls sat below the fold where they could not be clicked
-at all.
-</details>
-
----
-
-## Layout
-
-```
-server/
-  mediamtx.yml            relay config — annotated, worth reading before changing
-  src/rooms.js            username reservation
-  src/mediamtx-api.js     liveness polling
-  src/index.js            HTTP API + MediaMTX auth hook
-  install.sh              installer (detects architecture)
-client/
-  src/main/               Electron main: capture, native audio, all HTTP
-  src/preload/            the one bridge into the renderer
-  src/renderer/           UI, WHIP/WHEP, PCM → WebRTC audio pipeline
-  test/                   smoke (packaged builds), e2e (two real clients)
-```
-
-## Tests
-
-```bash
-npm --prefix server test          # reservation, accounts, channels, chat, soundpad
-npm --prefix client test          # launches the app, drives it over CDP
-npm --prefix client run test:ui   # clicks through the channels view
-
-MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:e2e
-MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:channel-video
-MEDIAMTX_BIN=/path/to/mediamtx npm --prefix client run test:voice
-```
-
-`test:ui` is the one that would have caught 2.0.0's mistake. It signs a real
-client in against a real server and uses the sidebar, the chat pane, the
-avatar button and the admin controls the way a person would -- because a
-route with a passing test and no control in front of it is not a feature, and
-every other suite here would have said it was.
-
-The e2e suite starts MediaMTX and the control server, then drives two Electron
-clients — one publishes its screen over WHIP, the other enters the same username
-and must end up decoding that video over WHEP. Nothing is mocked.
-
-`test:channel-video` does the same for the channel mosaic: two accounts join a
-voice channel, one publishes a camera to its channel path and the other
-subscribes with its own token and must decode frames. It also checks the thing
-channel-scoped paths exist for — that a token for the wrong channel cannot read
-them, and that none of it leaks into `/api/streams`.
-
-## Known limits
-
-- **One stream per username.** That is the design, not a bug. A webcam counts
-  separately, as `<nickname>-cam` — unless you are in a voice channel, where it
-  goes to that channel's own path instead and is only visible to the people in
-  it.
-- **Profile pictures are refused, not resized.** The client downscales to a
-  256-pixel square before uploading; the server's 256 KB cap is a backstop.
-  Resizing server-side would mean an image library, and that is a dependency.
-- **Soundpad clips cap at 2 MB.** Every client prefetches every clip so the
-  first press is not a download, which makes a clip's size a cost paid once per
-  person rather than once.
-- **Voice channels cap at 16 people.** The relay cannot mix audio — mixing is
-  decode + sum + re-encode, which is the transcoding that keeps this server
-  cheap to run and which a Pi cannot do at all. So every member subscribes to
-  every other member and the cost at the relay is N×(N−1): sixteen people is
-  240 concurrent streams.
-
-  Both ends of that have been measured rather than guessed. A 16-person
-  audio-only channel costs a 4-core Pi about **half of one core** (11–14% of
-  the machine, 252 MB, zero packet loss) and a client about **7% of one core**.
-  Neither is the limit — your **upload bandwidth** is, as soon as anyone shares
-  a screen into the channel. See `client/test/relay-load.mjs` to measure your
-  own host.
-- **An admin can mute you, and you will not see it for ~9 seconds** if the
-  roster push is lost. Nothing in WebRTC signals an application-level kick, so
-  the UI is driven by that push rather than by connection state.
-- **Accounts are a thin layer, not a security boundary against the server
-  operator.** They give per-person identity behind the shared password. Anyone
-  with the database file can reset a password; anyone with the server log at
-  first start can claim ownership. On a server with no accounts registered,
-  anyone who knows the shared password can still claim any free username — the
-  anonymous path closes as soon as the first person registers.
-- **No recording on the server.** MediaMTX can do it without re-encoding
-  (`record: yes` in `pathDefaults`) but it is off — partly because an SD card is a
-  poor place for video, partly because writing to disk is the one thing that
-  would give the server a cost that scales. Client-side clips cover the common
-  case.
-- **No adaptive simulcast.** Every viewer gets the broadcaster's single encoding.
-  Adding simulcast would move work onto the broadcaster rather than the server,
-  so it is feasible — just not done.
-- **Viewer "pause" freezes on the last frame** and resumes at live. There is no
-  buffer to scrub, which is the normal trade for sub-second latency.
-- **The mouse cursor cannot be excluded from a screen share.** Not a decision —
-  Chromium ignores the `cursor` constraint entirely. Measured on Electron 44:
-  `getSupportedConstraints()` does not list `cursor`, and `cursor: 'never'`,
-  `{ exact: 'never' }` and `{ ideal: 'never' }` all leave `getSettings().cursor`
-  at `"always"`, at capture time and via `applyConstraints()` on a live track.
-  Electron's `setDisplayMediaRequestHandler` has no cursor option either. See
-  [crbug 41456762](https://issues.chromium.org/issues/41456762). Hiding it would
-  need the native capture path described in
-  [DUAL_GPU_WEIRDNESS.md](DUAL_GPU_WEIRDNESS.md).
 
 ## Built on
 
-[MediaMTX](https://github.com/bluenviron/mediamtx) · [Electron](https://www.electronjs.org/)
-· [mp4-muxer](https://github.com/Vanilagy/mp4-muxer) · [loopback-capture](https://www.npmjs.com/package/loopback-capture)
+[MediaMTX](https://github.com/bluenviron/mediamtx) ·
+[Electron](https://www.electronjs.org/) ·
+[loopback-capture](https://www.npmjs.com/package/loopback-capture) ·
+[mp4-muxer](https://github.com/Vanilagy/mp4-muxer)
 
 ## License
 
-MIT
+MIT, see [LICENSE](LICENSE).
+
+---
+
+## Disclaimer: vibe-coded
+
+> [!WARNING]
+> **Every line of this repository (client, server, tests and docs) was written
+> by an AI coding assistant**, prompted by a human who did not review it line by
+> line. It is a recreational project, built for fun and for a handful of
+> friends.
+>
+> It works and has run for a small group, but it has had **no security review,
+> no audit and no abuse controls**, and comes with **no stability guarantees**.
+> Use it on a LAN or among people you trust, not for anything that matters when
+> it breaks. **No warranty.**
