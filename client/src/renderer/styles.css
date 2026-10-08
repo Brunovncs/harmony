@@ -2893,32 +2893,6 @@ button.danger {
   max-height: 3.2rem;
   object-fit: cover;
 }
-/* The <video> the canvas is painted from. One pixel, invisible, and still
-   unambiguously being rendered -- see the comment at its creation. */
-.channel-tile video.tile-video-source {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  min-height: 0;
-  opacity: 0;
-  pointer-events: none;
-  aspect-ratio: auto;
-}
-
-/* The throttled self-preview is painted here. */
-.channel-tile .tile-canvas {
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  object-fit: contain;
-  display: block;
-  background: #000;
-}
-.channel-tile[data-own] .tile-canvas {
-  transform: scaleX(-1);
-}
-.channel-tile[data-own][data-key$=':s'] .tile-canvas {
-  transform: none;
-}
 /*
  * With the preview off there is no picture at all, so the tile needs a
  * height of its own or it collapses to the caption and stops looking like

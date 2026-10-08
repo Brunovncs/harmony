@@ -373,6 +373,12 @@ async function run() {
   // happened to be ready and failed when anything earlier got slower. The
   // assertion below is about the stream surviving a picker reopen, so the
   // preview being up is a precondition to wait for, not a coin flip.
+  // The preview starts hidden on every broadcast; show it to look at it.
+  await bcCdp.evaluate(`
+    const b = document.getElementById('toggle-preview');
+    if (b.textContent.trim() === 'Show preview') b.click();
+    return true;
+  `);
   await waitFor(bcCdp, "document.getElementById('preview').videoWidth > 0", {
     label: 'preview to report a size',
     timeoutMs: 15_000,
@@ -801,6 +807,13 @@ async function run() {
   // be encoding.
   const bytesBefore = (await mtxPaths()).find((p) => p.name === selfName)?.bytesReceived ?? 0;
 
+  // The preview starts hidden on every broadcast; show it to look at it.
+  await vwCdp.evaluate(`
+    const b = document.getElementById('toggle-preview');
+    if (b.textContent.trim() === 'Show preview') b.click();
+    return true;
+  `);
+  await sleep(800);
   const hidden = await vwCdp.evaluate(`
     document.getElementById('toggle-preview').click();
     await new Promise(r => setTimeout(r, 1000));

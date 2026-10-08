@@ -495,11 +495,13 @@ const state = {
    * Whether the preview is being painted, and what to paint.
    *
    * `hiddenByUser` is a deliberate choice and survives minimise/restore;
-   * `windowVisible` is the automatic half. `stream` holds the downscaled copy
-   * from previewCopy() -- never the published stream, which is far too
-   * expensive to paint.
+   * `windowVisible` is the automatic half. `stream` holds the clone from
+   * previewCopy() -- never the published track itself.
+   *
+   * Hidden until asked for, on every new broadcast: nobody but you sees it,
+   * and you are already looking at the thing it is a picture of.
    */
-  preview: { hiddenByUser: false, windowVisible: true, stream: null },
+  preview: { hiddenByUser: true, windowVisible: true, stream: null },
 
   server: '', // control server base URL, valid outside a session too
   session: null, // server response for the current username
@@ -3448,61 +3450,6 @@ function ownChannelTiles() {
 }
 
 /**
- * Draw a stream into a canvas a few times a second.
- *
- * A <video> showing your own screen is composited every frame, on the same
- * GPU as the game you are sharing -- which is exactly what
- * DUAL_GPU_WEIRDNESS.md is about, and it is the one cost in the app that is
- * pure self-indulgence: nobody but you can see your own preview, and you
- * are already looking at the thing it is a picture of.
- *
- * So the element is hidden and a canvas is painted from it instead, at
- * PREVIEW_FPS. Two frames a second is plenty to answer "is it still the
- * right window and is it moving", which is the only question a self-preview
- * ever gets asked.
- *
- * The <video> still has to exist and still has to be playing -- a canvas
- * cannot pull frames from a paused element -- but a hidden one is decoded
- * without being composited into the page, which is where the saving is.
- *
- * @returns {{stop: () => void}}
- */
-const PREVIEW_FPS = 2;
-
-function throttledPreview(video, canvas) {
-  const paint = () => {
-    const w = video.videoWidth;
-    const h = video.videoHeight;
-    if (!w || !h) return;
-    // Resized only when it changes: assigning width/height clears the
-    // canvas and reallocates its backing store, every frame, for nothing.
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w;
-      canvas.height = h;
-    }
-    canvas.getContext('2d')?.drawImage(video, 0, 0, w, h);
-  };
-
-  paint();
-  // Self-terminating. Tiles are rebuilt on every roster push and the old
-  // nodes are simply dropped, so a timer that only stopped when its button
-  // was pressed would go on painting into a detached canvas for the rest of
-  // the session -- once per rebuild, forever.
-  const timer = setInterval(() => {
-    if (!canvas.isConnected) {
-      clearInterval(timer);
-      return;
-    }
-    paint();
-  }, Math.round(1000 / PREVIEW_FPS));
-  return {
-    stop() {
-      clearInterval(timer);
-    },
-  };
-}
-
-/**
  * The handle on your own share, while you are listening to it.
  *
  * Module scope rather than per tile: tiles are rebuilt whenever the roster
@@ -3536,6 +3483,10 @@ function renderChannelVideo() {
     const kept = existing.get(key);
     if (kept) {
       kept.querySelector('figcaption .tile-name').textContent = caption;
+      // Changing source mints a new preview stream; a preview that is
+      // showing follows it rather than freezing on the old capture.
+      const shown = own ? kept.querySelector('video') : null;
+      if (shown?.srcObject && shown.srcObject !== stream) shown.srcObject = stream;
       return kept;
     }
 
@@ -3558,52 +3509,44 @@ function renderChannelVideo() {
      *
      * Everyone else's tile is the reason the mosaic exists. Your own is a
      * picture of the screen you are already looking at, composited every
-     * frame on the same GPU as the game you are sharing. It is the one
-     * thing here that costs something and shows you nothing new.
+     * frame on the same GPU as the game you are sharing -- so it costs
+     * nothing until you ask for it.
      *
-     * The eye button brings it back at two frames a second, which answers
-     * "is it still the right window and is it moving" and nothing else --
-     * which is all anybody asks their own preview.
+     * Asked for, it is the real thing: full resolution, full frame rate,
+     * the same video element as everybody else's tile. It used to be a
+     * canvas repainted twice a second, which answered "is it the right
+     * window" and made everything else about your own stream impossible to
+     * judge. Hidden means no srcObject at all, not a hidden element, so a
+     * hidden preview is not composited.
      */
-    let preview = null;
     if (own) {
-      const canvas = document.createElement('canvas');
-      canvas.className = 'tile-canvas';
-      canvas.hidden = true;
-      /*
-       * Shrunk, not `hidden`.
-       *
-       * A canvas cannot pull frames from an element the browser has stopped
-       * rendering, and display:none is exactly the condition under which
-       * Chromium is entitled to stop. One pixel in the corner costs nothing
-       * to composite and keeps the element unambiguously live, which is
-       * worth more than the tidiness of hiding it properly.
-       */
-      video.classList.add('tile-video-source');
+      video.srcObject = null;
+      video.hidden = true;
       figure.setAttribute('data-preview-off', '');
-      figure.append(canvas);
 
       const eye = document.createElement('button');
       eye.className = 'tile-btn';
       eye.type = 'button';
       eye.dataset.role = 'preview';
       eye.innerHTML = '&#128065;';
-      eye.title = 'Show a slow preview of what you are sharing';
+      eye.title = 'Show a preview of what you are sharing';
       eye.addEventListener('click', (event) => {
         event.stopPropagation();
-        if (preview) {
-          preview.stop();
-          preview = null;
-          canvas.hidden = true;
+        if (video.srcObject) {
+          video.srcObject = null;
+          video.hidden = true;
           figure.setAttribute('data-preview-off', '');
           eye.removeAttribute('data-on');
-          eye.title = 'Show a slow preview of what you are sharing';
+          eye.title = 'Show a preview of what you are sharing';
         } else {
-          canvas.hidden = false;
+          // Read now rather than captured at build time: the tile outlives
+          // a change of source, and the stream with it.
+          video.srcObject = ownChannelTiles().find((t) => t.kind === kind)?.stream ?? stream;
+          video.hidden = false;
+          video.play().catch(() => {});
           figure.removeAttribute('data-preview-off');
-          preview = throttledPreview(video, canvas);
           eye.setAttribute('data-on', '');
-          eye.title = `Hide the preview (it is drawn at ${PREVIEW_FPS} fps)`;
+          eye.title = 'Hide the preview';
         }
       });
 
@@ -6351,41 +6294,20 @@ async function acquireVideo(source, preset, plan) {
   return { track, rawStream, previewTrack: await previewCopy(track) };
 }
 
-/** What the preview is downscaled to. See previewCopy(). */
-const PREVIEW = { width: 960, height: 540, fps: 10 };
-
 /**
- * A deliberately cheap copy of the capture, for the preview element only.
+ * The copy of the capture the preview shows.
  *
- * Chromium gives every track taken off a source its own downscale and
- * frame-rate decimation, so a clone can run at 960x540x10 while the track
- * being encoded stays at native resolution and full rate. Measured on this
- * build: 4.2 Mpx/s against 221 Mpx/s for a 1440p60 capture -- a fiftieth of
- * the work, for a picture whose whole job is to tell you that you are sharing
- * the right window.
+ * A clone, at the capture's own resolution and frame rate. It used to be
+ * constrained to 960x540 at 10 fps, which kept the preview cheap and made it
+ * useless for judging what viewers actually get. The preview is hidden until
+ * asked for instead (state.preview.hiddenByUser, and the eye on your own
+ * channel tile), and a hidden preview has no srcObject, so it costs nothing.
  *
- * Worth the trouble because of where that work lands. Painting the preview is
- * GPU work on the same adapter the game is using, and it scales with the
- * source resolution rather than with the bitrate -- so a native-resolution
- * preview of a native-resolution game asks that GPU to push roughly twice the
- * pixels it was already pushing, which is why the preview costs several times
- * what the encoder does.
- *
- * Falls back to the unconstrained clone if the constraints are refused, which
- * is no worse than not having tried.
+ * Still a clone rather than the published track: stopping the preview must
+ * never be able to stop the stream.
  */
 async function previewCopy(track) {
-  const clone = track.clone();
-  try {
-    await clone.applyConstraints({
-      width: { max: PREVIEW.width },
-      height: { max: PREVIEW.height },
-      frameRate: { max: PREVIEW.fps },
-    });
-  } catch {
-    /* Source refuses to rescale. The clone is still a working preview. */
-  }
-  return clone;
+  return track.clone();
 }
 
 async function openCapture(source, preset, plan) {
@@ -6480,6 +6402,7 @@ async function startBroadcast() {
     state.live.rawStream = rawStream;
     state.live.source = source;
     state.preview.stream = new MediaStream([previewTrack]);
+    state.preview.hiddenByUser = true;
 
     // One audio track for the whole broadcast, created before anything is
     // published so that switching sources later needs no renegotiation.
