@@ -1,6 +1,6 @@
-// What the server is called, and the key to its front door.
+// What the server is called, its picture, and the key to its front door.
 //
-// Both live in server_meta rather than only in the environment, so the owner
+// They live in server_meta rather than only in the environment, so the owner
 // can change them from the client instead of editing a file on the host and
 // restarting. The environment is still the default: a fresh server behaves
 // exactly as it always did, and an override only exists once somebody sets
@@ -12,6 +12,7 @@ import { secretsMatch } from './auth.js';
 
 const NAME_KEY = 'server_name';
 const DOOR_KEY = 'door_password';
+const ICON_KEY = 'server_icon';
 
 /** What a server with no name of its own is called. */
 export const DEFAULT_NAME = 'Harmony';
@@ -72,6 +73,25 @@ export class ServerSettings {
     if (clean) this.#meta.set(NAME_KEY, clean);
     else this.#meta.delete(NAME_KEY);
     return this.name;
+  }
+
+  /** The upload hash of the server's picture, or null for none. */
+  get iconHash() {
+    return this.#meta.get(ICON_KEY) || null;
+  }
+
+  /**
+   * Point the server at a picture, or at none. Whether the hash names an
+   * image the server holds is the caller's to check, as it is for avatars:
+   * the uploads live in another module.
+   *
+   * @returns {string|null} the picture it had before, for releasing
+   */
+  setIcon(hash) {
+    const previous = this.iconHash;
+    if (hash) this.#meta.set(ICON_KEY, hash);
+    else this.#meta.delete(ICON_KEY);
+    return previous;
   }
 
   /** The override, or null when the environment is still in charge. */
@@ -147,6 +167,7 @@ export class ServerSettings {
   publicView() {
     return {
       name: this.name,
+      iconHash: this.iconHash,
       passwordRequired: this.passwordRequired,
       restartRequired: this.restartRequired,
     };

@@ -22,7 +22,7 @@ const HEARTBEAT_MS = 15_000;
 export class Realtime {
   #wss;
   #deps;
-  /** @type {Map<import('ws').WebSocket, {user: object, alive: boolean}>} */
+  /** @type {Map<import('ws').WebSocket, {user: object, alive: boolean, host: string}>} */
   #clients = new Map();
   #timer = null;
 
@@ -32,7 +32,7 @@ export class Realtime {
    * @param {import('./accounts.js').Accounts} deps.accounts
    * @param {import('./channels.js').Channels} deps.channels
    * @param {import('./channels.js').VoiceRooms} deps.voice
-   * @param {(channelId: number, userId: number, mid: number) => object} deps.issueTokens
+   * @param {(channelId: number, userId: number, mid: number, host: string) => object} deps.issueTokens
    * @param {(channelId: number, mid: number) => Promise<void>} deps.kickMember
    */
   constructor(deps) {
@@ -49,7 +49,7 @@ export class Realtime {
         socket.destroy();
         return;
       }
-      this.#wss.handleUpgrade(req, socket, head, (ws) => this.#onConnection(ws));
+      this.#wss.handleUpgrade(req, socket, head, (ws) => this.#onConnection(ws, req.headers.host));
     });
 
     this.#timer = setInterval(() => this.#sweep(), HEARTBEAT_MS);
@@ -58,13 +58,14 @@ export class Realtime {
 
   // -------------------------------------------------------------------------
 
-  #onConnection(ws) {
+  /** `host` is the Host header the socket came in with: see issueTokens. */
+  #onConnection(ws, host) {
     // Unauthenticated until the first frame. Node's global WebSocket client --
     // which is what the Electron main process uses -- is browser-shaped and
     // cannot set request headers, so the token cannot travel in an
     // Authorization header. It arrives in a `hello` frame instead, and nothing
     // else is accepted until it does.
-    this.#clients.set(ws, { user: null, alive: true });
+    this.#clients.set(ws, { user: null, alive: true, host });
 
     ws.on('pong', () => {
       const client = this.#clients.get(ws);
@@ -242,7 +243,7 @@ export class Realtime {
 
   // ------------------------------------------------------------- voice
 
-  async #voiceJoin(user, msg) {
+  async #voiceJoin(user, msg, ws) {
     const channelId = Number(msg.channelId);
     const channel = this.#deps.channels.get(channelId);
     if (!channel || channel.kind !== 'voice') return { type: 'voice:error', error: 'no_such_channel' };
@@ -266,7 +267,7 @@ export class Realtime {
       type: 'voice:joined',
       channelId,
       mid: joined.mid,
-      ...this.#deps.issueTokens(channelId, user.id, joined.mid),
+      ...this.#deps.issueTokens(channelId, user.id, joined.mid, this.#clients.get(ws)?.host),
       roster: this.#deps.voice.roster(channelId),
     };
   }
@@ -306,14 +307,14 @@ export class Realtime {
    * subscription being opened. Which is exactly what happens when somebody new
    * joins the channel an hour in, hence this.
    */
-  #voiceRefresh(user, msg) {
+  #voiceRefresh(user, msg, ws) {
     const channelId = Number(msg.channelId);
     const found = this.#deps.voice.find(channelId, user.id);
     if (!found) return { type: 'voice:error', error: 'not_in_channel' };
     return {
       type: 'voice:tokens',
       channelId,
-      ...this.#deps.issueTokens(channelId, user.id, found.mid),
+      ...this.#deps.issueTokens(channelId, user.id, found.mid, this.#clients.get(ws)?.host),
     };
   }
 
@@ -462,9 +463,18 @@ export class Realtime {
     });
   }
 
-  /** Who is live on the flat username namespace, replacing the 3s poll. */
-  broadcastStreams(streams) {
-    this.broadcast({ type: 'streams', streams });
+  /**
+   * Who is live on the flat username namespace, replacing the 3s poll.
+   * `streamsFor(host)` builds the list for a socket's Host header, since the
+   * watch URLs in it can depend on it.
+   */
+  broadcastStreams(streamsFor) {
+    const byHost = new Map();
+    for (const [ws, client] of this.#clients) {
+      if (!client.user) continue;
+      if (!byHost.has(client.host)) byHost.set(client.host, streamsFor(client.host));
+      this.#send(ws, { type: 'streams', streams: byHost.get(client.host) });
+    }
   }
 
   get clientCount() {

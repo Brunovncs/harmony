@@ -8,7 +8,7 @@
 // No media touches this process.
 
 import express from 'express';
-import { config, iceServers, whepUrl, whipUrl } from './config.js';
+import { config, iceServers, signalingBase, whepUrl, whipUrl } from './config.js';
 import { LoginLimiter, secretsMatch } from './auth.js';
 import { MediaMtxMonitor } from './mediamtx-api.js';
 import { Rooms, normalizeUsername, normalizePath } from './rooms.js';
@@ -215,7 +215,9 @@ app.get('/api/health', (req, res) => {
     ...(authed
       ? {
           name: serverSettings.name,
-          signalingBase: config.signalingBase,
+          // Downloadable from /api/server/icon/:hash without an account.
+          iconHash: serverSettings.iconHash,
+          signalingBase: signalingBase(req.headers.host),
           liveStreams: rooms.listLive().length,
           // Lets the client show "create the first account" rather than a
           // login form on a brand new server.
@@ -550,25 +552,97 @@ app.get('/api/server', requireLogin, (_req, res) => {
 });
 
 /**
- * Rename the server, or change the key to its front door.
+ * Why a hash cannot be the server's picture, or null when it can. The rules
+ * are an avatar's, size cap included: it is drawn as small, as often.
+ */
+function iconProblem(hash) {
+  if (!/^[0-9a-f]{64}$/.test(hash)) {
+    return { error: 'bad_hash', message: 'That is not an uploaded file.' };
+  }
+  const upload = chat.fileInfo(hash);
+  if (!upload) return { error: 'no_such_upload', message: 'Upload the picture first.' };
+  if (mediaTypeOf(upload.content_type) !== 'image') {
+    return { error: 'not_an_image', message: 'A picture has to be an image.' };
+  }
+  if (upload.bytes > MAX_AVATAR_BYTES) {
+    return {
+      error: 'picture_too_large',
+      message: `Pictures are limited to ${Math.round(MAX_AVATAR_BYTES / 1024)} KB.`,
+    };
+  }
+  return null;
+}
+
+/**
+ * Rename the server, change the key to its front door, or set its picture.
  *
  * Owner only. `password` is applied only when the field is present at all,
  * so renaming cannot clear the password by omission -- and an empty string
  * IS a value here, meaning "take the door off", which is why the two cases
- * have to be told apart rather than both treated as falsy.
+ * have to be told apart rather than both treated as falsy. `iconHash` works
+ * the same way: absent leaves the picture, null removes it.
+ *
+ * The picture is checked before anything is applied, so a bad hash does not
+ * leave a half-made change behind. Its references are juggled as an avatar's
+ * are: the new one retained before the old one is released.
  */
 app.post('/api/server', requireRole('owner'), (req, res) => {
+  const icon = req.body?.iconHash;
+  if (icon !== undefined && icon !== null) {
+    const problem = iconProblem(String(icon));
+    if (problem) return res.status(400).json(problem);
+  }
+
   if (req.body?.name !== undefined) serverSettings.setName(req.body.name);
   if (typeof req.body?.password === 'string') serverSettings.setPassword(req.body.password);
+  if (icon !== undefined) {
+    const hash = icon === null ? null : String(icon);
+    if (hash) chat.retain(hash);
+    // Always the old one's reference back: re-setting the same picture took a
+    // second one a moment ago, so the count still comes out at one.
+    const previous = serverSettings.setIcon(hash);
+    if (previous) chat.release(previous);
+  }
 
   const view = serverSettings.publicView();
   realtime?.broadcast({ type: 'server', server: view });
   return res.json({ server: view });
 });
 
-app.get('/api/streams', (_req, res) => {
+/**
+ * The server's picture, to anyone through the door, signed in or not.
+ *
+ * The sign-in screen and the server rail draw it before there is an account
+ * to download with, which is why this is not /api/uploads. Only the hash the
+ * server currently shows is served, so this cannot be used to read any other
+ * upload without signing in. The door password still applies (this sits
+ * behind requirePassword), exactly as the server's name does in /api/health.
+ */
+app.get('/api/server/icon/:hash', (req, res) => {
+  const hash = String(req.params.hash);
+  if (!hash || hash !== serverSettings.iconHash) return res.status(404).json({ error: 'no_such_file' });
+  const info = chat.fileInfo(hash);
+  if (!info) return res.status(404).json({ error: 'no_such_file' });
+  res.set('Content-Type', info.content_type);
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Content-Security-Policy', "default-src 'none'; sandbox");
+  res.set('Cache-Control', 'public, max-age=31536000, immutable');
+  return res.sendFile(info.path);
+});
+
+/**
+ * How much of the upload quota is used. The upload replies carry this too,
+ * but somebody looking after the server should not have to upload a file to
+ * find out. One SUM over the uploads table: cheap enough to ask for freely.
+ */
+app.get('/api/server/storage', requireRole('owner', 'admin'), (_req, res) => {
+  res.json({ usedBytes: chat.usedBytes, quotaBytes: chat.quotaBytes });
+});
+
+app.get('/api/streams', (req, res) => {
+  const base = signalingBase(req.headers.host);
   res.json({
-    streams: rooms.listLive().map((stream) => ({ ...stream, whepUrl: whepUrl(stream.username) })),
+    streams: rooms.listLive().map((stream) => ({ ...stream, whepUrl: whepUrl(stream.username, base) })),
     iceServers: iceServers(),
   });
 });
@@ -632,13 +706,14 @@ app.post('/api/session', (req, res) => {
   }
 
   const result = rooms.claim(username, { token: req.body?.token, ip: req.ip });
+  const base = signalingBase(req.headers.host);
 
   if (result.role === 'broadcaster') {
     return res.json({
       role: 'broadcaster',
       username,
       token: result.token,
-      whipUrl: whipUrl(username, result.token),
+      whipUrl: whipUrl(username, result.token, base),
       iceServers: iceServers(),
       heartbeatMs: Math.floor(config.claimTtlMs / 3),
     });
@@ -648,7 +723,7 @@ app.post('/api/session', (req, res) => {
     role: 'viewer',
     username,
     pending: result.pending,
-    whepUrl: whepUrl(username),
+    whepUrl: whepUrl(username, base),
     iceServers: iceServers(),
   });
 });
@@ -1354,14 +1429,15 @@ app.post('/mediamtx/auth', (req, res) => {
  *
  * One token covers reading and publishing; see channels.js for why that is
  * safe. The client builds every peer's WHEP URL from `readToken` and its own
- * WHIP URLs from the paths here.
+ * WHIP URLs from the paths here. `host` is the Host header the member's
+ * socket came in with, for HARMONY_SIGNALING_URL=auto.
  */
-function issueTokens(channelId, userId, mid) {
+function issueTokens(channelId, userId, mid, host) {
   const token = mintChannelToken(mediaSecret, {
     cid: channelId, mid, ttlMs: config.channelTokenTtlMs,
   });
-  const url = (kind) =>
-    `${config.signalingBase}/${channelPath(channelId, mid, kind)}`;
+  const base = signalingBase(host);
+  const url = (kind) => `${base}/${channelPath(channelId, mid, kind)}`;
   return {
     token,
     publish: {
@@ -1371,7 +1447,7 @@ function issueTokens(channelId, userId, mid) {
     },
     // A template rather than a list: the roster changes constantly and the
     // client already knows every member's slot from it.
-    whepBase: config.signalingBase,
+    whepBase: base,
     /*
      * How long this token lasts, so the client can come back before it does
      * not. It is a HINT and not a contract -- the client halves it and the
@@ -1401,7 +1477,9 @@ let realtime = null;
 
 const server = app.listen(config.port, config.host, () => {
   console.log(`[harmony] control server on http://${config.host}:${config.port}`);
-  console.log(`[harmony] clients will be sent to ${config.signalingBase}`);
+  console.log(config.signaling.auto
+    ? `[harmony] clients will be sent to the host they connect to, as ${config.signalingBase.replace('localhost', '<host>')}`
+    : `[harmony] clients will be sent to ${config.signalingBase}`);
   // serverSettings, not config: the owner may have changed the door from
   // the client, and a banner that reports the environment would be lying
   // about the server it just started.
@@ -1432,11 +1510,14 @@ realtime = new Realtime({
  */
 let lastStreamsJson = '';
 monitor.on('paths', () => {
-  const streams = rooms.listLive().map((s) => ({ ...s, whepUrl: whepUrl(s.username) }));
+  const streams = rooms.listLive();
   const json = JSON.stringify(streams);
   if (json === lastStreamsJson) return;
   lastStreamsJson = json;
-  realtime.broadcastStreams(streams);
+  realtime.broadcastStreams((host) => {
+    const base = signalingBase(host);
+    return streams.map((s) => ({ ...s, whepUrl: whepUrl(s.username, base) }));
+  });
 });
 
 for (const signal of ['SIGINT', 'SIGTERM']) {

@@ -27,12 +27,58 @@ const list = (value, fallback) => {
   return items.length ? items : fallback;
 };
 
-// Where clients reach MediaMTX's WHIP/WHEP signaling endpoint. This is the one
-// piece of Harmony that can sit behind a reverse proxy or Cloudflare Tunnel,
-// because it is ordinary HTTP. Media never flows through it.
-const signalingBase = (
-  process.env.HARMONY_SIGNALING_URL ?? 'http://localhost:8889'
-).replace(/\/+$/, '');
+/**
+ * Where clients reach MediaMTX's WHIP/WHEP signaling endpoint. This is the one
+ * piece of Harmony that can sit behind a reverse proxy or Cloudflare Tunnel,
+ * because it is ordinary HTTP. Media never flows through it.
+ *
+ * `auto`, or a URL whose host is `auto` (`https://auto:8443/mtx`), sends each
+ * client to the host IT used to reach this server, with the scheme, port and
+ * path given. That is for a server known by several addresses -- a LAN IP and a
+ * Tailscale IP, say -- where any single URL leaves some clients without media.
+ * Bare `auto` means `http://auto:8889`.
+ */
+export function parseSignaling(value) {
+  const raw = (value ?? 'http://localhost:8889').trim().replace(/\/+$/, '');
+  let url = null;
+  try {
+    url = new URL(raw === 'auto' ? 'http://auto:8889' : raw);
+  } catch {
+    return { base: raw, auto: null };
+  }
+  if (url.hostname !== 'auto') return { base: raw, auto: null };
+  const auto = { protocol: url.protocol, port: url.port, path: url.pathname.replace(/\/+$/, '') };
+  // Only for the startup banner and a request with no usable Host header.
+  return { base: buildBase(auto, 'localhost'), auto };
+}
+
+function buildBase({ protocol, port, path }, hostname) {
+  return `${protocol}//${hostname}${port ? `:${port}` : ''}${path}`;
+}
+
+/**
+ * The hostname out of a Host header (`192.168.1.10:8080`, `[fd7a::1]:8080`,
+ * `pi.local`), or null when it is anything but a plain host and port.
+ */
+function hostnameOf(hostHeader) {
+  if (typeof hostHeader !== 'string' || !hostHeader) return null;
+  try {
+    const url = new URL(`http://${hostHeader}`);
+    const plain = !url.username && !url.password && url.pathname === '/' && !url.search && !url.hash;
+    return plain && url.hostname ? url.hostname : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The signaling base for a client that reached this server through `hostHeader`. */
+export function signalingBaseFor(signaling, hostHeader) {
+  if (!signaling.auto) return signaling.base;
+  const hostname = hostnameOf(hostHeader);
+  return hostname ? buildBase(signaling.auto, hostname) : signaling.base;
+}
+
+const signaling = parseSignaling(process.env.HARMONY_SIGNALING_URL);
 
 /**
  * The shared password, or '' for an open server.
@@ -66,7 +112,8 @@ export const config = {
   mediamtxApi: (process.env.HARMONY_MEDIAMTX_API ?? 'http://127.0.0.1:9997').replace(/\/+$/, ''),
   pollIntervalMs: num(process.env.HARMONY_POLL_INTERVAL_MS, 1000),
 
-  signalingBase,
+  signaling,
+  signalingBase: signaling.base,
 
   // How long an unpublished username stays reserved. This only has to cover the
   // gap between "user picked a name" and "MediaMTX sees their publisher" --
@@ -117,8 +164,13 @@ export const config = {
       : null,
 };
 
-export function whipUrl(username, token) {
-  return `${config.signalingBase}/${encodeURIComponent(username)}/whip?token=${encodeURIComponent(token)}`;
+/** The signaling base for a request that arrived with this Host header. */
+export function signalingBase(hostHeader) {
+  return signalingBaseFor(config.signaling, hostHeader);
+}
+
+export function whipUrl(username, token, base = config.signalingBase) {
+  return `${base}/${encodeURIComponent(username)}/whip?token=${encodeURIComponent(token)}`;
 }
 
 /**
@@ -126,8 +178,8 @@ export function whipUrl(username, token) {
  * because MediaMTX is reachable directly and would otherwise serve anyone who
  * guessed a username. On an open server it stays a plain URL.
  */
-export function whepUrl(username) {
-  const base = `${config.signalingBase}/${encodeURIComponent(username)}/whep`;
+export function whepUrl(username, signaling = config.signalingBase) {
+  const base = `${signaling}/${encodeURIComponent(username)}/whep`;
   return config.mediaToken ? `${base}?token=${encodeURIComponent(config.mediaToken)}` : base;
 }
 

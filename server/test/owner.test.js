@@ -225,6 +225,126 @@ describe('removing an account', () => {
 
 // ---------------------------------------------------------------------------
 
+const upload = async (bytes, type, token) => {
+  const res = await fetch(`${BASE}/api/uploads`, {
+    method: 'POST',
+    headers: { 'Content-Type': type, Authorization: `Bearer ${token}` },
+    body: bytes,
+  });
+  return (await res.json()).hash;
+};
+
+/** Signs a socket in and collects what it is sent. */
+async function listen(token) {
+  const ws = new WebSocket(`ws://127.0.0.1:${HARMONY_PORT}/ws`);
+  const inbox = [];
+  ws.addEventListener('message', (e) => inbox.push(JSON.parse(e.data)));
+  await new Promise((done) => ws.addEventListener('open', done, { once: true }));
+  ws.send(JSON.stringify({ type: 'hello', token, rid: 'hello' }));
+  const next = async (match) => {
+    for (let i = 0; i < 100; i += 1) {
+      const found = inbox.find(match);
+      if (found) return found;
+      await new Promise((done) => setTimeout(done, 50));
+    }
+    throw new Error(`timed out; saw ${JSON.stringify(inbox.map((m) => m.type))}`);
+  };
+  await next((m) => m.rid === 'hello');
+  return { next, close: () => ws.close() };
+}
+
+describe('the server picture', () => {
+  let picture;
+  let other;
+
+  before(async () => {
+    picture = await upload(Buffer.from('a picture of the server'), 'image/png', memberToken);
+    other = await upload(Buffer.from('somebody else\'s photo'), 'image/png', memberToken);
+  });
+
+  it('starts as none', async () => {
+    const res = await api('/api/server', { token: memberToken });
+    assert.equal(res.body.server.iconHash, null);
+  });
+
+  it('is the owner\'s to set, like the name', async () => {
+    for (const token of [memberToken, adminToken]) {
+      const res = await api('/api/server', { method: 'POST', body: { iconHash: picture }, token });
+      assert.equal(res.status, 403);
+    }
+  });
+
+  it('has to be an image the server holds', async () => {
+    const text = await upload(Buffer.from('notes'), 'text/plain', ownerToken);
+    const cases = [['nope', 'bad_hash'], ['f'.repeat(64), 'no_such_upload'], [text, 'not_an_image']];
+    for (const [hash, error] of cases) {
+      const res = await api('/api/server', {
+        method: 'POST', body: { iconHash: hash, name: 'Half Made' }, token: ownerToken,
+      });
+      assert.equal(res.status, 400);
+      assert.equal(res.body.error, error);
+    }
+    const seen = await api('/api/server', { token: ownerToken });
+    assert.notEqual(seen.body.server.name, 'Half Made', 'a refused picture applies nothing');
+  });
+
+  it('IS PUSHED TO EVERYONE when the owner sets it', async () => {
+    const socket = await listen(memberToken);
+    const res = await api('/api/server', { method: 'POST', body: { iconHash: picture }, token: ownerToken });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.server.iconHash, picture);
+    const push = await socket.next((m) => m.type === 'server');
+    assert.equal(push.server.iconHash, picture);
+    socket.close();
+
+    const health = await api('/api/health');
+    assert.equal(health.body.iconHash, picture);
+  });
+
+  it('can be downloaded before signing in, and nothing else can', async () => {
+    const res = await fetch(`${BASE}/api/server/icon/${picture}`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'image/png');
+    assert.equal(await res.text(), 'a picture of the server');
+
+    assert.equal((await fetch(`${BASE}/api/server/icon/${other}`)).status, 404,
+      'an upload that is not the picture stays behind sign-in');
+    assert.equal((await fetch(`${BASE}/api/uploads/${picture}`)).status, 401);
+  });
+
+  it('is left alone by a rename', async () => {
+    // Empty, so the settings below still start from the default name.
+    const res = await api('/api/server', { method: 'POST', body: { name: '' }, token: ownerToken });
+    assert.equal(res.body.server.iconHash, picture);
+  });
+
+  it('can be removed, and is then not served', async () => {
+    const res = await api('/api/server', { method: 'POST', body: { iconHash: null }, token: ownerToken });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.server.iconHash, null);
+    assert.equal((await fetch(`${BASE}/api/server/icon/${picture}`)).status, 404);
+  });
+
+  it('SURVIVES A RESTART', async () => {
+    await api('/api/server', { method: 'POST', body: { iconHash: picture }, token: ownerToken });
+    await stopHarmony();
+    await startHarmony();
+    assert.equal((await api('/api/health')).body.iconHash, picture);
+  });
+});
+
+describe('storage use', () => {
+  it('is for the people looking after the server', async () => {
+    assert.equal((await api('/api/server/storage', { token: memberToken })).status, 403);
+    const res = await api('/api/server/storage', { token: adminToken });
+    assert.equal(res.status, 200);
+    assert.ok(res.body.usedBytes > 0, 'the pictures above are stored');
+    assert.ok(res.body.quotaBytes >= res.body.usedBytes);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
 describe('server settings', () => {
   it('start from the environment, with a default name', async () => {
     const res = await api('/api/server', { token: memberToken });
@@ -284,6 +404,17 @@ describe('server settings', () => {
     const res = await api('/api/accounts', { token: ownerToken });
     assert.equal(res.status, 401);
     assert.equal(res.body.error, 'password_required');
+  });
+
+  it('keep the server picture behind the door too', async () => {
+    const hash = (await api('/api/health', { password: 'letmeinplease' })).body.iconHash;
+    assert.ok(hash, 'the picture section left one set');
+    assert.equal((await api('/api/health')).body.iconHash, undefined);
+    assert.equal((await fetch(`${BASE}/api/server/icon/${hash}`)).status, 401);
+    const opened = await fetch(`${BASE}/api/server/icon/${hash}`, {
+      headers: { 'x-harmony-password': 'letmeinplease' },
+    });
+    assert.equal(opened.status, 200);
   });
 
   it('open it for the new password', async () => {
