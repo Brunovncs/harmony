@@ -1,12 +1,17 @@
 //! Being in a voice channel: joining and leaving through the socket, keeping the media tokens
 //! fresh, mute and deafen, and the audio and video connections (see `voice`).
 
-use super::voice::Voice;
+use super::audio::Cue;
+use super::voice::{Voice, roster_cues, voice_cue};
 use crate::core::types::*;
 use crate::session::{Session, SessionEvent};
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task, WeakEntity};
 use serde_json::json;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// After a reconnect everyone's state comes back in a rush (rejoins, streams announced again)
+/// that is not news; for this long, rosters only move the cues' baseline.
+const RESYNC_QUIET: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CallState {
@@ -35,7 +40,10 @@ pub struct Call {
     pub deafened: bool,
     pub voice: Option<Entity<Voice>>,
     password: Option<String>,
-    last_roster: Option<Vec<Member>>,
+    /// The roster the cues compare against; none until one has been seen, so arriving in a room
+    /// of six plays nothing.
+    cue_roster: Option<Vec<Member>>,
+    quiet_until: Option<Instant>,
     left: bool,
     _refresh: Task<()>,
     _subs: Vec<Subscription>,
@@ -57,6 +65,8 @@ impl Call {
                 SessionEvent::Roster(id) if *id == this.channel => this.on_roster(cx),
                 SessionEvent::Reconnected => {
                     this.state = CallState::Reconnecting;
+                    this.cue_roster = None;
+                    this.quiet_until = Some(Instant::now() + RESYNC_QUIET);
                     this.send_join(cx);
                 }
                 _ => {}
@@ -71,7 +81,8 @@ impl Call {
                 deafened,
                 voice: None,
                 password,
-                last_roster: None,
+                cue_roster: None,
+                quiet_until: None,
                 left: false,
                 _refresh: Task::ready(()),
                 _subs: vec![sub],
@@ -112,6 +123,9 @@ impl Call {
                         });
                     }
                     let first = this.tokens.is_none();
+                    if first {
+                        voice_cue(Cue::Connect, cx);
+                    }
                     this.tokens = tokens;
                     this.state = CallState::Connected;
                     this.schedule_refresh(cx);
@@ -197,17 +211,25 @@ impl Call {
             self.mid = Some(mine.mid);
             if mine.force_muted && !self.muted {
                 self.muted = true;
+                voice_cue(Cue::Mute, cx);
                 crate::ui::overlay::toast(tr!("An admin muted your microphone.", "Um admin silenciou seu microfone."), cx);
                 if let Some(v) = &self.voice {
                     v.update(cx, |v, cx| v.set_muted(true, cx));
                 }
             }
         }
-        if let Some(voice) = &self.voice {
-            let prev = self.last_roster.clone();
-            voice.update(cx, |v, cx| v.sync(&roster, prev.as_deref(), cx));
+        let quiet = self.quiet_until.is_some_and(|t| Instant::now() < t);
+        if let Some(before) = &self.cue_roster
+            && !quiet
+        {
+            for cue in roster_cues(before, &roster, me) {
+                voice_cue(cue, cx);
+            }
         }
-        self.last_roster = Some(roster);
+        if let Some(voice) = &self.voice {
+            voice.update(cx, |v, cx| v.sync(&roster, cx));
+        }
+        self.cue_roster = Some(roster);
         cx.notify();
     }
 
@@ -230,14 +252,21 @@ impl Call {
             );
             return;
         }
-        self.muted = muted;
+        // From what actually changes: unmuting while deafened undeafens too, and says so.
         if !muted && self.deafened {
             self.deafened = false;
+            voice_cue(Cue::Undeafen, cx);
+        } else if muted != self.muted {
+            voice_cue(if muted { Cue::Mute } else { Cue::Unmute }, cx);
         }
+        self.muted = muted;
         self.apply_mute(cx);
     }
 
     pub fn set_deafened(&mut self, deafened: bool, cx: &mut Context<Self>) {
+        if deafened != self.deafened {
+            voice_cue(if deafened { Cue::Deafen } else { Cue::Undeafen }, cx);
+        }
         self.deafened = deafened;
         // Deafening mutes too; undeafening leaves the microphone as it was before.
         if deafened {

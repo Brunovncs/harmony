@@ -7,7 +7,7 @@ use super::api::normalize_base;
 use super::secret;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -41,6 +41,14 @@ pub struct Settings {
     pub recent_emoji: Vec<String>,
     pub ui_scale: u32,
     pub mention_sound: bool,
+    /// Every cue's volume, as a percentage: 100 is as designed, up to 200 for a noisy room.
+    pub sound_volume: u32,
+    /// Global hotkeys by action (`mute`, `deafen`), as Electron accelerators (`Ctrl+Shift+M`);
+    /// empty is unbound.
+    pub hotkeys: BTreeMap<String, String>,
+    /// Soundboard hotkeys by server address, then by clip id: a clip id only means something on
+    /// the server that gave it.
+    pub clip_hotkeys: BTreeMap<String, BTreeMap<String, String>>,
     pub clips_enabled: bool,
     pub hardware_encoding: String,
     pub gpu_preference: String,
@@ -150,6 +158,65 @@ impl Settings {
         s.username = self.username.clone();
         s.session_token = self.session_token.clone();
     }
+
+    /// The combination bound to an action, or "" for none. Clips are looked up on `server`.
+    pub fn hotkey(&self, server: &str, action: HotkeyAction) -> &str {
+        match action {
+            HotkeyAction::Mute => self.hotkeys.get("mute"),
+            HotkeyAction::Deafen => self.hotkeys.get("deafen"),
+            HotkeyAction::Clip(id) => self.server_clip_hotkeys(server).and_then(|m| m.get(&id.to_string())),
+        }
+        .map_or("", String::as_str)
+    }
+
+    /// A server's soundboard hotkeys, by clip id.
+    pub fn server_clip_hotkeys(&self, server: &str) -> Option<&BTreeMap<String, String>> {
+        self.clip_hotkeys.iter().find(|(url, _)| same_server(url, server)).map(|(_, m)| m)
+    }
+
+    /// Binds `combo` to an action, or unbinds it when empty. One combination does one thing:
+    /// binding one that is taken moves it here.
+    pub fn bind_hotkey(&mut self, server: &str, action: HotkeyAction, combo: &str) {
+        let taken = |c: &str| !combo.is_empty() && c.eq_ignore_ascii_case(combo);
+        let (name, clip) = match action {
+            HotkeyAction::Mute => ("mute", String::new()),
+            HotkeyAction::Deafen => ("deafen", String::new()),
+            HotkeyAction::Clip(id) => ("", id.to_string()),
+        };
+        for (k, v) in self.hotkeys.iter_mut() {
+            if k != name && taken(v) {
+                v.clear();
+            }
+        }
+        let url = self
+            .clip_hotkeys
+            .keys()
+            .find(|url| same_server(url, server))
+            .cloned()
+            .or_else(|| self.saved_server(server).map(|s| s.url.clone()))
+            .unwrap_or_else(|| server.to_string());
+        let clips = self.clip_hotkeys.entry(url.clone()).or_default();
+        clips.retain(|id, v| *id == clip || !taken(v));
+        if !name.is_empty() {
+            self.hotkeys.insert(name.into(), combo.into());
+        } else if combo.is_empty() {
+            clips.remove(&clip);
+        } else {
+            clips.insert(clip, combo.into());
+        }
+        if self.clip_hotkeys.get(&url).is_some_and(|m| m.is_empty()) {
+            self.clip_hotkeys.remove(&url);
+        }
+    }
+}
+
+/// What a global hotkey does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HotkeyAction {
+    Mute,
+    Deafen,
+    /// Plays a soundboard clip, by id, on the server it belongs to.
+    Clip(i64),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -206,6 +273,9 @@ impl Default for Settings {
             recent_emoji: Vec::new(),
             ui_scale: 100,
             mention_sound: true,
+            sound_volume: 100,
+            hotkeys: BTreeMap::new(),
+            clip_hotkeys: BTreeMap::new(),
             clips_enabled: false,
             hardware_encoding: "auto".into(),
             gpu_preference: "auto".into(),
@@ -314,6 +384,7 @@ impl Store {
         let (opened, unsealed) = open_secrets(&raw, &mut sealed);
         let (mut values, unread) = read_leniently(&opened);
         values.ui_scale = values.ui_scale.clamp(70, 180);
+        values.sound_volume = values.sound_volume.min(200);
         if values.framerate == 0 {
             values.framerate = 30;
         }
@@ -527,6 +598,63 @@ mod tests {
         assert_eq!((v.session_token.as_str(), v.password.as_str(), v.theme.as_str()), ("", "door", "onyx"));
         assert_eq!(v.saved_servers[0].session_token, "");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hotkeys_load_from_the_old_clients_file_and_a_bad_one_costs_only_itself() {
+        let (dir, path) = scratch(
+            "hotkeys",
+            r#"{"serverUrl":"pi.local:8080","soundVolume":350,"hotkeys":{"mute":"Ctrl+Shift+M","deafen":"","pushToTalk":"F13"},
+                "clipHotkeys":{"pi.local:8080":{"7":"Alt+1","9":"F7"}}}"#,
+        );
+        let mut store = Store::load_from(path.clone());
+        let v = &store.values;
+        assert_eq!(v.sound_volume, 200);
+        assert_eq!(v.hotkey("http://pi.local:8080/", HotkeyAction::Mute), "Ctrl+Shift+M");
+        assert_eq!(v.hotkey("", HotkeyAction::Deafen), "");
+        assert_eq!(v.hotkey("PI.local:8080", HotkeyAction::Clip(7)), "Alt+1");
+        assert_eq!(v.hotkey("box:9000", HotkeyAction::Clip(7)), "", "clips belong to their server");
+        store.update(|s| s.bind_hotkey("pi.local:8080", HotkeyAction::Deafen, "F7"));
+        let back: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back["hotkeys"]["pushToTalk"], "F13", "actions this client does not know are kept");
+        assert_eq!(back["clipHotkeys"]["pi.local:8080"], serde_json::json!({ "7": "Alt+1" }));
+        let _ = std::fs::remove_dir_all(dir);
+
+        let (dir, path) = scratch("hotkeys-bad", r#"{"theme":"onyx","hotkeys":["Ctrl+M"],"clipHotkeys":{"pi":{"7":3}}}"#);
+        let mut store = Store::load_from(path.clone());
+        assert_eq!(store.values.theme, "onyx");
+        assert!(store.values.hotkeys.is_empty() && store.values.clip_hotkeys.is_empty());
+        store.update(|s| s.mic_gain = 90);
+        let back: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back["hotkeys"], serde_json::json!(["Ctrl+M"]), "left as it was until changed");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn one_combination_does_one_thing() {
+        let mut s = Settings::default();
+        s.remember_server(server("http://pi.local:8080", "predo", "a", "Pi"));
+        let pi = "pi.local:8080";
+        s.bind_hotkey(pi, HotkeyAction::Mute, "Ctrl+Alt+M");
+        s.bind_hotkey(pi, HotkeyAction::Clip(3), "Ctrl+Alt+D");
+        s.bind_hotkey("box:9000", HotkeyAction::Clip(3), "Ctrl+Alt+B");
+        // Keyed by the address the server was saved under.
+        assert!(s.clip_hotkeys.contains_key("http://pi.local:8080"));
+        assert_eq!(s.hotkey(pi, HotkeyAction::Clip(3)), "Ctrl+Alt+D");
+        assert_eq!(s.hotkey("box:9000", HotkeyAction::Clip(3)), "Ctrl+Alt+B");
+
+        // Taking a clip's combination moves it off the clip, and a mute's off mute.
+        s.bind_hotkey(pi, HotkeyAction::Deafen, "ctrl+alt+d");
+        assert_eq!(s.hotkey(pi, HotkeyAction::Clip(3)), "");
+        s.bind_hotkey(pi, HotkeyAction::Clip(4), "Ctrl+Alt+M");
+        assert_eq!((s.hotkey(pi, HotkeyAction::Mute), s.hotkey(pi, HotkeyAction::Clip(4))), ("", "Ctrl+Alt+M"));
+        // Another server's clips are left alone: they are not registered while this one is open.
+        assert_eq!(s.hotkey("box:9000", HotkeyAction::Clip(3)), "Ctrl+Alt+B");
+
+        s.bind_hotkey(pi, HotkeyAction::Clip(4), "");
+        assert!(s.server_clip_hotkeys(pi).is_none(), "an emptied server is dropped");
+        s.bind_hotkey(pi, HotkeyAction::Deafen, "");
+        assert_eq!(s.hotkey(pi, HotkeyAction::Deafen), "");
     }
 
     #[test]

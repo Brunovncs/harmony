@@ -4,17 +4,19 @@
 
 mod profile;
 
-use crate::core::settings::{Background, CustomTheme};
+use crate::core::settings::{Background, CustomTheme, HotkeyAction};
+use crate::hotkeys::Combo;
 use crate::media::audio::{self, DeviceInfo, MicGuard};
 use crate::media::camera;
 use crate::media::diagnose;
 use crate::media::video::FrameSlot;
-use crate::media::voice::{Voice, apply_mic_levels, apply_mic_prefs, gate_threshold};
+use crate::media::voice::{Voice, apply_mic_levels, apply_mic_prefs, cue_volume, gate_threshold};
 use crate::prefs::{prefs, set_prefs};
 use crate::session::Session;
 use crate::text_field::{TextField, TextFieldEvent};
 use crate::theme::{self, CustomColors, Theme, current, hex, px, radius, to_hex};
 use crate::ui::camera::Preview;
+use crate::ui::hotkeys;
 use crate::ui::overlay::{self, Dismiss, dialog_card};
 use crate::ui::server::ServerView;
 use crate::ui::server::sidebar::{Menu, MenuEntry};
@@ -34,6 +36,7 @@ enum Section {
     Camera,
     Appearance,
     Sounds,
+    Hotkeys,
     Advanced,
 }
 
@@ -611,10 +614,10 @@ impl Settings {
             .gap(px(18.))
             .child(toggle_row(
                 "cues",
-                tr!("Join and leave sounds", "Sons de entrada e saída"),
+                tr!("Voice channel sounds", "Sons do canal de voz"),
                 tr!(
-                    "A short tone when someone joins or leaves your channel, or starts sharing.",
-                    "Um toque curto quando alguém entra ou sai do seu canal, ou começa a compartilhar."
+                    "Short tones when you connect, when someone joins or leaves, when a stream starts or stops, and when you mute or deafen.",
+                    "Toques curtos quando você conecta, quando alguém entra ou sai, quando uma transmissão começa ou para, e quando você silencia o microfone ou o som."
                 ),
                 p.voice_sounds,
                 t,
@@ -633,6 +636,30 @@ impl Settings {
                 cx,
                 |cx| set_prefs(cx, |p| p.mention_sound = !p.mention_sound),
             ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .child(label(tr!("Sound effects volume", "Volume dos efeitos sonoros"), t))
+                            .child(mono(format!("{}%", p.sound_volume), if p.sound_volume > 100 { t.caution } else { t.text2 })),
+                    )
+                    .child(slider(
+                        "sound-volume",
+                        Slider {
+                            value: p.sound_volume as f32 / 200.,
+                            mark: Some(0.5),
+                            color: if p.sound_volume > 100 { t.caution } else { t.accent },
+                        },
+                        t,
+                        cx,
+                        |_, v, cx| set_prefs(cx, |p| p.sound_volume = ((v * 200.) / 5.).round() as u32 * 5),
+                    )),
+            )
             .child(
                 div()
                     .flex()
@@ -663,13 +690,83 @@ impl Settings {
                     .gap(px(8.))
                     .child(
                         button("test-join", tr!("Play the join sound", "Tocar o som de entrada"), Kind::Standard, t)
-                            .on_click(|_, _, _| audio::cue(audio::Cue::Join)),
+                            .on_click(|_, _, cx| audio::cue(audio::Cue::Join, cue_volume(cx))),
                     )
                     .child(
                         button("test-mention", tr!("Play the mention sound", "Tocar o som de menção"), Kind::Standard, t)
-                            .on_click(|_, _, _| audio::cue(audio::Cue::Mention)),
+                            .on_click(|_, _, cx| audio::cue(audio::Cue::Mention, cue_volume(cx))),
                     ),
             )
+            .into_any_element()
+    }
+
+    fn hotkeys_section(&mut self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let server = self.session.read(cx).api.base();
+        let mut list = div().flex().flex_col().gap(px(10.));
+        let rows = [
+            (HotkeyAction::Mute, "hotkey-mute", tr!("Mute or unmute", "Silenciar ou reativar o microfone")),
+            (HotkeyAction::Deafen, "hotkey-deafen", tr!("Deafen or undeafen", "Desativar ou reativar o som")),
+        ];
+        for (action, id, what) in rows {
+            let combo = Combo::parse(prefs(cx).hotkey(&server, action));
+            let problem = combo.and(hotkeys::failure(action, cx));
+            let (s1, s2) = (server.clone(), server.clone());
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .px(px(14.))
+                    .py(px(12.))
+                    .rounded(px(radius::CARD))
+                    .bg(t.layer)
+                    .border_1()
+                    .border_color(if problem.is_some() { t.critical.opacity(0.5) } else { t.stroke })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .gap(px(2.))
+                            .child(body(what, t.text))
+                            .when_some(problem, |d, f| d.child(caption(f.message(), t.critical))),
+                    )
+                    .child(match combo {
+                        Some(c) => hotkeys::keys(&c.keycaps(), t),
+                        None => mono(tr!("Not set", "Sem atalho"), t.text3),
+                    })
+                    .child(
+                        button(id, if combo.is_some() { tr!("Change", "Trocar") } else { tr!("Set", "Definir") }, Kind::Standard, t)
+                            .on_click(move |_, window, cx| hotkeys::edit(action, what, s1.clone(), window, cx)),
+                    )
+                    .when(combo.is_some(), |d| {
+                        d.child(
+                            button((id, 1usize), tr!("Clear", "Limpar"), Kind::Subtle, t)
+                                .on_click(move |_, _, cx| hotkeys::bind(action, &s2, "", cx)),
+                        )
+                    }),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(18.))
+            .child(body(
+                tr!(
+                    "These work anywhere, even while a game has focus, and only while you are in a call. A combination bound here is taken from every other program while Harmony is open, so use Ctrl or Alt, or an F-key.",
+                    "Funcionam em qualquer lugar, até com um jogo em primeiro plano, e só enquanto você está em uma chamada. Uma combinação definida aqui deixa de funcionar nos outros programas enquanto o Harmony estiver aberto, então use Ctrl ou Alt, ou uma tecla F."
+                ),
+                t.text2,
+            ))
+            .child(list)
+            .child(caption(
+                tr!(
+                    "To give a soundboard sound a hotkey, right-click it in the soundboard.",
+                    "Para dar um atalho a um som do painel, clique nele com o botão direito no painel de sons."
+                ),
+                t.text3,
+            ))
             .into_any_element()
     }
 
@@ -947,6 +1044,7 @@ impl Render for Settings {
             Section::Camera => self.camera_section(&t, cx),
             Section::Appearance => self.appearance_section(&t, cx),
             Section::Sounds => self.sounds_section(&t, cx),
+            Section::Hotkeys => self.hotkeys_section(&t, cx),
             Section::Advanced => self.advanced_section(&t, cx),
         };
         let heading = match self.section {
@@ -955,6 +1053,7 @@ impl Render for Settings {
             Section::Camera => tr!("Camera and background", "Câmera e fundo"),
             Section::Appearance => tr!("Appearance and language", "Aparência e idioma"),
             Section::Sounds => tr!("Sounds", "Sons"),
+            Section::Hotkeys => tr!("Hotkeys", "Atalhos globais"),
             Section::Advanced => tr!("Advanced", "Avançado"),
         };
         // A fixed height, so the rail stays put while sections of different lengths come and go.
@@ -981,6 +1080,7 @@ impl Render for Settings {
                     .child(nav("nav-camera", Some("camera"), tr!("Camera", "Câmera"), Section::Camera, self, cx))
                     .child(nav("nav-appearance", Some("palette"), tr!("Appearance", "Aparência"), Section::Appearance, self, cx))
                     .child(nav("nav-sounds", Some("music"), tr!("Sounds", "Sons"), Section::Sounds, self, cx))
+                    .child(nav("nav-hotkeys", Some("keyboard"), tr!("Hotkeys", "Atalhos globais"), Section::Hotkeys, self, cx))
                     .child(nav("nav-advanced", Some("settings"), tr!("Advanced", "Avançado"), Section::Advanced, self, cx))
                     .child(div().flex_1())
                     .child(

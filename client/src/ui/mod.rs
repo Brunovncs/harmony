@@ -3,6 +3,7 @@
 
 pub mod camera;
 pub mod connect;
+pub mod hotkeys;
 pub mod overlay;
 mod rail;
 pub mod server;
@@ -68,7 +69,10 @@ impl Root {
         // cached (the chat, the channel and member lists) would keep the old ones, so everything
         // draws again.
         let mut subs = vec![cx.observe_window_appearance(window, |_, window, _| window.refresh())];
-        subs.push(cx.observe_global_in::<crate::prefs::Prefs>(window, |_, window, _| window.refresh()));
+        subs.push(cx.observe_global_in::<crate::prefs::Prefs>(window, |_, window, cx| {
+            hotkeys::sync(cx);
+            window.refresh();
+        }));
         let view = cx.new(|cx| ConnectView::new(None, false, window, cx));
         let mut root = Root {
             focus: cx.focus_handle(),

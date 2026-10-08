@@ -75,6 +75,8 @@ pub struct Source {
     /// A soundpad clip, played straight from its shared samples (and how far it got) instead of
     /// being copied into `buf`.
     clip: Option<(Arc<[i16]>, AtomicUsize)>,
+    /// The cues' bus: what it plays goes through this on its way into the mix.
+    limiter: Option<Mutex<Limiter>>,
 }
 
 impl Source {
@@ -88,7 +90,37 @@ impl Source {
             one_shot,
             max_len,
             clip: None,
+            limiter: None,
         })
+    }
+
+    /// An effect that stays in the mix, through a limiter.
+    fn limited() -> Arc<Source> {
+        Arc::new(Source {
+            kind: SourceKind::Effect,
+            buf: Mutex::new(VecDeque::new()),
+            gain: AtomicF32::new(1.),
+            peak: AtomicF32::default(),
+            one_shot: false,
+            max_len: usize::MAX,
+            clip: None,
+            limiter: Some(Mutex::default()),
+        })
+    }
+
+    /// Mono samples added onto what is still to play, from now, instead of queued after it.
+    fn overlay(&self, samples: &[f32]) {
+        let mut buf = self.buf.lock();
+        let queued = buf.len() / 2;
+        for (i, &s) in samples.iter().enumerate() {
+            if i < queued {
+                buf[2 * i] += s;
+                buf[2 * i + 1] += s;
+            } else {
+                buf.push_back(s);
+                buf.push_back(s);
+            }
+        }
     }
 
     /// Mono or stereo samples in -1..1 at 48 kHz.
@@ -177,6 +209,17 @@ impl Mixer {
             }
             let mut buf = s.buf.lock();
             let n = out.len().min(buf.len());
+            if let Some(limiter) = &s.limiter {
+                let mut limiter = limiter.lock();
+                let mut queued = buf.drain(..n);
+                for o in out[..n].chunks_exact_mut(2) {
+                    let (l, r) = (queued.next().unwrap_or(0.) * gain, queued.next().unwrap_or(0.) * gain);
+                    let (l, r) = limiter.process(l, r);
+                    o[0] += l;
+                    o[1] += r;
+                }
+                continue;
+            }
             for (o, v) in out.iter_mut().zip(buf.drain(..n)) {
                 *o += v * gain;
             }
@@ -592,45 +635,150 @@ fn dsp_thread(mixer: Arc<Mixer>, mic: Arc<Mic>, near: Arc<(Mutex<VecDeque<f32>>,
     }
 }
 
-/// A sine cue, the old client's join, leave, live and mention sounds.
-pub fn cue(kind: Cue) {
-    let notes: &[(f32, f32)] = match kind {
-        Cue::Join => &[(587.33, 0.), (880., 0.09)],
-        Cue::Leave => &[(880., 0.), (587.33, 0.09)],
-        Cue::Live => &[(1046.5, 0.)],
-        Cue::Mention => &[(880., 0.), (1174.66, 0.08), (1396.91, 0.16)],
-    };
-    let len = 0.22;
-    let total = notes.iter().map(|n| n.1).fold(0., f32::max) + len;
-    let mut out = vec![0f32; (total * RATE as f32) as usize];
-    for &(freq, at) in notes {
-        let start = (at * RATE as f32) as usize;
-        let n = (len * RATE as f32) as usize;
-        for i in 0..n {
-            let t = i as f32 / RATE as f32;
-            let attack = (t / 0.015).min(1.);
-            let release = (1. - t / len).max(0.).powi(2);
-            if let Some(o) = out.get_mut(start + i) {
-                *o += (std::f32::consts::TAU * freq * t).sin() * 0.07 * attack * release;
-            }
-        }
-    }
-    play(&out, 1, 1.);
-}
-
+/// The little noises, as the old client's 3.x plays them. Rising means arriving or switching on,
+/// falling means leaving or switching off; two notes for other people, a triad for you.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cue {
+    /// Someone else arrived in your channel, or left it.
     Join,
     Leave,
-    Live,
+    /// You connected to voice, or left it.
+    Connect,
+    Disconnect,
+    /// A screen share started or stopped: brighter than arrivals, since it is news.
+    StreamStart,
+    StreamStop,
+    /// Your microphone: short, so it is over before your next word.
+    Mute,
+    Unmute,
+    /// Your ears: lower than mute, to tell them apart without looking.
+    Deafen,
+    Undeafen,
     Mention,
 }
 
-/// Plays samples once (48 kHz) at a volume.
-pub fn play(samples: &[f32], channels: usize, gain: f32) {
-    let s = Source::new(SourceKind::Effect, gain, true);
-    s.push(samples, channels);
-    audio().mixer.add(s);
+const C5: f32 = 523.25;
+const D5: f32 = 587.33;
+const E5: f32 = 659.25;
+const G5: f32 = 783.99;
+const A5: f32 = 880.;
+const B5: f32 = 987.77;
+const D6: f32 = 1174.66;
+const E6: f32 = 1318.51;
+const F6: f32 = 1396.91;
+const D4: f32 = 293.66;
+const A4: f32 = 440.;
+
+impl Cue {
+    /// Its notes (frequency, start in seconds), how long each rings, and its level.
+    fn voicing(self) -> (&'static [(f32, f32)], f32, f32) {
+        match self {
+            Cue::Join => (&[(D5, 0.), (A5, 0.09)], 0.32, 1.),
+            Cue::Leave => (&[(A5, 0.), (D5, 0.09)], 0.32, 1.),
+            Cue::Connect => (&[(C5, 0.), (E5, 0.07), (G5, 0.14)], 0.4, 1.),
+            Cue::Disconnect => (&[(G5, 0.), (E5, 0.07), (C5, 0.14)], 0.4, 1.),
+            Cue::StreamStart => (&[(E5, 0.), (B5, 0.07), (E6, 0.14)], 0.45, 0.95),
+            Cue::StreamStop => (&[(E6, 0.), (B5, 0.07), (E5, 0.14)], 0.45, 0.95),
+            Cue::Mute => (&[(A5, 0.), (D5, 0.055)], 0.2, 0.85),
+            Cue::Unmute => (&[(D5, 0.), (A5, 0.055)], 0.2, 0.85),
+            Cue::Deafen => (&[(A4, 0.), (D4, 0.07)], 0.28, 0.9),
+            Cue::Undeafen => (&[(D4, 0.), (A4, 0.07)], 0.28, 0.9),
+            Cue::Mention => (&[(A5, 0.), (D6, 0.08), (F6, 0.16)], 0.3, 0.9),
+        }
+    }
+}
+
+/// Loudest a cue gets at 100%, as a fraction of full scale.
+const CUE_PEAK: f32 = 0.32;
+/// The partials of each note: multiple of the fundamental, relative level. A bare sine has no
+/// harmonics, and the ear judges loudness largely by them.
+const PARTIALS: [(f32, f32); 3] = [(1., 1.), (2., 0.32), (3., 0.1)];
+
+/// From `from` to `to` over `span`, exponentially, as Web Audio ramps.
+fn ramp(from: f32, to: f32, t: f32, span: f32) -> f32 {
+    from * (to / from).powf((t / span).clamp(0., 1.))
+}
+
+/// A cue's samples, mono at 48 kHz, at `volume` (0..2, the sound effects volume).
+pub fn render(kind: Cue, volume: f32) -> Vec<f32> {
+    let (notes, len, level) = kind.voicing();
+    let level = volume.clamp(0., 2.) * CUE_PEAK * level;
+    if level <= 0. {
+        return Vec::new();
+    }
+    let rate = RATE as f32;
+    let total = notes.iter().map(|n| n.1).fold(0., f32::max) + len;
+    let mut out = vec![0f32; (total * rate) as usize];
+    let n = (len * rate) as usize;
+    for &(freq, at) in notes {
+        let start = (at * rate) as usize;
+        let mut phase = [0f32; PARTIALS.len()];
+        for i in 0..n {
+            let t = i as f32 / rate;
+            // A 6 ms strike, down to a third by a third of the way through, then away.
+            let env = if t < 0.006 {
+                ramp(0.0001, level, t, 0.006)
+            } else if t < len * 0.35 {
+                ramp(level, level * 0.35, t - 0.006, len * 0.35 - 0.006)
+            } else {
+                ramp(level * 0.35, 0.0001, t - len * 0.35, len * 0.65)
+            };
+            // The settle: 3% sharp at the strike, at pitch 40 ms later. Inaudible as a glide,
+            // audible as a softer attack.
+            let pitch = freq * ramp(1.03, 1., t, 0.04);
+            let mut sum = 0.;
+            for (p, &(multiple, weight)) in phase.iter_mut().zip(&PARTIALS) {
+                *p = (*p + std::f32::consts::TAU * pitch * multiple / rate) % std::f32::consts::TAU;
+                // Higher partials die faster, as on anything struck.
+                sum += p.sin() * ramp(weight, weight * 0.05, t, len / multiple);
+            }
+            if let Some(o) = out.get_mut(start + i) {
+                *o += sum * env;
+            }
+        }
+    }
+    out
+}
+
+/// Plays a cue at `volume` (0..2). Every cue goes through one limiter, so two landing together
+/// (someone joins as someone else starts streaming) cannot clip.
+pub fn cue(kind: Cue, volume: f32) {
+    let samples = render(kind, volume);
+    if !samples.is_empty() {
+        cue_bus().overlay(&samples);
+    }
+}
+
+fn cue_bus() -> &'static Arc<Source> {
+    static BUS: OnceLock<Arc<Source>> = OnceLock::new();
+    BUS.get_or_init(|| {
+        let bus = Source::limited();
+        audio().mixer.add(bus.clone());
+        bus
+    })
+}
+
+/// A compressor hard enough to call a limiter: above -6 dBFS, 12:1. The attack is instant, so
+/// nothing gets past it; the release takes about 120 ms.
+#[derive(Default)]
+struct Limiter {
+    envelope: f32,
+}
+
+const LIMIT_AT: f32 = 0.5;
+const LIMIT_RATIO: f32 = 12.;
+
+impl Limiter {
+    fn process(&mut self, l: f32, r: f32) -> (f32, f32) {
+        let release = (-1. / (0.12 * RATE as f32)).exp();
+        let peak = l.abs().max(r.abs());
+        self.envelope = if peak > self.envelope { peak } else { self.envelope * release };
+        if self.envelope <= LIMIT_AT {
+            return (l, r);
+        }
+        let g = LIMIT_AT * (self.envelope / LIMIT_AT).powf(1. / LIMIT_RATIO) / self.envelope;
+        (l * g, r * g)
+    }
 }
 
 /// Plays a clip (interleaved stereo at 48 kHz) once without copying it, so a clip can be shared
@@ -644,6 +792,7 @@ pub fn play_shared(samples: Arc<[i16]>, gain: f32) {
         one_shot: true,
         max_len: 0,
         clip: Some((samples, AtomicUsize::new(0))),
+        limiter: None,
     };
     audio().mixer.add(Arc::new(s));
 }
@@ -719,5 +868,74 @@ mod tests {
         m.mix(&mut out);
         assert_eq!(out[0], 0.);
         assert_eq!(m.sources.lock().len(), 1, "the drained effect is gone");
+    }
+
+    fn peak(samples: &[f32]) -> f32 {
+        samples.iter().fold(0., |p, s| p.max(s.abs()))
+    }
+
+    /// 16-bit mono at 48 kHz, for listening to what a test rendered.
+    fn write_wav(path: &std::path::Path, samples: &[f32]) {
+        let data: Vec<u8> = samples.iter().flat_map(|s| ((s.clamp(-1., 1.) * 32767.) as i16).to_le_bytes()).collect();
+        let mut w = Vec::new();
+        w.extend_from_slice(b"RIFF");
+        w.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        w.extend_from_slice(b"WAVEfmt ");
+        for v in [16u32, 1 | 1 << 16, RATE, RATE * 2, 2 | 16 << 16] {
+            w.extend_from_slice(&v.to_le_bytes());
+        }
+        w.extend_from_slice(b"data");
+        w.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        w.extend_from_slice(&data);
+        std::fs::write(path, w).unwrap();
+    }
+
+    /// Set `HARMONY_CUE_WAVS` to a folder to get every cue, and the worst overlap, as WAV files.
+    #[test]
+    fn cues_are_loud_and_two_together_do_not_clip() {
+        let wavs = std::env::var_os("HARMONY_CUE_WAVS").map(std::path::PathBuf::from);
+        use Cue::*;
+        for kind in [Join, Leave, Connect, Disconnect, StreamStart, StreamStop, Mute, Unmute, Deafen, Undeafen, Mention] {
+            let s = render(kind, 1.);
+            let p = peak(&s);
+            println!("{kind:?}: {:.0} ms, peak {p:.3}", s.len() as f32 / RATE as f32 * 1000.);
+            assert!((0.2..0.5).contains(&p), "{kind:?} peaks at {p}");
+            assert!(s.iter().all(|x| x.is_finite()));
+            assert!(s.last().unwrap().abs() < 0.001, "{kind:?} ends in a click");
+            if let Some(dir) = &wavs {
+                write_wav(&dir.join(format!("{kind:?}.wav")), &s);
+            }
+        }
+        assert!(render(Cue::Join, 0.).is_empty());
+        assert!((peak(&render(Cue::Join, 2.)) / peak(&render(Cue::Join, 1.)) - 2.).abs() < 0.01);
+
+        // The two longest at 200%, the second 10 ms after the first: past full scale summed.
+        let (a, b) = (render(Cue::StreamStart, 2.), render(Cue::Connect, 2.));
+        let lag = 480;
+        let raw: Vec<f32> = (0..a.len().max(b.len() + lag))
+            .map(|i| a.get(i).unwrap_or(&0.) + i.checked_sub(lag).and_then(|j| b.get(j)).unwrap_or(&0.))
+            .collect();
+        println!("overlap at 200%: raw peak {:.3}", peak(&raw));
+        assert!(peak(&raw) > 1.);
+        let m = Mixer::new();
+        let bus = Source::limited();
+        m.add(bus.clone());
+        bus.overlay(&a);
+        let mut out = vec![0.; 2 * lag];
+        m.mix(&mut out);
+        let mut mixed: Vec<f32> = out.chunks_exact(2).map(|f| f[0]).collect();
+        bus.overlay(&b);
+        let mut out = vec![0.; 2 * raw.len()];
+        m.mix(&mut out);
+        mixed.extend(out.chunks_exact(2).map(|f| f[0]));
+        let limited = peak(&mixed);
+        println!("overlap at 200%: through the limiter {limited:.3}");
+        // Under the soft clip's knee too: the limiter did this, not the clip.
+        assert!(limited < 0.9, "{limited}");
+        assert!(bus.is_empty() && m.sources.lock().len() == 1, "the bus stays for the next cue");
+        if let Some(dir) = &wavs {
+            write_wav(&dir.join("overlap-raw.wav"), &raw);
+            write_wav(&dir.join("overlap-limited.wav"), &mixed);
+        }
     }
 }

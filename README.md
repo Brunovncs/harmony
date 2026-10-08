@@ -44,6 +44,8 @@ owner can give the server a picture.
   mentions, pins and search.
 - **Accounts and roles**: owner, admins and members, with optional
   password-locked channels and one settings page to run the server.
+- **Global hotkeys** for mute, deafen and soundboard sounds, working while a
+  game has focus.
 - **Several servers** on a rail, saved as you join them; right-click one to remove it.
 - **English and Portuguese**, following the system or picked in Settings.
 - **Runs on almost anything.** The server never decodes a frame, so a

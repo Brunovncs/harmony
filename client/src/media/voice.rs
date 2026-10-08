@@ -433,26 +433,9 @@ impl Voice {
         format!("{}/vc-{}-{}-{kind}/whep?token={token}", t.whep_base.trim_end_matches('/'), base36(self.channel), base36(mid))
     }
 
-    /// Brings everything in line with a new roster, and plays the join, leave and live cues.
-    pub fn sync(&mut self, roster: &[Member], previous: Option<&[Member]>, cx: &mut Context<Self>) {
+    /// Brings everything in line with a new roster.
+    pub fn sync(&mut self, roster: &[Member], cx: &mut Context<Self>) {
         let me = self.session.read(cx).me.id;
-        if let Some(prev) = previous
-            && prefs(cx).voice_sounds
-        {
-            let before: HashSet<UserId> = prev.iter().map(|m| m.user_id).collect();
-            let now: HashSet<UserId> = roster.iter().map(|m| m.user_id).collect();
-            if now.difference(&before).any(|u| *u != me) {
-                audio::cue(Cue::Join);
-            } else if before.difference(&now).any(|u| *u != me) {
-                audio::cue(Cue::Leave);
-            }
-            let went_live = roster
-                .iter()
-                .any(|m| m.user_id != me && m.publishes("s") && !prev.iter().any(|p| p.user_id == m.user_id && p.publishes("s")));
-            if went_live {
-                audio::cue(Cue::Live);
-            }
-        }
         self.roster = roster.to_vec();
         if let Some(mine) = roster.iter().find(|m| m.user_id == me) {
             self.force_muted = mine.force_muted;
@@ -789,7 +772,7 @@ impl Voice {
         // Leaving tells the server everything is off; nothing more to announce.
         self.roster.clear();
         self.stop_camera(cx);
-        self.stop_screen(cx);
+        self.end_screen(cx);
         self.drop_mic();
         self._mic_guard = None;
         for (_, p) in self.peers.drain() {
@@ -825,6 +808,43 @@ pub fn apply_mic_levels(cx: &App) {
     let a = audio::audio();
     a.mic.gain.set(p.mic_gain as f32 / 100.);
     a.mic.gate.set(gate_threshold(p.mic_sensitivity));
+}
+
+/// The sound effects volume, 0..2.
+pub fn cue_volume(cx: &App) -> f32 {
+    prefs(cx).sound_volume as f32 / 100.
+}
+
+/// A cue about the call, unless voice sounds are switched off.
+pub fn voice_cue(cue: Cue, cx: &App) {
+    if prefs(cx).voice_sounds {
+        audio::cue(cue, cue_volume(cx));
+    }
+}
+
+/// What a roster change sounds like: someone else arriving or leaving, someone else's stream
+/// starting or stopping, at most one of each. Yours play when they happen, not when the server
+/// echoes them back.
+pub fn roster_cues(before: &[Member], now: &[Member], me: UserId) -> Vec<Cue> {
+    fn present(list: &[Member], user: UserId) -> Option<&Member> {
+        list.iter().find(|m| m.user_id == user)
+    }
+    let joined = now.iter().any(|m| m.user_id != me && present(before, m.user_id).is_none());
+    let left = before.iter().any(|m| m.user_id != me && present(now, m.user_id).is_none());
+    let streams: Vec<(bool, bool)> = now
+        .iter()
+        .filter(|m| m.user_id != me)
+        .filter_map(|m| Some((present(before, m.user_id)?.publishes("s"), m.publishes("s"))))
+        .collect();
+    [
+        (joined, Cue::Join),
+        (left, Cue::Leave),
+        (streams.iter().any(|&(was, is)| is && !was), Cue::StreamStart),
+        (streams.iter().any(|&(was, is)| was && !is), Cue::StreamStop),
+    ]
+    .into_iter()
+    .filter_map(|(yes, cue)| yes.then_some(cue))
+    .collect()
 }
 
 /// The old client's gate: 0 is off, 1..100 maps to an RMS threshold.
@@ -897,6 +917,29 @@ mod tests {
         // Without a link there is nothing to stall.
         let mut w = Watch::default();
         assert!(!w.stalled(w.generation, 0, t) && !w.stalled(w.generation, 0, t + STALL * 2));
+    }
+
+    fn member(user: UserId, publishing: &[&str]) -> Member {
+        serde_json::from_value(serde_json::json!({ "userId": user, "mid": user, "nickname": "x", "publishing": publishing })).unwrap()
+    }
+
+    #[test]
+    fn roster_changes_sound_once_each_and_never_for_you() {
+        let me = 1;
+        let before = [member(1, &["v"]), member(2, &["v"]), member(3, &["v", "s"])];
+        assert!(roster_cues(&before, &before, me).is_empty());
+        // Two arrive at once: one join, not two.
+        let now = [&before[..], &[member(4, &[]), member(5, &[])]].concat();
+        assert_eq!(roster_cues(&before, &now, me), [Cue::Join]);
+        // Someone leaves while someone else stops sharing.
+        let now = [member(1, &["v"]), member(3, &["v"])];
+        assert_eq!(roster_cues(&before, &now, me), [Cue::Leave, Cue::StreamStop]);
+        // Arriving already streaming is a join; starting later is a stream.
+        assert_eq!(roster_cues(&now, &before, me), [Cue::Join, Cue::StreamStart]);
+        // Your own coming, going and sharing make no roster cue.
+        let mine = [member(1, &["v", "s"]), member(2, &["v"]), member(3, &["v", "s"])];
+        assert!(roster_cues(&before, &mine, me).is_empty());
+        assert!(roster_cues(&before[1..], &before, me).is_empty());
     }
 
     #[test]

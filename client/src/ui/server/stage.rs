@@ -4,19 +4,23 @@
 use super::sidebar::live_chip;
 use super::{Center, ServerView, VolumeSlider};
 use crate::core;
+use crate::core::settings::HotkeyAction;
 use crate::core::types::*;
+use crate::hotkeys::Combo;
 use crate::media::audio;
 use crate::media::video::{Tile, TileKind};
 use crate::media::voice::Voice;
 use crate::prefs::{prefs, set_prefs};
 use crate::session::Session;
-use crate::theme::{Theme, current, px, radius};
-use crate::ui::overlay::{self, Dismiss};
+use crate::theme::{MONO, Theme, current, px, radius};
+use crate::ui::hotkeys::Recorder;
+use crate::ui::overlay::{self, Dismiss, menu_card, menu_item, menu_rule};
 use crate::widgets::*;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, EventEmitter, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
-    ParentElement, Pixels, Point, Render, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, StyledImage, Window, div, img,
+    AnyElement, App, AppContext, Context, Entity, EventEmitter, Focusable, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
+    ParentElement, Pixels, Point, Render, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, StyledImage, Window, anchored,
+    div, img,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -415,7 +419,7 @@ impl ServerView {
 
     pub fn open_soundpad(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(channel) = self.call_channel(cx) else { return };
-        let view = cx.new(|_| Soundpad { session: self.session.clone(), channel });
+        let view = cx.new(|_| Soundpad { session: self.session.clone(), channel, menu: None, recorder: None });
         let _ = window;
         overlay::open_menu(view, at, cx);
     }
@@ -452,19 +456,114 @@ impl Render for Tile {
     }
 }
 
-/// The soundboard: the server's clips, played for everyone in the channel.
+/// The soundboard: the server's clips, played for everyone in the channel. A clip's menu and the
+/// hotkey recorder are drawn inside it rather than as layers of their own: the soundboard is a
+/// menu itself, and opening another would close it.
 struct Soundpad {
     session: Entity<Session>,
     channel: ChannelId,
+    /// The clip whose menu is open, and where.
+    menu: Option<(Clip, Point<Pixels>)>,
+    recorder: Option<Entity<Recorder>>,
 }
 
 impl EventEmitter<Dismiss> for Soundpad {}
+
+impl Soundpad {
+    fn record(&mut self, clip: &Clip, window: &mut Window, cx: &mut Context<Self>) {
+        let server = self.session.read(cx).api.base();
+        let what = SharedString::from(clip.name.clone());
+        let recorder = cx.new(|cx| Recorder::new(HotkeyAction::Clip(clip.id), what, server, false, cx));
+        cx.subscribe(&recorder, |this: &mut Soundpad, _, _: &Dismiss, cx| {
+            this.recorder = None;
+            cx.notify();
+        })
+        .detach();
+        recorder.focus_handle(cx).focus(window, cx);
+        self.recorder = Some(recorder);
+        cx.notify();
+    }
+
+    /// One clip's menu: its hotkey, for everyone (anyone in the call can play a clip), and an
+    /// admin's tools.
+    fn clip_menu(&mut self, clip: Clip, at: Point<Pixels>, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let s = self.session.read(cx);
+        let admin = s.me.role.is_admin();
+        let server = s.api.base();
+        let order: Vec<i64> = s.clips.iter().map(|c| c.id).collect();
+        let id = clip.id;
+        let bound = Combo::parse(prefs(cx).hotkey(&server, HotkeyAction::Clip(id)));
+        let set: SharedString = match bound {
+            Some(c) => trf!("Change hotkey ({})", "Trocar atalho ({})", c.keycaps().join(" + ")).into(),
+            None => tr!("Set hotkey", "Definir atalho").into(),
+        };
+        let to_record = clip.clone();
+        let mut card = menu_card(t).occlude().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(
+            menu_item("clip-hotkey", Some("keyboard"), set, false, t).on_click(cx.listener(move |this, _, window, cx| {
+                this.menu = None;
+                this.record(&to_record, window, cx);
+            })),
+        );
+        if bound.is_some() {
+            card = card.child(menu_item("clip-unbind", Some("close"), tr!("Remove hotkey", "Remover atalho"), false, t).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.menu = None;
+                    crate::ui::hotkeys::bind(HotkeyAction::Clip(id), &server, "", cx);
+                    cx.notify();
+                }),
+            ));
+        }
+        if admin {
+            let pos = order.iter().position(|x| *x == id).unwrap_or(0);
+            let moved = |delta: isize| {
+                let mut o = order.clone();
+                let to = (pos as isize + delta).clamp(0, o.len() as isize - 1) as usize;
+                let v = o.remove(pos);
+                o.insert(to, v);
+                o
+            };
+            let (earlier, later) = (moved(-1), moved(1));
+            let (s1, s2, s3, s4) = (self.session.clone(), self.session.clone(), self.session.clone(), self.session.clone());
+            card = card
+                .child(menu_rule(t))
+                .child(menu_item("clip-rename", Some("edit"), tr!("Rename", "Renomear"), false, t).on_click(cx.listener(
+                    move |_, _, window, cx| {
+                        // Its dialog would open under the soundboard, so the soundboard goes first.
+                        cx.emit(Dismiss);
+                        rename_clip(s1.clone(), clip.clone(), window, cx);
+                    },
+                )))
+                .child(menu_item("clip-earlier", Some("arrow-left"), tr!("Move earlier", "Mover para antes"), false, t).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.menu = None;
+                        reorder_clips(&s2, earlier.clone(), cx);
+                    }),
+                ))
+                .child(menu_item("clip-later", Some("arrow-right"), tr!("Move later", "Mover para depois"), false, t).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.menu = None;
+                        reorder_clips(&s3, later.clone(), cx);
+                    }),
+                ))
+                .child(menu_rule(t))
+                .child(menu_item("clip-delete", Some("delete"), tr!("Delete this sound", "Apagar este som"), true, t).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.menu = None;
+                        s4.update(cx, |s, cx| s.call(cx, move |api| Box::pin(async move { api.delete_clip(id).await }), |_, _, _| {}));
+                    }),
+                ));
+        }
+        anchored().position(at).snap_to_window_with_margin(px(8.)).child(card).into_any_element()
+    }
+}
 
 impl Render for Soundpad {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = current();
         let clips = self.session.read(cx).clips.clone();
         let admin = self.session.read(cx).me.role.is_admin();
+        let server = self.session.read(cx).api.base();
+        let bound = prefs(cx).server_clip_hotkeys(&server).cloned().unwrap_or_default();
         let volume = prefs(cx).soundpad_volume as f32 / 100.;
         let mut grid = div().id("clips").flex().flex_wrap().gap(px(6.)).max_h(px(300.)).overflow_y_scroll();
         if clips.is_empty() {
@@ -477,16 +576,15 @@ impl Render for Soundpad {
                 t.text3,
             ));
         }
-        let order: Vec<i64> = clips.iter().map(|c| c.id).collect();
         for c in clips {
             let (id, channel, session) = (c.id, self.channel, self.session.clone());
-            let (menu_session, menu_clip, menu_order) = (self.session.clone(), c.clone(), order.clone());
+            let combo = bound.get(&id.to_string()).and_then(|a| Combo::parse(a));
             let hover = t.layer_hover;
             grid = grid.child(
                 div()
                     .id(("clip", c.id as u64))
                     .w(px(112.))
-                    .h(px(52.))
+                    .h(px(58.))
                     .flex()
                     .flex_col()
                     .items_center()
@@ -500,18 +598,38 @@ impl Render for Soundpad {
                     .active(|s| s.opacity(0.75))
                     .child(div().text_size(px(18.)).child(c.emoji.clone().unwrap_or_else(|| "🔊".into())))
                     .child(div().max_w(px(100.)).truncate().text_size(px(12.)).text_color(t.text2).child(c.name.clone()))
-                    .when(admin, |d| {
-                        d.on_mouse_down(MouseButton::Right, move |e: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            clip_menu(menu_session.clone(), menu_clip.clone(), menu_order.clone(), e.position, cx)
-                        })
+                    .when_some(combo, |d, k| {
+                        d.child(
+                            div()
+                                .max_w(px(104.))
+                                .truncate()
+                                .font_family(MONO)
+                                .text_size(px(9.))
+                                .line_height(px(11.))
+                                .text_color(t.text3)
+                                .child(k.keycaps().join("+")),
+                        )
                     })
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.menu = Some((c.clone(), e.position));
+                            cx.notify();
+                        }),
+                    )
                     .on_click(move |_, _, cx| {
                         super::request(&session, "soundpad:play", serde_json::json!({ "channelId": channel, "clipId": id }), cx);
                     }),
             );
         }
+        let menu = self.menu.clone().map(|(clip, at)| self.clip_menu(clip, at, &t, cx));
         let session = self.session.clone();
+        let close_menu = |this: &mut Soundpad, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Soundpad>| {
+            if this.menu.take().is_some() {
+                cx.notify();
+            }
+        };
         div()
             .w(px(400.))
             .flex()
@@ -523,6 +641,8 @@ impl Render for Soundpad {
             .border_1()
             .border_color(t.stroke_strong)
             .shadow_lg()
+            .on_mouse_down(MouseButton::Left, cx.listener(close_menu))
+            .on_mouse_down(MouseButton::Right, cx.listener(close_menu))
             .child(
                 div()
                     .flex()
@@ -538,90 +658,70 @@ impl Render for Soundpad {
                     )
                     .child(mono(format!("{:.0}%", volume * 100.), if volume > 1. { t.caution } else { t.text3 })),
             )
-            .child(VolumeSlider::new(volume, |g, cx| set_prefs(cx, |p| p.soundpad_volume = (g * 100.).round() as u32)).render(&t, cx))
-            .child(grid)
-            .when(admin, |d| {
-                d.child(
-                    icon_label_button("add-clip", "plus", tr!("Add a sound", "Adicionar um som"), Kind::Standard, &t)
-                        .on_click(cx.listener(move |_, _, window, cx| add_clip(session.clone(), window, cx))),
-                )
+            .map(|d| match self.recorder.clone() {
+                Some(recorder) => d.child(recorder),
+                None => d
+                    .child(
+                        VolumeSlider::new(volume, |g, cx| set_prefs(cx, |p| p.soundpad_volume = (g * 100.).round() as u32)).render(&t, cx),
+                    )
+                    .child(grid)
+                    .when(admin, |d| {
+                        d.child(icon_label_button("add-clip", "plus", tr!("Add a sound", "Adicionar um som"), Kind::Standard, &t).on_click(
+                            cx.listener(move |_, _, window, cx| {
+                                // The file picker and the dialog after it would open under the soundboard.
+                                cx.emit(Dismiss);
+                                add_clip(session.clone(), window, cx)
+                            }),
+                        ))
+                    }),
             })
+            .children(menu)
     }
 }
 
-/// An admin's tools for one sound: rename, move, delete.
-fn clip_menu(session: Entity<Session>, clip: Clip, order: Vec<i64>, at: Point<Pixels>, cx: &mut App) {
-    use super::sidebar::{Menu, MenuEntry};
+fn reorder_clips(session: &Entity<Session>, order: Vec<i64>, cx: &mut App) {
+    session.update(cx, |s, cx| s.call(cx, move |api| Box::pin(async move { api.reorder_clips(&order).await }), |_, _, _| {}));
+}
+
+fn rename_clip(session: Entity<Session>, clip: Clip, window: &mut Window, cx: &mut App) {
     let id = clip.id;
-    let pos = order.iter().position(|x| *x == id).unwrap_or(0);
-    let moved = |delta: isize| {
-        let mut o = order.clone();
-        let to = (pos as isize + delta).clamp(0, o.len() as isize - 1) as usize;
-        let v = o.remove(pos);
-        o.insert(to, v);
-        o
-    };
-    let (earlier, later) = (moved(-1), moved(1));
-    let (s1, s2, s3, s4) = (session.clone(), session.clone(), session.clone(), session);
-    let menu = cx.new(|_| Menu {
-        items: vec![
-            MenuEntry::item("edit", tr!("Rename", "Renomear"), false, move |window, cx| {
-                let s = s1.clone();
-                overlay::Ask::open(
-                    tr!("Rename the sound", "Renomear o som"),
-                    None,
-                    tr!("Save", "Salvar"),
-                    false,
-                    vec![
-                        overlay::Field::Text {
-                            label: tr!("Name", "Nome"),
-                            value: clip.name.clone(),
-                            placeholder: "",
-                            secret: false,
-                            multiline: false,
-                            max: 32,
-                        },
-                        overlay::Field::Text {
-                            label: "Emoji",
-                            value: clip.emoji.clone().unwrap_or_default(),
-                            placeholder: "",
-                            secret: false,
-                            multiline: false,
-                            max: 4,
-                        },
-                    ],
-                    window,
-                    cx,
-                    move |v, _, cx| {
-                        let (name, emoji) = (v[0].trim().to_string(), v[1].trim().to_string());
-                        s.update(cx, |s, cx| {
-                            s.call(
-                                cx,
-                                move |api| {
-                                    Box::pin(async move { api.rename_clip(id, &name, (!emoji.is_empty()).then_some(emoji.as_str())).await })
-                                },
-                                |_, _, _| {},
-                            )
-                        });
-                        None
-                    },
-                );
-            }),
-            MenuEntry::item("arrow-left", tr!("Move earlier", "Mover para antes"), false, move |_, cx| {
-                let o = earlier.clone();
-                s2.update(cx, |s, cx| s.call(cx, move |api| Box::pin(async move { api.reorder_clips(&o).await }), |_, _, _| {}));
-            }),
-            MenuEntry::item("arrow-right", tr!("Move later", "Mover para depois"), false, move |_, cx| {
-                let o = later.clone();
-                s3.update(cx, |s, cx| s.call(cx, move |api| Box::pin(async move { api.reorder_clips(&o).await }), |_, _, _| {}));
-            }),
-            MenuEntry::rule(),
-            MenuEntry::item("delete", tr!("Delete this sound", "Apagar este som"), true, move |_, cx| {
-                s4.update(cx, |s, cx| s.call(cx, move |api| Box::pin(async move { api.delete_clip(id).await }), |_, _, _| {}));
-            }),
+    overlay::Ask::open(
+        tr!("Rename the sound", "Renomear o som"),
+        None,
+        tr!("Save", "Salvar"),
+        false,
+        vec![
+            overlay::Field::Text {
+                label: tr!("Name", "Nome"),
+                value: clip.name.clone(),
+                placeholder: "",
+                secret: false,
+                multiline: false,
+                max: 32,
+            },
+            overlay::Field::Text {
+                label: "Emoji",
+                value: clip.emoji.clone().unwrap_or_default(),
+                placeholder: "",
+                secret: false,
+                multiline: false,
+                max: 4,
+            },
         ],
-    });
-    overlay::open_menu(menu, at, cx);
+        window,
+        cx,
+        move |v, _, cx| {
+            let (name, emoji) = (v[0].trim().to_string(), v[1].trim().to_string());
+            session.update(cx, |s, cx| {
+                s.call(
+                    cx,
+                    move |api| Box::pin(async move { api.rename_clip(id, &name, (!emoji.is_empty()).then_some(emoji.as_str())).await }),
+                    |_, _, _| {},
+                )
+            });
+            None
+        },
+    );
 }
 
 pub(super) fn add_clip(session: Entity<Session>, window: &mut Window, cx: &mut App) {

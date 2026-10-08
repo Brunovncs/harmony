@@ -13,10 +13,11 @@ pub mod sidebar;
 mod stage;
 
 use super::Root;
+use crate::core::settings::HotkeyAction;
 use crate::core::types::*;
-use crate::media::audio::MAX_GAIN;
+use crate::media::audio::{Cue, MAX_GAIN};
 use crate::media::call::{Call, CallEvent, CallState};
-use crate::media::voice::volume_of;
+use crate::media::voice::{cue_volume, voice_cue, volume_of};
 use crate::prefs::{prefs, set_prefs};
 use crate::session::{Link, Session, SessionEvent};
 use crate::theme::{GUTTER, Theme, current, px, radius};
@@ -139,6 +140,9 @@ impl ServerView {
     }
 
     fn on_session(&mut self, cx: &mut Context<Self>) {
+        let s = self.session.read(cx);
+        let server = (s.api.base(), s.clips.iter().map(|c| c.id).collect());
+        crate::ui::hotkeys::set_server(Some(server), cx);
         // Open the first text channel once the list arrives.
         if self.center == Center::Stage && self.call.is_none() {
             let first =
@@ -160,7 +164,7 @@ impl ServerView {
         match ev {
             SessionEvent::Mentioned => {
                 if prefs(cx).mention_sound {
-                    crate::media::audio::cue(crate::media::audio::Cue::Mention);
+                    crate::media::audio::cue(Cue::Mention, cue_volume(cx));
                 }
             }
             SessionEvent::SoundpadPlay { hash } => {
@@ -170,7 +174,8 @@ impl ServerView {
                 }
             }
             SessionEvent::Moved(to) => {
-                self.leave_voice(cx);
+                // Moved somewhere: that channel's connect is the sound of it.
+                self.hang_up(to.is_none(), cx);
                 if let Some(ch) = to {
                     self.join_voice(*ch, None, window, cx);
                 }
@@ -181,6 +186,7 @@ impl ServerView {
 
     pub fn shutdown(&mut self, cx: &mut Context<Self>) {
         self.leave_voice(cx);
+        crate::ui::hotkeys::set_server(None, cx);
         self.session.update(cx, |s, _| s.stop());
         let _ = &self.root;
     }
@@ -212,7 +218,8 @@ impl ServerView {
             return;
         }
         let (muted, deafened) = self.call.as_ref().map(|c| (c.read(cx).muted, c.read(cx).deafened)).unwrap_or((false, false));
-        self.leave_voice(cx);
+        // Quietly: the new channel's connect is the sound of switching.
+        self.hang_up(false, cx);
         let call = Call::join(self.session.clone(), id, password, muted, deafened, cx);
         let sub = cx.subscribe_in(&call, window, |this, _, ev: &CallEvent, window, cx| match ev {
             CallEvent::NeedsPassword { channel, wrong } => this.ask_password(*channel, *wrong, window, cx),
@@ -228,18 +235,22 @@ impl ServerView {
         self.call = Some(call);
         crate::ui::updates::call_changed(true, cx);
         self.center = Center::Stage;
-        if prefs(cx).voice_sounds {
-            crate::media::audio::cue(crate::media::audio::Cue::Join);
-        }
         cx.notify();
     }
 
     pub fn leave_voice(&mut self, cx: &mut Context<Self>) {
+        self.hang_up(true, cx);
+    }
+
+    /// Leaves the call, with the disconnect cue when `cue` and the call had got as far as
+    /// connecting (a join that was refused never made a sound).
+    fn hang_up(&mut self, cue: bool, cx: &mut Context<Self>) {
         if let Some(call) = self.call.take() {
+            let connected = call.read(cx).tokens.is_some();
             call.update(cx, |c, cx| c.leave(cx));
             crate::ui::updates::call_changed(false, cx);
-            if prefs(cx).voice_sounds {
-                crate::media::audio::cue(crate::media::audio::Cue::Leave);
+            if cue && connected {
+                voice_cue(Cue::Disconnect, cx);
             }
         }
         if self.center == Center::Stage {
@@ -298,6 +309,22 @@ impl ServerView {
                 let d = !c.deafened;
                 c.set_deafened(d, cx)
             });
+        }
+    }
+
+    /// A global hotkey was pressed, most likely from inside a game. Mute and deafen do what
+    /// Ctrl+Shift+M and D do; a clip plays as a click on it does. Outside a call, nothing.
+    pub fn on_hotkey(&mut self, action: HotkeyAction, cx: &mut Context<Self>) {
+        match action {
+            HotkeyAction::Mute => self.toggle_mute(cx),
+            HotkeyAction::Deafen => self.toggle_deafen(cx),
+            HotkeyAction::Clip(id) => {
+                if let Some(channel) = self.call_channel(cx)
+                    && self.session.read(cx).clips.iter().any(|c| c.id == id)
+                {
+                    request(&self.session, "soundpad:play", serde_json::json!({ "channelId": channel, "clipId": id }), cx);
+                }
+            }
         }
     }
 

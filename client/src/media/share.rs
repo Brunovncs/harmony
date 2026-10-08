@@ -2,6 +2,7 @@
 //! and shown to you as a local tile. The voice reconciler announces them once they are up and
 //! publishes them again when the connection drops or the slot changes.
 
+use super::audio::Cue;
 use super::camera::{self, Capture};
 use super::rtc::{self, Link, VideoParams};
 use super::screen::{ScreenCapture, ScreenChoice};
@@ -105,6 +106,8 @@ impl Voice {
         self.tiles.insert(0, tile.clone());
         self.shares.screen = Some(LocalShare { capture, tile, out: Outgoing::default() });
         self.publish(TileKind::Screen, cx);
+        // Yours sounds the moment it happens, not when the roster echoes it back.
+        voice::voice_cue(Cue::StreamStart, cx);
         cx.notify();
     }
 
@@ -121,11 +124,18 @@ impl Voice {
     }
 
     pub fn stop_screen(&mut self, cx: &mut Context<Self>) {
-        if let Some(mut share) = self.shares.screen.take() {
-            share.capture.stop();
-            share.out.hang_up();
-            self.unpublish(&share.tile, cx);
+        if self.end_screen(cx) {
+            voice::voice_cue(Cue::StreamStop, cx);
         }
+    }
+
+    /// Stops sharing without a sound, for leaving the call; true if there was a share.
+    pub(super) fn end_screen(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(mut share) = self.shares.screen.take() else { return false };
+        share.capture.stop();
+        share.out.hang_up();
+        self.unpublish(&share.tile, cx);
+        true
     }
 
     fn outgoing(&mut self, kind: TileKind) -> Option<&mut Outgoing> {

@@ -10,6 +10,7 @@
 mod i18n;
 mod core;
 mod emoji;
+mod hotkeys;
 mod icons;
 mod markdown;
 mod media;
@@ -44,6 +45,7 @@ fn main() {
         text_field::bind_keys(cx);
         cx.set_global(prefs::Prefs(store));
         ui::updates::init(cx);
+        ui::hotkeys::init(cx);
 
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, first_size(cx), cx))),
