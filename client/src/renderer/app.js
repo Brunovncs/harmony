@@ -151,6 +151,11 @@ const el = {
   chatFile: $('chat-file'),
   chatAttach: $('chat-attach'),
   chatNote: $('chat-note'),
+  chatSend: $('chat-send'),
+  chatPending: $('chat-pending'),
+  chatPendingThumb: $('chat-pending-thumb'),
+  chatPendingName: $('chat-pending-name'),
+  chatPendingClear: $('chat-pending-clear'),
   soundpad: $('soundpad'),
   chatEmoji: $('chat-emoji'),
   mentionPop: $('mention-pop'),
@@ -3629,10 +3634,13 @@ function renderChannelVideo() {
 
 async function openTextChannel(channel) {
   state.chat.channelId = channel.id;
+  // Whatever was waiting to be sent was waiting to be sent HERE. Carrying
+  // it into the next channel is how a screenshot ends up in the wrong one.
+  setPendingFile(null);
+  applyComposer();
   // Opening it is reading it. The mark means "since I have been looking".
   state.mentioned.delete(channel.id);
   state.chat.searching = false;
-  state.chat.pendingFile = null;
   el.chatName.textContent = `#${channel.name}`;
   el.chatSearch.value = '';
   el.chatSearchClear.hidden = true;
@@ -4230,6 +4238,57 @@ function renderBody(target, body) {
     && (replaced > 0 || PICTOGRAPHIC.test(text));
 }
 
+/**
+ * What goes with the next message, and the chip that says so.
+ *
+ * One function rather than three places setting state.chat.pendingFile,
+ * because the preview URL has to be revoked when it stops being used. An
+ * object URL that nothing revokes holds the whole blob in memory for the
+ * life of the window, and pasting screenshots into a chat box is exactly
+ * the habit that produces a hundred of them.
+ */
+let pendingPreview = null;
+
+/**
+ * Whether there is anything to send.
+ *
+ * The button is disabled rather than hidden: an arrow that comes and goes
+ * as you type moves the two buttons beside it, and a control that moves
+ * while you are reaching for it is worse than one that is briefly grey.
+ */
+function applyComposer() {
+  el.chatSend.disabled = !el.chatInput.value.trim() && !state.chat.pendingFile;
+}
+
+function setPendingFile(file) {
+  state.chat.pendingFile = file ?? null;
+
+  if (pendingPreview) {
+    URL.revokeObjectURL(pendingPreview);
+    pendingPreview = null;
+  }
+
+  el.chatPending.hidden = !file;
+  applyComposer();
+  if (!file) {
+    el.chatPendingThumb.hidden = true;
+    el.chatPendingThumb.removeAttribute('src');
+    el.chatPendingName.textContent = '';
+    return;
+  }
+
+  el.chatPendingName.textContent = file.name;
+  el.chatPendingName.title = file.name;
+  if (file.type.startsWith('image/')) {
+    pendingPreview = URL.createObjectURL(file);
+    el.chatPendingThumb.src = pendingPreview;
+    el.chatPendingThumb.hidden = false;
+  } else {
+    el.chatPendingThumb.hidden = true;
+    el.chatPendingThumb.removeAttribute('src');
+  }
+}
+
 /** The strip of reactions under a message. Drawn only when there are some. */
 function reactionRow(message) {
   const row = document.createElement('div');
@@ -4824,10 +4883,11 @@ async function sendMessage() {
   // Back to one row. Without this the box keeps the height of the message
   // that has just left it.
   growChatInput();
+  applyComposer();
   // The list it was tracking has an empty box now, and nothing it could
   // offer would go anywhere.
   closeMentions();
-  state.chat.pendingFile = null;
+  setPendingFile(null);
   el.chatNote.textContent = '';
 
   try {
@@ -4848,6 +4908,7 @@ async function sendMessage() {
   } catch (err) {
     el.chatNote.textContent = err.message;
     el.chatInput.value = body; // give them their text back
+    applyComposer();
   }
 }
 
@@ -7637,6 +7698,7 @@ el.chatForm.addEventListener('submit', (event) => {
  */
 el.chatInput.addEventListener('input', () => {
   growChatInput();
+  applyComposer();
   updateMentions();
 });
 document.addEventListener('selectionchange', () => {
@@ -7776,10 +7838,41 @@ el.chatAttach.addEventListener('click', () => el.chatFile.click());
 
 el.chatFile.addEventListener('change', () => {
   const file = el.chatFile.files?.[0] ?? null;
-  state.chat.pendingFile = file;
-  el.chatNote.textContent = file ? `Attached ${file.name}. Press Send.` : '';
+  // No note: the chip inside the box says what is attached, and it says it
+  // where the thing will actually be sent from.
+  if (file) setPendingFile(file);
   // Reset, so picking the same file twice in a row still fires 'change'.
   el.chatFile.value = '';
+});
+
+el.chatPendingClear.addEventListener('click', () => {
+  setPendingFile(null);
+  el.chatInput.focus();
+});
+
+/*
+ * Paste a picture straight into the box.
+ *
+ * clipboardData.files rather than walking .items: a screenshot arrives as
+ * one entry in both, and files is already a FileList of exactly the things
+ * that are files. The text half of a paste is left alone -- copying a
+ * picture out of a web page puts BOTH an image and its HTML on the
+ * clipboard, and preventDefault is called only when an image was actually
+ * taken, so pasting ordinary text still pastes ordinary text.
+ *
+ * A pasted image has no name of its own ("image.png", every time), so it
+ * gets a dated one here. Three screenshots in a row would otherwise all be
+ * called the same thing in the folder somebody downloads them to.
+ */
+el.chatInput.addEventListener('paste', (event) => {
+  const file = [...(event.clipboardData?.files ?? [])]
+    .find((f) => f.type.startsWith('image/'));
+  if (!file) return;
+
+  event.preventDefault();
+  const extension = file.type.split('/')[1]?.split('+')[0] ?? 'png';
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '');
+  setPendingFile(new File([file], `pasted-${stamp}.${extension}`, { type: file.type }));
 });
 
 let searchTimer = null;

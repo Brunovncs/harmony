@@ -1859,12 +1859,6 @@ button.danger {
   padding: 0.5rem 0.2rem;
   font-size: 0.85rem;
 }
-.chat-emoji-btn {
-  font-size: 1.1rem;
-  line-height: 1;
-  padding: 0.3rem 0.5rem;
-  font-variant-emoji: emoji;
-}
 .chat-msg img,
 .chat-msg video {
   max-width: min(420px, 100%);
@@ -2061,12 +2055,36 @@ button.danger {
   }
 }
 .chat-form {
-  display: flex;
-  gap: 0.5rem;
   padding-top: 0.5rem;
 }
-.chat-form {
+
+/*
+ * One box, with everything inside it.
+ *
+ * The box carries the border and the background; the textarea inside has
+ * neither. That is the whole trick, and it is why the textarea's own
+ * styling has to be unset rather than adjusted -- the base `textarea` rule
+ * gives every one of them a border, a background and 10px of padding, and
+ * all three would draw a second box inside this one.
+ *
+ * focus-within on the box, because the thing that takes focus is the
+ * textarea and the thing that should show it is the box around it.
+ */
+.composer {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.25rem 0.35rem;
+}
+.composer:focus-within {
+  border-color: var(--accent);
+}
+.composer-row {
+  display: flex;
   align-items: flex-end;
+  gap: 0.15rem;
 }
 /*
  * The box grows with what is in it, up to eight lines.
@@ -2075,14 +2093,98 @@ button.danger {
  * overflow-y: auto so the ninth line scrolls rather than pushing the chat
  * log off the bottom of the window.
  */
-.chat-form textarea {
-  flex: 1;
+.composer textarea {
+  flex: 1 1 auto;
   min-width: 0;
   resize: none;
   overflow-y: auto;
   max-height: 11rem;
-  line-height: 1.35;
+  line-height: 1.4;
   font: inherit;
+  background: none;
+  border: 0;
+  outline: none;
+  padding: 0.45rem 0.35rem;
+  color: var(--text);
+}
+.composer textarea:focus {
+  border: 0;
+}
+
+/*
+ * The controls, which are glyphs with their words collapsed behind them.
+ *
+ * align-self: flex-end so they stay on the bottom line as the box grows --
+ * a plus sign floating in the middle of a six-line draft belongs to
+ * nothing.
+ */
+.composer-btn {
+  flex: 0 0 auto;
+  align-self: flex-end;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 0.35rem 0.4rem;
+  margin: 0.1rem 0;
+  cursor: pointer;
+  font-size: 0;
+  line-height: 1;
+}
+.composer-btn::before {
+  content: attr(data-glyph);
+  font-size: 1.05rem;
+  line-height: 1;
+  font-variant-emoji: text;
+}
+.composer-btn:hover:not(:disabled) {
+  background: rgb(var(--tint-rgb) / 0.12);
+  color: var(--text);
+}
+/* The plus is a drawn character rather than an emoji, so it needs the
+   weight to read as a button at this size. */
+.composer-plus::before {
+  font-size: 1.3rem;
+  font-weight: 300;
+}
+.composer-send::before {
+  color: var(--accent);
+}
+
+/*
+ * What is about to go with the message.
+ *
+ * Inside the box rather than in the note line underneath, because that is
+ * where the thing itself will be: a file you can see attached to the box
+ * you are typing in needs no sentence explaining that it is attached.
+ */
+.composer-file {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.15rem 0.1rem 0.3rem;
+  padding: 0.3rem 0.4rem;
+  border-radius: 8px;
+  background: rgb(var(--tint-rgb) / 0.07);
+  font-size: 0.82rem;
+  min-width: 0;
+}
+.composer-thumb {
+  flex: 0 0 auto;
+  width: 2.4rem;
+  height: 2.4rem;
+  object-fit: cover;
+  border-radius: 5px;
+}
+.composer-filename {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-file .composer-btn {
+  margin-left: auto;
+  align-self: center;
 }
 
 /* ---------- markdown in a message ---------- */

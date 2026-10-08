@@ -431,29 +431,73 @@
             <div id="chat-pinned" class="pinned-strip" hidden></div>
             <div id="chat-log" class="chat-log"></div>
 
+<!--
+              One box, with the controls inside it.
+
+              The box is the .composer div and not the <form>, because the
+              form also has to hold the hidden file input, and a hidden
+              input inside a flex row still counts as a child for `gap`.
+
+              Each button keeps a word as its text and draws its glyph from
+              data-glyph, the same way the message badge and the voice panel
+              do: the words are what a screen reader announces and what the
+              tests press.
+            -->
             <form id="chat-form" class="chat-form">
-              <!--
-                A textarea, not an input, because an input cannot hold a
-                newline at all -- Shift+Enter in one does nothing, whatever
-                the handler says. One row to start with; it grows as it
-                fills and stops at eight.
-              -->
-              <textarea
-                id="chat-input"
-                placeholder="Message"
-                autocomplete="off"
-                maxlength="4000"
-                rows="1"
-              ></textarea>
+              <div class="composer">
+                <!-- What is about to be sent with the message, if anything. -->
+                <div class="composer-file" id="chat-pending" hidden>
+                  <img class="composer-thumb" id="chat-pending-thumb" alt="" hidden />
+                  <span class="composer-filename" id="chat-pending-name"></span>
+                  <button
+                    type="button"
+                    class="composer-btn"
+                    id="chat-pending-clear"
+                    data-glyph="&#10005;"
+                    title="Don't send this"
+                  >Remove</button>
+                </div>
+
+                <div class="composer-row">
+                  <button
+                    type="button"
+                    class="composer-btn composer-plus"
+                    id="chat-attach"
+                    data-glyph="&#43;"
+                    title="Attach a file"
+                  >Attach</button>
+
+                  <!--
+                    A textarea, not an input, because an input cannot hold a
+                    newline at all -- Shift+Enter in one does nothing,
+                    whatever the handler says. One row to start with; it
+                    grows as it fills and stops at eight.
+                  -->
+                  <textarea
+                    id="chat-input"
+                    placeholder="Message"
+                    autocomplete="off"
+                    maxlength="4000"
+                    rows="1"
+                  ></textarea>
+
+                  <button
+                    type="button"
+                    class="composer-btn"
+                    id="chat-emoji"
+                    data-glyph="&#128578;"
+                    title="Emoji"
+                  >Emoji</button>
+                  <button
+                    type="submit"
+                    class="composer-btn composer-send"
+                    id="chat-send"
+                    data-glyph="&#10148;"
+                    title="Send"
+                  >Send</button>
+                </div>
+              </div>
               <input id="chat-file" type="file" hidden />
-              <button
-                type="button"
-                class="ghost chat-emoji-btn"
-                id="chat-emoji"
-                title="Emoji"
-              >&#128512;</button>
-              <button type="button" class="ghost" id="chat-attach">Attach</button>
-              <button type="submit" class="primary small">Send</button>
             </form>
             <p class="muted" id="chat-note"></p>
           </div>
