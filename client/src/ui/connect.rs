@@ -13,8 +13,9 @@ use crate::widgets::*;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window, div, linear_color_stop, linear_gradient,
+    StatefulInteractiveElement, Styled, Task, Window, div, linear_color_stop, linear_gradient,
 };
+use std::time::Duration;
 
 pub struct Connected {
     pub api: Api,
@@ -53,6 +54,8 @@ pub struct ConnectView {
     saved_token: bool,
     /// Adding another server from the rail, rather than signing in to the active one.
     adding: bool,
+    /// Asks the server about itself while the address and its password are typed.
+    probe: Task<()>,
 }
 
 impl EventEmitter<ConnectEvent> for ConnectView {}
@@ -80,10 +83,13 @@ impl ConnectView {
                 f.set_text(&value, cx);
                 f
             });
-            cx.subscribe(&f, |this: &mut ConnectView, _, ev: &TextFieldEvent, cx| match ev {
+            cx.subscribe(&f, |this: &mut ConnectView, f, ev: &TextFieldEvent, cx| match ev {
                 TextFieldEvent::Submit => this.connect(cx),
                 TextFieldEvent::Changed => {
                     this.error = None;
+                    if f == this.server || f == this.door {
+                        this.probe(cx);
+                    }
                     cx.notify();
                 }
             })
@@ -100,7 +106,7 @@ impl ConnectView {
         }
         let owner_key = field(tr!("From the server's install log", "Do log de instalação do servidor"), "", cx);
         let saved_token = !p.session_token.is_empty() && !p.username.is_empty();
-        let this = ConnectView {
+        let mut this = ConnectView {
             focus: cx.focus_handle(),
             server,
             door,
@@ -115,6 +121,7 @@ impl ConnectView {
             health: None,
             saved_token,
             adding,
+            probe: Task::ready(()),
         };
         let first = if p.server_url.is_empty() {
             this.server.clone()
@@ -124,11 +131,40 @@ impl ConnectView {
             this.password.clone()
         };
         first.focus_handle(cx).focus(window, cx);
+        this.probe(cx);
         // Remembered on this computer: go straight in, as a chat app does.
         if this.error.is_none() && saved_token && !p.server_url.is_empty() {
             cx.defer_in(window, |this: &mut ConnectView, _, cx| this.connect(cx));
         }
         this
+    }
+
+    /// Whether the server has accounts and an owner decides which fields the form shows, so it is
+    /// asked as soon as the address (and its password) are in, not only after a failed attempt.
+    fn probe(&mut self, cx: &mut Context<Self>) {
+        let server = self.text(&self.server, cx);
+        let door = self.door.read(cx).text();
+        if server.is_empty() {
+            self.health = None;
+            self.probe = Task::ready(());
+            return;
+        }
+        self.probe = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(400)).await;
+            let api = Api::new();
+            api.set_server(&server, &door);
+            let health = core::run(async move { api.health().await }).await.ok();
+            let _ = this.update(cx, |this, cx| {
+                if let Some(h) = &health
+                    && h.has_accounts == Some(false)
+                    && this.mode == Mode::SignIn
+                {
+                    this.mode = Mode::Register;
+                }
+                this.health = health;
+                cx.notify();
+            });
+        });
     }
 
     fn text(&self, f: &Entity<TextField>, cx: &Context<Self>) -> String {
@@ -416,9 +452,18 @@ impl Render for ConnectView {
                             .child(field(tr!("Username", "Nome de usuário"), &self.nickname, &t))
                             .child(field(tr!("Password", "Senha"), &self.password, &t))
                             .when(register, |d| d.child(field(tr!("Confirm password", "Confirme a senha"), &self.confirm, &t)))
-                            .when(register && needs_owner, |d| d.child(field(tr!("Owner key", "Chave de dono"), &self.owner_key, &t))),
+                            .when(needs_owner, |d| d.child(field(tr!("Owner key", "Chave de dono"), &self.owner_key, &t))),
                     ),
             )
+            .when(needs_owner, |d| {
+                d.child(caption(
+                    tr!(
+                        "This server has no owner yet. Whoever installed it pastes the owner key it printed, on sign-up or sign-in; everyone else leaves it empty.",
+                        "Este servidor ainda não tem dono. Quem instalou cola a chave de dono que ele gerou, ao criar a conta ou ao entrar; os outros deixam em branco."
+                    ),
+                    t.text3,
+                ))
+            })
             .when(sends_in_the_clear(&self.server.read(cx).text()), |d| d.child(clear_text_warning(&t)))
             .child(
                 div()
