@@ -2530,10 +2530,23 @@ button.tiny:disabled {
  * visible without scrolling past everything else, and the two columns collapse
  * back to one when the window is too narrow to hold both.
  */
+/*
+ * `safe center`, not `center`.
+ *
+ * Plain centring on a flex container that can overflow puts the excess on
+ * BOTH sides, and the overflow above the top is unreachable -- there is no
+ * scroll position that reveals it. At 760x620 with the live list stacked
+ * underneath, the card's top sat 137px above the window and the nickname
+ * box with it, while the page reported itself perfectly scrollable.
+ *
+ * `safe` means "centre while it fits, align to the start when it does
+ * not", which is the behaviour anybody writing `center` here assumed they
+ * were getting.
+ */
 .connect-layout {
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: safe center;
+  justify-content: safe center;
   gap: 36px;
   max-width: 100%;
   max-height: 100%;
@@ -2541,8 +2554,21 @@ button.tiny:disabled {
   min-height: 0;
 }
 
+/*
+ * 620px, not 420.
+ *
+ * The two columns above are auto-fit with a 15rem minimum, so they need
+ * 240 + 240 + the gap before a second track can exist. At 420px the card
+ * could never give them that, and the "two columns" layout had been
+ * collapsing to one on every window since the day it was written -- which
+ * is both why it did not look like the sketch and why the form was 923px
+ * tall in a 713px window, scrolling the Connect button under the fold.
+ *
+ * 620 is the largest that still leaves room for the 420px live list beside
+ * it at 1164px, which is the window this app actually opens at.
+ */
 .connect-card {
-  width: 420px;
+  width: min(620px, 100%);
   max-width: 100%;
   /* Never taller than the window; with every optional field showing (password,
      GPU choice, the hybrid-GPU hint) it can be, and then it scrolls itself. */
@@ -2553,7 +2579,9 @@ button.tiny:disabled {
   scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  /* 12, not 16: seven gaps down the card, so four pixels each is 28 of
+     headroom between fitting and scrolling again. */
+  gap: 12px;
   padding: 4px 4px 4px 0;
   flex: none;
 }

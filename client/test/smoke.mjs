@@ -235,11 +235,19 @@ async function run() {
       server: server || '(none configured)',
     };
   `);
+  /*
+   * With no server configured the label makes no claim either way, and that
+   * is the point rather than a gap in the check: nothing has been asked, so
+   * "(not needed)" would be a guess printed as a fact. The suffix is only
+   * required to track the answer once there IS an answer.
+   */
+  const labelFits = passwordUi.server === '(none configured)'
+    ? !passwordUi.label.includes('not needed')
+    : passwordUi.required === null
+      || passwordUi.label.includes('not needed') === !passwordUi.required;
   check(
     'the server password box is always there, and says whether it is needed',
-    passwordUi.hasField && passwordUi.canSet && passwordUi.hidden === false
-      && (passwordUi.required === null
-        || passwordUi.label.includes('not needed') === !passwordUi.required),
+    passwordUi.hasField && passwordUi.canSet && passwordUi.hidden === false && labelFits,
     passwordUi.required === null
       ? `${passwordUi.server} unreachable, label left as-is: "${passwordUi.label}"`
       : `${passwordUi.server} -> "${passwordUi.label}"`,
