@@ -52,8 +52,11 @@ async function run() {
   const view = await cdp.evaluate("return document.querySelector('.view[data-active]')?.id;");
   check('opens on the connect view', view === 'view-connect', view);
 
-  const qualityCount = await cdp.evaluate("return document.getElementById('quality').options.length;");
-  check('boot() populated quality presets', qualityCount === 5, `${qualityCount} options`);
+  const presetCount = await cdp.evaluate(`
+    return document.querySelectorAll('#resolution button').length
+      + document.querySelectorAll('#framerate button').length;
+  `);
+  check('boot() populated resolutions and frame rates', presetCount === 7, `${presetCount} buttons`);
 
   const modulesOk = await cdp.evaluate(
     "return typeof (await import('./webrtc.js')).publish === 'function';",

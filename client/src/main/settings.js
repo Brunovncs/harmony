@@ -27,7 +27,11 @@ const DEFAULTS = {
   // Disk budget for cached avatars, attachments and soundpad clips. Evicted
   // least-recently-used first, never touching pinned or soundpad files.
   mediaCacheMb: 512,
-  quality: 'balanced',
+  // What to stream at. Empty until somebody picks, which makes the renderer
+  // read the old bundled `quality` preset instead if a settings file still
+  // has one -- otherwise 1080p at 30 fps.
+  resolution: '',
+  framerate: 0,
   // 'sharp' keeps resolution and drops frames; 'smooth' does the opposite.
   priority: 'sharp',
   // Last audio input used with a camera or capture card.

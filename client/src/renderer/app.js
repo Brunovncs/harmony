@@ -10,23 +10,64 @@ import {
 } from './gain.js';
 
 // ---------------------------------------------------------------------------
-// Quality presets
+// Stream presets
 //
-// Bitrate ceilings, not targets -- the encoder spends less on a static desktop.
+// Resolution and frame rate are chosen separately, and the bitrate follows
+// from the pair. They used to come bundled as five named presets, which
+// meant 720p at 60 fps -- the obvious choice for a game on a modest upload --
+// simply did not exist.
+//
 // `width: null` means "whatever the source is", which is what you want when
 // sharing a single window.
 // ---------------------------------------------------------------------------
 
-const QUALITY = {
-  low: { label: 'Low — 720p, 30 fps', width: 1280, height: 720, fps: 30, bitrate: 3_000_000 },
-  balanced: { label: 'Balanced — 1080p, 30 fps', width: 1920, height: 1080, fps: 30, bitrate: 8_000_000 },
-  // Doubling the frame rate does not double the bits needed -- consecutive
-  // frames are more alike at 60 fps than at 30 -- so 12 rather than 16, which
-  // also leaves room below the native-resolution presets above.
-  full60: { label: 'Full HD — 1080p, 60 fps', width: 1920, height: 1080, fps: 60, bitrate: 12_000_000 },
-  high: { label: 'High — native, 60 fps', width: null, height: null, fps: 60, bitrate: 15_000_000 },
-  ultra: { label: 'Ultra — native, 60 fps', width: null, height: null, fps: 60, bitrate: 25_000_000 },
+const RESOLUTIONS = {
+  480: { label: '480p', width: 854, height: 480 },
+  720: { label: '720p', width: 1280, height: 720 },
+  1080: { label: '1080p', width: 1920, height: 1080 },
+  native: { label: 'Native', width: null, height: null },
 };
+
+const FRAMERATES = [30, 60, 120];
+
+/*
+ * Bitrate ceilings in Mbit/s, one per frame rate above. Ceilings, not
+ * targets -- the encoder spends less on a static desktop, and congestion
+ * control backs off to whatever the link really has.
+ *
+ * Doubling the frame rate does not double the bits needed -- consecutive
+ * frames are more alike at 60 fps than at 30 -- so each step is about half
+ * again rather than twice. The 1080p and native rows at 30 and 60 are the old
+ * Balanced, Full HD and High presets, which were measured; 120 extends the
+ * same curve.
+ */
+const BITRATE_MBPS = {
+  480: [1.5, 2.5, 4],
+  720: [3, 5, 8],
+  1080: [8, 12, 18],
+  native: [15, 20, 28],
+};
+
+/** What the old bundled presets meant, for a settings file that still has one. */
+const LEGACY_QUALITY = {
+  low: ['720', 30],
+  balanced: ['1080', 30],
+  full60: ['1080', 60],
+  high: ['native', 60],
+  ultra: ['native', 60],
+};
+
+/** The encoder settings for a resolution and frame rate. */
+function streamPreset(resolution, fps) {
+  const res = RESOLUTIONS[resolution] ? resolution : '1080';
+  const index = Math.max(0, FRAMERATES.indexOf(Number(fps)));
+  return {
+    width: RESOLUTIONS[res].width,
+    height: RESOLUTIONS[res].height,
+    fps: FRAMERATES[index],
+    bitrate: BITRATE_MBPS[res][index] * 1_000_000,
+  };
+}
 
 /**
  * What the encoder should give up when it runs short of bandwidth.
@@ -128,7 +169,6 @@ const el = {
   memberMenuName: $('member-menu-name'),
   memberMenuBody: $('member-menu-body'),
   channelsMembers: $('channels-members'),
-  channelsWatch: $('channels-watch'),
   memberList: $('member-list'),
   memberItems: $('member-items'),
   memberCount: $('member-count'),
@@ -230,20 +270,22 @@ const el = {
   peerMenuName: $('peer-menu-name'),
   peerMenuBody: $('peer-menu-body'),
 
+  picker: $('picker'),
   pickerUsername: $('picker-username'),
   pickerBack: $('picker-back'),
   pickerRefresh: $('picker-refresh'),
   tabs: document.querySelectorAll('.tab'),
   sourceGrid: $('source-grid'),
-  quality: $('quality'),
-  priority: $('priority'),
+  resolution: $('resolution'),
+  framerate: $('framerate'),
   fallbackField: $('fallback-field'),
   fallback: $('window-audio-fallback'),
   excludeField: $('exclude-field'),
   excludeApp: $('exclude-app'),
   audioInputField: $('audio-input-field'),
   audioInput: $('audio-input'),
-  liveQuality: $('live-quality'),
+  liveResolution: $('live-resolution'),
+  liveFramerate: $('live-framerate'),
   livePriority: $('live-priority'),
   changeSource: $('change-source'),
   monitorToggle: $('monitor-toggle'),
@@ -502,6 +544,56 @@ function showView(id) {
     if (v.id === id) v.setAttribute('data-active', '');
     else v.removeAttribute('data-active');
   });
+  // The picker is a window over a view, and every way out of it -- going
+  // live, backing out, failing -- ends by naming the view to land on. Closing
+  // it here means none of them can leave it open over the result.
+  if (el.picker.open) el.picker.close();
+}
+
+/** Open the source picker over whatever is on screen. */
+function openPicker() {
+  if (!el.picker.open) el.picker.showModal();
+}
+
+/**
+ * A row of buttons that behaves as one choice.
+ *
+ * Buttons rather than a <select> because there are three or four options and
+ * all of them fit: a select hides the alternatives behind a click to save
+ * space nobody needed.
+ */
+function fillSegmented(container, entries, value) {
+  container.replaceChildren(
+    ...entries.map(([key, label]) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.role = 'radio';
+      button.dataset.value = String(key);
+      button.textContent = label;
+      button.setAttribute('aria-checked', String(String(key) === String(value)));
+      return button;
+    }),
+  );
+}
+
+function segmentedValue(container) {
+  return container.querySelector('[aria-checked="true"]')?.dataset.value ?? null;
+}
+
+function pickSegmented(container, value) {
+  for (const button of container.querySelectorAll('button')) {
+    button.setAttribute('aria-checked', String(button.dataset.value === String(value)));
+  }
+}
+
+/** The preset the picker is set to. */
+function pickerPreset() {
+  return streamPreset(segmentedValue(el.resolution), segmentedValue(el.framerate));
+}
+
+/** The preset the live bar is set to. */
+function livePreset() {
+  return streamPreset(el.liveResolution.value, el.liveFramerate.value);
 }
 
 /**
@@ -559,25 +651,32 @@ async function boot() {
   state.clips.enabled = Boolean(state.settings.clipsEnabled);
   el.clipsEnabled.checked = state.clips.enabled;
 
-  for (const [key, preset] of Object.entries(QUALITY)) {
-    const option = document.createElement('option');
-    option.value = key;
-    option.textContent = preset.label;
-    el.quality.append(option);
-  }
-  el.quality.value = state.settings.quality in QUALITY ? state.settings.quality : 'balanced';
-  el.liveQuality.replaceChildren(...[...el.quality.options].map((o) => o.cloneNode(true)));
-  el.liveQuality.value = el.quality.value;
+  // A settings file from before resolution and frame rate were separate
+  // still says what it wanted, as one of the old bundled presets.
+  const legacy = LEGACY_QUALITY[state.settings.quality] ?? LEGACY_QUALITY.balanced;
+  const resolution = state.settings.resolution in RESOLUTIONS ? state.settings.resolution : legacy[0];
+  const framerate = FRAMERATES.includes(Number(state.settings.framerate))
+    ? Number(state.settings.framerate)
+    : legacy[1];
+  const resolutionEntries = Object.entries(RESOLUTIONS).map(([key, r]) => [key, r.label]);
+  const framerateEntries = FRAMERATES.map((fps) => [fps, `${fps} fps`]);
 
-  for (const [key, mode] of Object.entries(PRIORITY)) {
-    const option = document.createElement('option');
-    option.value = key;
-    option.textContent = mode.label;
-    el.priority.append(option);
+  fillSegmented(el.resolution, resolutionEntries, resolution);
+  fillSegmented(el.framerate, framerateEntries, framerate);
+  for (const [select, entries, value] of [
+    [el.liveResolution, resolutionEntries, resolution],
+    [el.liveFramerate, framerateEntries, framerate],
+  ]) {
+    select.replaceChildren(...entries.map(([key, label]) => new Option(label, String(key))));
+    select.value = String(value);
   }
-  el.priority.value = state.settings.priority in PRIORITY ? state.settings.priority : 'sharp';
-  el.livePriority.replaceChildren(...[...el.priority.options].map((o) => o.cloneNode(true)));
-  el.livePriority.value = el.priority.value;
+
+  // Not in the picker any more -- it is a question about a stream that is
+  // already running, and the live bar is where it can be answered.
+  for (const [key, mode] of Object.entries(PRIORITY)) {
+    el.livePriority.append(new Option(mode.label, key));
+  }
+  el.livePriority.value = state.settings.priority in PRIORITY ? state.settings.priority : 'sharp';
 
   const availability = await harmony.audio.availability();
   state.audioAvailable = availability.available;
@@ -5924,7 +6023,7 @@ async function enterPicker() {
   el.startStream.disabled = true;
   el.startStream.textContent = 'Start streaming';
   el.pickerBack.textContent = 'Cancel';
-  showView('view-picker');
+  openPicker();
   await loadSources();
   updateAudioNote();
 
@@ -6344,18 +6443,19 @@ async function startBroadcast() {
   const source = state.selectedSource;
   if (!source) return;
 
-  const preset = QUALITY[el.quality.value];
-  const priority = PRIORITY[el.priority.value] ?? PRIORITY.sharp;
+  const preset = pickerPreset();
+  const priority = PRIORITY[el.livePriority.value] ?? PRIORITY.sharp;
   const plan = audioPlan();
 
   el.startStream.disabled = true;
   el.startStream.textContent = 'Going live…';
+  // Backing out halfway through going live would tear down a publish that
+  // is still being set up. Escape is routed through this button too.
+  el.pickerBack.disabled = true;
 
-  await harmony.settings.set({
-    quality: el.quality.value,
-    priority: el.priority.value,
-    windowAudioFallback: el.fallback.value,
-  });
+  const resolution = segmentedValue(el.resolution);
+  const framerate = Number(segmentedValue(el.framerate));
+  await harmony.settings.set({ resolution, framerate, windowAudioFallback: el.fallback.value });
 
   try {
     // Video first: picking a capture source is what grants the user activation
@@ -6443,8 +6543,8 @@ async function startBroadcast() {
     renderChannelVideo();
     el.broadcastAudioNote.textContent = audioNote;
     el.broadcastStats.textContent = 'Connecting…';
-    el.liveQuality.value = el.quality.value;
-    el.livePriority.value = el.priority.value;
+    el.liveResolution.value = resolution;
+    el.liveFramerate.value = String(framerate);
     updateMonitorButton();
     /*
      * A channel share goes BACK TO THE CHANNEL rather than to the broadcast
@@ -6481,6 +6581,7 @@ async function startBroadcast() {
   } finally {
     el.startStream.disabled = false;
     el.startStream.textContent = 'Start streaming';
+    el.pickerBack.disabled = false;
   }
 }
 
@@ -6660,6 +6761,11 @@ async function applySourceChange() {
 
   el.startStream.disabled = true;
   el.startStream.textContent = 'Switching…';
+  el.pickerBack.disabled = true;
+  // The live bar is what changeLiveSource reads, so the picker's rows are
+  // carried over to it first.
+  el.liveResolution.value = segmentedValue(el.resolution);
+  el.liveFramerate.value = segmentedValue(el.framerate);
   try {
     await changeLiveSource(source);
     state.changingSource = false;
@@ -6671,12 +6777,13 @@ async function applySourceChange() {
   } finally {
     el.startStream.disabled = false;
     el.startStream.textContent = state.changingSource ? 'Use this source' : 'Start streaming';
+    el.pickerBack.disabled = false;
   }
 }
 
-/** Apply the quality and priority selectors to a stream that is already live. */
+/** Apply the resolution, frame rate and priority selectors to a live stream. */
 async function applyLiveQuality() {
-  const preset = QUALITY[el.liveQuality.value];
+  const preset = livePreset();
   const priority = PRIORITY[el.livePriority.value] ?? PRIORITY.sharp;
   const { videoSender, videoTrack } = state.live;
   if (!videoSender || !videoTrack) return;
@@ -6701,7 +6808,11 @@ async function applyLiveQuality() {
     degradationPreference: priority.degradationPreference,
   });
 
-  await harmony.settings.set({ quality: el.liveQuality.value, priority: el.livePriority.value });
+  await harmony.settings.set({
+    resolution: el.liveResolution.value,
+    framerate: Number(el.liveFramerate.value),
+    priority: el.livePriority.value,
+  });
 }
 
 /**
@@ -6712,7 +6823,7 @@ async function applyLiveQuality() {
  * becomes something else.
  */
 async function changeLiveSource(source) {
-  const preset = QUALITY[el.liveQuality.value];
+  const preset = livePreset();
   const priority = PRIORITY[el.livePriority.value] ?? PRIORITY.sharp;
   const plan = audioPlan(source);
 
@@ -7749,7 +7860,6 @@ el.channelsMembers.addEventListener('click', async () => {
   state.settings = await harmony.settings.get();
 });
 
-el.channelsWatch.addEventListener('click', () => enterMosaic());
 
 el.channelsSignout.addEventListener('click', async () => {
   await leaveVoice({ silent: true }).catch(() => {});
@@ -8416,7 +8526,24 @@ el.startStream.addEventListener('click', () => {
   return startBroadcast();
 });
 
-el.liveQuality.addEventListener('change', applyLiveQuality);
+el.liveResolution.addEventListener('change', applyLiveQuality);
+el.liveFramerate.addEventListener('change', applyLiveQuality);
+
+for (const group of [el.resolution, el.framerate]) {
+  group.addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-value]');
+    if (button) pickSegmented(group, button.dataset.value);
+  });
+}
+
+// Escape, and anything else that would close the window from outside, means
+// the same as Cancel -- which knows where to go back to. Closing the dialog
+// directly would leave a channel share's target set, or a flat share's
+// username claimed, with nothing on screen to finish or undo either.
+el.picker.addEventListener('cancel', (event) => {
+  event.preventDefault();
+  if (!el.pickerBack.disabled) el.pickerBack.click();
+});
 el.livePriority.addEventListener('change', applyLiveQuality);
 
 el.changeSource.addEventListener('click', async () => {
@@ -8426,7 +8553,9 @@ el.changeSource.addEventListener('click', async () => {
   el.startStream.textContent = 'Use this source';
   el.pickerBack.textContent = 'Back to stream';
   el.pickerUsername.textContent = state.session.username;
-  showView('view-picker');
+  pickSegmented(el.resolution, el.liveResolution.value);
+  pickSegmented(el.framerate, el.liveFramerate.value);
+  openPicker();
   await loadSources();
   updateAudioNote();
 });

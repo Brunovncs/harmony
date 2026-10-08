@@ -244,7 +244,6 @@
           <button class="ghost small" id="channels-members" title="Show or hide the member list">
             Members
           </button>
-          <button class="ghost small" id="channels-watch">Watch everyone</button>
           <button class="ghost small" id="channels-signout">Sign out</button>
         </div>
       </header>
@@ -522,58 +521,79 @@
       </div>
     </section>
 
-    <section class="view" id="view-picker">
-      <header class="bar">
-        <div>
-          <h2>Choose what to share</h2>
-          <p class="muted">
-            Streaming as <strong id="picker-username"></strong>. The name is yours until you stop.
-          </p>
-        </div>
-        <button class="ghost" id="picker-back">Cancel</button>
+    <!--
+      The source picker.
+
+      A window over whatever you were doing rather than a screen of its own.
+      It used to be a full view, which took the channel -- the roster, the
+      chat, everybody else's video -- away for the thirty seconds it takes to
+      pick a window, and then had to remember where to send you back to.
+
+      One column, top to bottom, in the order the decisions are made: what
+      kind of thing, which one, what it sounds like, how big and how fast.
+      The audio rows show only for the sources they apply to, so the window
+      never offers a choice that would be ignored.
+    -->
+    <dialog id="picker" class="picker">
+      <header class="picker-head">
+        <h2>Choose what to share</h2>
+        <p class="muted">Streaming as <strong id="picker-username"></strong></p>
       </header>
 
-      <nav class="tabs">
-        <button class="tab" data-kind="screen" data-active>Screens</button>
-        <button class="tab" data-kind="window">Windows</button>
-        <button class="tab" data-kind="camera">Cameras &amp; capture cards</button>
-        <button class="ghost small" id="picker-refresh">Refresh</button>
-      </nav>
-
-      <div class="source-grid" id="source-grid"></div>
-
-      <footer class="bar bottom">
-        <div class="controls">
-          <label class="field inline">
-            <span>Quality</span>
-            <select id="quality"></select>
-          </label>
-          <label class="field inline">
-            <span>Priority</span>
-            <select id="priority"></select>
-          </label>
-          <label class="field inline" id="fallback-field" hidden>
-            <span>If per-app audio is unavailable</span>
-            <select id="window-audio-fallback">
-              <option value="silent">Share silently</option>
-              <option value="system">Use system audio</option>
-            </select>
-          </label>
-          <label class="field inline" id="exclude-field" hidden>
-            <span>Exclude audio from</span>
-            <select id="exclude-app"></select>
-          </label>
-          <label class="field inline" id="audio-input-field" hidden>
-            <span>Audio input</span>
-            <select id="audio-input"></select>
-          </label>
+      <div class="picker-row">
+        <span class="picker-label">Source type</span>
+        <div class="picker-type">
+          <div class="segmented" role="tablist">
+            <button type="button" class="tab" data-kind="screen" data-active>Screens</button>
+            <button type="button" class="tab" data-kind="window">Windows</button>
+            <button type="button" class="tab" data-kind="camera">Cameras &amp; capture cards</button>
+          </div>
+          <button type="button" class="ghost small" id="picker-refresh" title="Look for sources again">
+            Refresh
+          </button>
         </div>
-        <div class="controls">
-          <p class="audio-note" id="audio-note"></p>
-          <button class="primary" id="start-stream" disabled>Start streaming</button>
+      </div>
+
+      <div class="picker-row">
+        <span class="picker-label">Sources</span>
+        <div class="source-grid" id="source-grid"></div>
+      </div>
+
+      <label class="picker-row" id="exclude-field" hidden>
+        <span class="picker-label">Exclude audio</span>
+        <select id="exclude-app"></select>
+      </label>
+      <label class="picker-row" id="fallback-field" hidden>
+        <span class="picker-label">If per-app audio is unavailable</span>
+        <select id="window-audio-fallback">
+          <option value="silent">Share silently</option>
+          <option value="system">Use system audio</option>
+        </select>
+      </label>
+      <label class="picker-row" id="audio-input-field" hidden>
+        <span class="picker-label">Audio input</span>
+        <select id="audio-input"></select>
+      </label>
+
+      <!-- Filled from RESOLUTIONS and FRAMERATES in app.js, so the choices
+           and what they mean to the encoder are written down once. -->
+      <div class="picker-row">
+        <span class="picker-label">Resolution</span>
+        <div class="segmented" id="resolution" role="radiogroup" aria-label="Resolution"></div>
+      </div>
+      <div class="picker-row">
+        <span class="picker-label">Framerate</span>
+        <div class="segmented" id="framerate" role="radiogroup" aria-label="Framerate"></div>
+      </div>
+
+      <footer class="picker-foot">
+        <p class="audio-note" id="audio-note"></p>
+        <div class="picker-buttons">
+          <button type="button" class="ghost" id="picker-back">Cancel</button>
+          <button type="button" class="primary" id="start-stream" disabled>Start streaming</button>
         </div>
       </footer>
-    </section>
+    </dialog>
 
     <!-- ================= Broadcasting ================= -->
     <section class="view" id="view-broadcast">
@@ -585,8 +605,12 @@
         </div>
         <div class="controls">
           <label class="field inline">
-            <span>Quality</span>
-            <select id="live-quality"></select>
+            <span>Resolution</span>
+            <select id="live-resolution"></select>
+          </label>
+          <label class="field inline">
+            <span>Framerate</span>
+            <select id="live-framerate"></select>
           </label>
           <label class="field inline">
             <span>Priority</span>

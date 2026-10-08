@@ -1135,35 +1135,6 @@ async function run() {
     `value="${unplugged.inputValue}", note="${unplugged.note}"`,
   );
 
-  // --- the mosaic is not a one-way door ---------------------------------
-  //
-  // "Watch everyone" from the channels used to leave you on the connect
-  // screen with no way back to the channel you were in.
-  await a.evaluate("document.getElementById('channels-watch').click(); return true;");
-  await waitFor(a, "document.querySelector('.view[data-active]')?.id === 'view-mosaic'", {
-    label: 'the mosaic opening',
-  });
-  const leaveLabel = await a.evaluate(
-    "return document.getElementById('mosaic-leave').textContent;",
-  );
-  check(
-    'the way out of the mosaic says where it goes',
-    leaveLabel === 'Back to channels',
-    `button reads "${leaveLabel}"`,
-  );
-
-  await a.evaluate("document.getElementById('mosaic-leave').click(); return true;");
-  const backToChannels = await waitFor(
-    a,
-    "document.querySelector('.view[data-active]')?.id === 'view-channels'",
-    { label: 'getting back to the channels' },
-  ).catch(() => false);
-  check(
-    'leaving the mosaic returns a signed-in person to their channels',
-    Boolean(backToChannels),
-    backToChannels ? 'back in the channels view' : 'stranded outside the channels',
-  );
-
   // --- leaving ----------------------------------------------------------
   await a.evaluate("document.getElementById('voice-leave').click(); return true;");
   await waitFor(a, "document.getElementById('voice-active').hidden === true", {

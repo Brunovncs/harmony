@@ -134,7 +134,7 @@ async function run() {
 
   const gotPicker = await waitFor(
     bcCdp,
-    "document.querySelector('.view[data-active]')?.id === 'view-picker'",
+    "document.getElementById('picker').open",
     { label: 'source picker' },
   );
   check('free username makes you the broadcaster', gotPicker === true);
@@ -384,7 +384,7 @@ async function run() {
   `);
 
   await bcCdp.evaluate("document.getElementById('change-source').click(); return true;");
-  await waitFor(bcCdp, "document.querySelector('.view[data-active]')?.id === 'view-picker'", {
+  await waitFor(bcCdp, "document.getElementById('picker').open", {
     label: 'picker reopened while live',
   });
   check('the picker reopens without dropping the stream', beforeSwitch.w > 0, `preview was ${beforeSwitch.w}px`);
@@ -427,16 +427,16 @@ async function run() {
   // step, so reading it back proves the whole handler ran without throwing.
   const requalified = await bcCdp.evaluate(`
     const { harmony } = await import('./bridge.js');
-    const q = document.getElementById('live-quality');
-    q.value = 'low';
+    const q = document.getElementById('live-resolution');
+    q.value = '720';
     q.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise(r => setTimeout(r, 2000));
     const saved = await harmony.settings.get();
-    return { preset: q.value, saved: saved.quality };
+    return { preset: q.value, saved: saved.resolution };
   `);
   check(
-    'quality can be changed while live',
-    requalified.preset === 'low' && requalified.saved === 'low',
+    'resolution can be changed while live',
+    requalified.preset === '720' && requalified.saved === '720',
     `select=${requalified.preset}, persisted=${requalified.saved}`,
   );
 
@@ -480,7 +480,7 @@ async function run() {
 
   await bcCdp.evaluate(`${setInput('username', 'windowtest')} return true;`);
   await bcCdp.evaluate("document.getElementById('continue').click(); return true;");
-  await waitFor(bcCdp, "document.querySelector('.view[data-active]')?.id === 'view-picker'", {
+  await waitFor(bcCdp, "document.getElementById('picker').open", {
     label: 'picker for the window share',
   });
 
@@ -728,7 +728,7 @@ async function run() {
   const selfName = 'selfcast';
   await vwCdp.evaluate(`${setInput('username', selfName)} return true;`);
   await vwCdp.evaluate("document.getElementById('continue').click(); return true;");
-  await waitFor(vwCdp, "document.querySelector('.view[data-active]')?.id === 'view-picker'", {
+  await waitFor(vwCdp, "document.getElementById('picker').open", {
     label: 'picker for the self-broadcast',
   });
   await waitFor(vwCdp, "document.querySelectorAll('.source').length > 0", { label: 'sources' });
