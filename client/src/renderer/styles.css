@@ -708,6 +708,18 @@ select:focus {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* The same divider the member list has on its other side, so the middle
+     column reads as framed rather than as hanging off the channels. */
+  border-right: 1px solid rgb(var(--tint-rgb) / 0.08);
+  padding-right: 0.8rem;
+}
+/* Stacked on a narrow window, the channels sit ABOVE the rest, and a line
+   down their right edge would divide them from nothing. */
+@media (max-width: 720px) {
+  .channel-list {
+    border-right: none;
+    padding-right: 0;
+  }
 }
 /* Only the channels scroll. The panel stays put, or "Disconnect" is
    something you have to go looking for while twelve people talk over you. */
