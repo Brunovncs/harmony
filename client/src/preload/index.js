@@ -68,6 +68,8 @@ contextBridge.exposeInMainWorld('harmony', {
     keep: invoke('media:keep'),
     stats: invoke('media:stats'),
     upload: invoke('media:upload'),
+    save: invoke('media:save'),
+    reveal: invoke('media:reveal'),
   },
 
   realtime: {

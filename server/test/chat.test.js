@@ -619,6 +619,81 @@ describe('custom emoji', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Attachment names
+// ---------------------------------------------------------------------------
+
+describe('the name an attachment is saved under', () => {
+  it('keeps an ordinary one', () => {
+    assert.equal(Chat.cleanFilename('holiday photo.png'), 'holiday photo.png');
+  });
+
+  it('KEEPS ONLY THE LAST SEGMENT, on either convention', () => {
+    // The client picks where a download goes; the name must never be able
+    // to choose for it.
+    assert.equal(Chat.cleanFilename('../../.ssh/authorized_keys'), 'authorized_keys');
+    assert.equal(Chat.cleanFilename('C:@@Windows@@System32@@evil.dll'.replaceAll('@@', '\\')),
+      'evil.dll');
+    assert.equal(Chat.cleanFilename('..'), null, 'nothing left is no name at all');
+  });
+
+  it('strips control characters', () => {
+    assert.equal(Chat.cleanFilename('ok@NL@name.txt'.replace('@NL@', '\n')), 'okname.txt');
+  });
+
+  it('gives nothing back for nothing', () => {
+    assert.equal(Chat.cleanFilename(''), null);
+    assert.equal(Chat.cleanFilename('   '), null);
+    assert.equal(Chat.cleanFilename(null), null);
+  });
+});
+
+describe('posting an attachment with a name', () => {
+  it('stores it, and hands it back', async () => {
+    const hash = (await api('/api/uploads', {
+      method: 'POST', raw: PNG, contentType: 'image/png', token: ownerToken,
+    })).body.hash;
+
+    const posted = await api(`/api/channels/${textChannelId}/messages`, {
+      method: 'POST',
+      body: { body: 'look', attachmentHash: hash, attachmentName: 'furret.png' },
+      token: ownerToken,
+    });
+    assert.equal(posted.status, 201);
+    assert.equal(posted.body.message.attachmentName, 'furret.png');
+  });
+
+  it('IS A PROPERTY OF THE POST, NOT OF THE FILE', async () => {
+    // The same bytes deduplicate to one row in uploads, and two people who
+    // post them may well call the file different things.
+    const hash = (await api('/api/uploads', {
+      method: 'POST', raw: PNG, contentType: 'image/png', token: memberToken,
+    })).body.hash;
+    const posted = await api(`/api/channels/${textChannelId}/messages`, {
+      method: 'POST',
+      body: { body: 'same bytes', attachmentHash: hash, attachmentName: 'ferret.png' },
+      token: memberToken,
+    });
+    assert.equal(posted.body.message.attachmentName, 'ferret.png');
+
+    const history = await api(`/api/channels/${textChannelId}/messages`, { token: ownerToken });
+    const names = history.body.messages
+      .filter((m) => m.attachmentHash === hash)
+      .map((m) => m.attachmentName)
+      // An earlier test posted these same bytes with no name at all, which
+      // is exactly the point: one upload, three posts, three answers.
+      .filter(Boolean);
+    assert.deepEqual(names, ['furret.png', 'ferret.png']);
+  });
+
+  it('leaves it null when there is no attachment to name', async () => {
+    const posted = await api(`/api/channels/${textChannelId}/messages`, {
+      method: 'POST', body: { body: 'words', attachmentName: 'nope.png' }, token: ownerToken,
+    });
+    assert.equal(posted.body.message.attachmentName, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Mentions
 // ---------------------------------------------------------------------------
 

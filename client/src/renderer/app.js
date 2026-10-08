@@ -1244,6 +1244,9 @@ async function enterChannels() {
   applyMemberList(state.settings?.showMembers !== false);
   renderOwnAvatar();
   await refreshUsers();
+  // Nothing has happened yet, so nothing else would have called it: the
+  // voice panel, the stage and the member column all start from here.
+  applyStage();
   loadSoundpad();
   loadEmojis();
   // Before anybody clicks, not on the click. See scheduleEmojiGrid.
@@ -4176,6 +4179,89 @@ async function uploadCustomEmoji(file) {
   }
 }
 
+/**
+ * An attachment: the thing itself, and a line saying what it is called
+ * with a button to keep it.
+ *
+ * The name line is there for every kind, including pictures. A picture you
+ * can see still has a filename, and the filename is what you are about to
+ * save it as.
+ *
+ * There used to be an <a href="harmony://app/media/..."> for anything that
+ * was not image, video or audio. That was a bug as well as a gap: nothing
+ * guards will-navigate, so clicking it navigated the RENDERER to the PDF
+ * and replaced the entire app with it, with no way back but a restart.
+ * Nothing here is a link.
+ */
+function attachmentNode(message) {
+  // harmony://app/media/<hash> -- same-origin, so the CSP allows it, and the
+  // main process downloads and verifies it on first use. See media-cache.js.
+  const url = harmony.mediaUrl(message.attachmentHash);
+  const wrap = document.createElement('span');
+  wrap.className = 'attachment';
+
+  if (message.mediaType === 'image') {
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = message.attachmentName ?? 'attachment';
+    img.loading = 'lazy';
+    wrap.append(img);
+  } else if (message.mediaType === 'video') {
+    const video = document.createElement('video');
+    video.src = url;
+    video.controls = true;
+    wrap.append(video);
+  } else if (message.mediaType === 'audio') {
+    const audio = document.createElement('audio');
+    audio.src = url;
+    audio.controls = true;
+    wrap.append(audio);
+  }
+
+  const bar = document.createElement('span');
+  bar.className = 'attachment-bar';
+
+  const name = document.createElement('span');
+  name.className = 'attachment-name';
+  // Messages posted before the server stored names have none, and saying
+  // so is better than inventing one -- the save dialog will suggest
+  // something derived from the content type.
+  name.textContent = message.attachmentName ?? 'attachment';
+  name.title = name.textContent;
+
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'ghost tiny attachment-save';
+  save.textContent = '\u2b07';
+  save.title = 'Save a copy';
+  save.addEventListener('click', async () => {
+    save.disabled = true;
+    try {
+      const result = await harmony.media.save(
+        message.attachmentHash, message.attachmentName ?? '',
+      );
+      // Cancelling a save dialog is an answer, not a failure.
+      if (!result.saved) return;
+      el.chatNote.textContent = `Saved ${result.name}.`;
+      // The one useful thing to do next, offered where the answer is.
+      const show = document.createElement('button');
+      show.type = 'button';
+      show.className = 'ghost tiny';
+      show.textContent = 'Show';
+      show.addEventListener('click', () => harmony.media.reveal(result.path));
+      el.chatNote.append(' ', show);
+    } catch (err) {
+      showChannelsError(err.message);
+    } finally {
+      save.disabled = false;
+    }
+  });
+
+  bar.append(name, save);
+  wrap.append(bar);
+  return wrap;
+}
+
 /** One message row. Attachments are rendered from the local cache. */
 function messageRow(message) {
   const row = document.createElement('div');
@@ -4199,33 +4285,7 @@ function messageRow(message) {
     row.setAttribute('data-mentions-me', '');
   }
 
-  if (message.attachmentHash) {
-    // harmony://app/media/<hash> -- same-origin, so the CSP allows it, and the
-    // main process downloads and verifies it on first use. See media-cache.js.
-    const url = harmony.mediaUrl(message.attachmentHash);
-    if (message.mediaType === 'image') {
-      const img = document.createElement('img');
-      img.src = url;
-      img.alt = 'attachment';
-      img.loading = 'lazy';
-      text.append(img);
-    } else if (message.mediaType === 'video') {
-      const video = document.createElement('video');
-      video.src = url;
-      video.controls = true;
-      text.append(video);
-    } else if (message.mediaType === 'audio') {
-      const audio = document.createElement('audio');
-      audio.src = url;
-      audio.controls = true;
-      text.append(audio);
-    } else {
-      const link = document.createElement('a');
-      link.href = url;
-      link.textContent = 'attachment';
-      text.append(document.createElement('br'), link);
-    }
-  }
+  if (message.attachmentHash) text.append(attachmentNode(message));
 
   const when = document.createElement('span');
   when.className = 'when';
@@ -4391,14 +4451,18 @@ async function sendMessage() {
 
   try {
     let attachmentHash = null;
+    let attachmentName = null;
     if (file) {
       el.chatNote.textContent = `Uploading ${file.name}\u2026`;
       const bytes = new Uint8Array(await file.arrayBuffer());
       const upload = await harmony.media.upload(state.server, bytes, file.type);
       attachmentHash = upload.hash;
+      attachmentName = file.name;
       el.chatNote.textContent = '';
     }
-    await harmony.api.postMessage(state.server, state.chat.channelId, { body, attachmentHash });
+    await harmony.api.postMessage(state.server, state.chat.channelId, {
+      body, attachmentHash, attachmentName,
+    });
     // The server echoes it back over the socket, so nothing is appended here.
   } catch (err) {
     el.chatNote.textContent = err.message;

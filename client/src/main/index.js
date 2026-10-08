@@ -1,4 +1,7 @@
-const { app, BrowserWindow, desktopCapturer, ipcMain, net, protocol, session, shell } = require('electron');
+const {
+  app, BrowserWindow, desktopCapturer, dialog, ipcMain, net, protocol, session, shell,
+} = require('electron');
+const fsp = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 
@@ -369,6 +372,72 @@ handle('media:keep', (_e, hashes) => {
   return true;
 });
 handle('media:stats', () => mediaCache?.stats() ?? null);
+
+/**
+ * What to call a file whose only real name is its own hash.
+ *
+ * Every message posted from v9 onwards carries the name it was uploaded
+ * under; everything older has nothing, and "9f86d081.png" is still better
+ * than "9f86d081" with no extension, which some systems will refuse to
+ * open at all.
+ */
+const EXTENSIONS = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'video/mp4': 'mp4',
+  'video/webm': 'webm',
+  'audio/mpeg': 'mp3',
+  'audio/ogg': 'ogg',
+  'audio/wav': 'wav',
+  'audio/webm': 'weba',
+  'application/pdf': 'pdf',
+  'text/plain': 'txt',
+};
+
+/**
+ * Save an attachment somewhere the person chooses.
+ *
+ * A dialog, unlike a clip -- which goes straight to a folder because the
+ * point of a clip is to catch something before it is gone. An attachment
+ * is already saved; downloading one is a deliberate act with a destination
+ * in mind, and silently dropping it in Downloads would be the wrong guess
+ * often enough to be annoying.
+ *
+ * The bytes come from the media cache, so a file already on screen is
+ * already on disk and the save is a copy. The renderer never sees a path.
+ */
+handle('media:save', async (_e, hash, suggestedName) => {
+  if (!HASH_RE.test(String(hash ?? ''))) throw new Error('not a content hash');
+  if (!mediaCache || !mediaServer) throw new Error('not connected to a server');
+
+  const { path: file, contentType } = await mediaCache.get(
+    hash, (h) => api.fetchUpload(mediaServer, h),
+  );
+
+  // path.basename as well as the server's own cleaning, because this is the
+  // last point before a path is built and it is the only one that knows
+  // which kind of machine it is running on.
+  const fallback = `${hash.slice(0, 12)}.${EXTENSIONS[contentType] ?? 'bin'}`;
+  const name = path.basename(String(suggestedName ?? '').trim()) || fallback;
+
+  const { canceled, filePath } = await dialog.showSaveDialog(win ?? undefined, {
+    title: 'Save attachment',
+    defaultPath: path.join(app.getPath('downloads'), name),
+    properties: ['createDirectory', 'showOverwriteConfirmation'],
+  });
+  if (canceled || !filePath) return { saved: false };
+
+  await fsp.copyFile(file, filePath);
+  return { saved: true, path: filePath, name: path.basename(filePath) };
+});
+
+/** Show a saved file where it landed. */
+handle('media:reveal', (_e, file) => {
+  shell.showItemInFolder(String(file));
+  return true;
+});
 handle('media:upload', (_e, server, bytes, contentType) =>
   api.uploadFile(server, bytes, contentType));
 

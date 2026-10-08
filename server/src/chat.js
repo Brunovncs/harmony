@@ -154,8 +154,9 @@ export class Chat {
 
     this.#q = {
       insertMessage: db.prepare(
-        'INSERT INTO messages (channel_id, user_id, body, attachment_hash, media_type, created_at) '
-        + 'VALUES (?, ?, ?, ?, ?, ?)',
+        'INSERT INTO messages '
+        + '(channel_id, user_id, body, attachment_hash, attachment_name, media_type, created_at) '
+        + 'VALUES (?, ?, ?, ?, ?, ?, ?)',
       ),
       insertFts: db.prepare(
         'INSERT INTO messages_fts (rowid, body, nickname, media_type) VALUES (?, ?, ?, ?)',
@@ -317,7 +318,26 @@ export class Chat {
    * produces a search index that is quietly wrong, which is far harder to
    * notice than a function that throws.
    */
-  post({ channelId, user, body = '', attachmentHash = null }) {
+  /**
+   * A filename that can be written to disk and cannot escape a directory.
+   *
+   * Only the last segment is kept, so "../../.ssh/authorized_keys" becomes
+   * "authorized_keys" -- the client picks where a download goes, but the
+   * name must never be able to choose for it. Separators are stripped on
+   * BOTH conventions, because the machine that uploads and the machine
+   * that downloads need not be the same kind.
+   */
+  static cleanFilename(raw) {
+    const value = String(raw ?? '').split(/[\\/]/).pop() ?? '';
+    const safe = value
+      .replace(/[\u0000-\u001f\u007f]/g, '')
+      .replace(/^\.+/, '')
+      .trim()
+      .slice(0, 120);
+    return safe || null;
+  }
+
+  post({ channelId, user, body = '', attachmentHash = null, attachmentName = null }) {
     const text = String(body ?? '').slice(0, 4000);
     if (!text.trim() && !attachmentHash) return { ok: false, error: 'empty_message' };
 
@@ -331,7 +351,13 @@ export class Chat {
     this.#db.exec('BEGIN');
     try {
       const info = this.#q.insertMessage.run(
-        channelId, user.id, text, attachmentHash, mediaType, Date.now(),
+        channelId,
+        user.id,
+        text,
+        attachmentHash,
+        attachmentHash ? Chat.cleanFilename(attachmentName) : null,
+        mediaType,
+        Date.now(),
       );
       const id = Number(info.lastInsertRowid);
       this.#q.insertFts.run(id, text, user.nickname, mediaType ?? '');
@@ -799,6 +825,7 @@ export const publicMessage = (m, reactions = [], mentions = null) => (m ? {
   nickname: m.nickname,
   body: m.body,
   attachmentHash: m.attachment_hash ?? null,
+  attachmentName: m.attachment_name ?? null,
   mediaType: m.media_type ?? null,
   pinned: Boolean(m.pinned),
   reactions,

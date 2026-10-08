@@ -1812,6 +1812,46 @@ button.danger {
   display: block;
   margin-top: 0.25rem;
 }
+
+/*
+ * An attachment, and the line under it saying what it is called.
+ *
+ * The name is shown for pictures too. A picture you can already see still
+ * has a filename, and the filename is what you are about to save it as --
+ * which is the only moment anybody wants to know it.
+ */
+.attachment {
+  display: block;
+  margin-top: 0.25rem;
+  max-width: min(420px, 100%);
+}
+.attachment-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.15rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  min-width: 0;
+}
+.attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Quiet until the row is hovered, like the other per-message controls --
+   a column of download arrows reads as a list of things to do. */
+.attachment-save {
+  flex: 0 0 auto;
+  opacity: 0.45;
+  transition: opacity 90ms ease-out;
+}
+.chat-msg:hover .attachment-save,
+.attachment-save:focus-visible,
+.attachment-save:disabled {
+  opacity: 1;
+}
 .chat-msg[data-pinned] {
   box-shadow: inset 3px 0 0 var(--accent);
 }

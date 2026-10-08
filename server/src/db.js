@@ -258,6 +258,27 @@ const MIGRATIONS = [
       CREATE INDEX message_reactions_message ON message_reactions(message_id);
     `);
   },
+
+  /*
+   * v9 -- what the attachment was called.
+   *
+   * Uploads are content-addressed, so the only name a file had on disk was
+   * its own hash. That was fine while the only thing anybody did with an
+   * attachment was look at it; the moment you can save one, every download
+   * is called 9f86d081...  and a folder of them is unreadable.
+   *
+   * On the MESSAGE, not on the upload: the same bytes posted twice
+   * deduplicate to one row in uploads, and the two people who posted them
+   * may well have called the file different things. The name belongs to
+   * the act of posting, not to the content.
+   *
+   * Nullable, and every message already here keeps a null -- those fall
+   * back to a name derived from the content type, which is the best that
+   * can honestly be said about them.
+   */
+  (db) => {
+    db.exec('ALTER TABLE messages ADD COLUMN attachment_name TEXT');
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

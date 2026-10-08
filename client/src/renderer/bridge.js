@@ -111,6 +111,8 @@ export const harmony = {
     keep: lift(raw.media.keep),
     stats: lift(raw.media.stats),
     upload: lift(raw.media.upload),
+    save: lift(raw.media.save),
+    reveal: lift(raw.media.reveal),
   },
 
   /**

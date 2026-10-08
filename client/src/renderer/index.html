@@ -269,7 +269,16 @@
             string as the label, in setButtonLabel, so a button cannot end
             up saying "Stop camera" and offering to start one.
           -->
-          <div class="voice-panel" id="voice-panel">
+          <!--
+            hidden until there is a call, and it has to be hidden HERE.
+
+            applyStage() owns it after that, but applyStage only runs when
+            something happens -- joining, leaving, opening a channel. On a
+            fresh sign-in nothing has happened yet, so the panel sat there
+            saying "Voice connected" with a camera button and a hang-up,
+            for a person who had not joined anything.
+          -->
+          <div class="voice-panel" id="voice-panel" hidden>
             <div class="voice-panel-head">
               <span class="voice-signal" id="voice-signal" role="img"
                     aria-label="Connection quality"></span>
