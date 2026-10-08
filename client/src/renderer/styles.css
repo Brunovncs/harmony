@@ -1229,10 +1229,31 @@ select:focus {
   border-top: 1px solid rgb(var(--tint-rgb) / 0.1);
   font-size: 0.85rem;
 }
-.voice-devices select {
-  max-width: 14rem;
+/*
+ * Three equal columns across the whole dialog (wrapping on a narrow one),
+ * label over select, both
+ * starting at the same left edge.
+ *
+ * Specificity is the reason for the long selector. In the settings dialog
+ * .ask .field (0,2,0) stacks each label over its select but keeps
+ * .field.inline's align-items: center -- so every label sat centred above a
+ * select that started at the left, and the three stopped two thirds of the
+ * way across. (0,3,0) is what it takes to say otherwise.
+ */
+.voice-devices .field.inline {
+  flex: 1 1 10rem;
+  flex-direction: column;
+  align-items: stretch;
+  min-width: 0;
+  margin-bottom: 0;
+}
+.voice-devices .field.inline select {
+  width: 100%;
+  max-width: none;
 }
 #voice-device-note {
+  /* Its own line under the three, rather than squeezing in as a fourth. */
+  flex: 1 0 100%;
   font-size: 0.78rem;
   color: var(--warn);
 }
