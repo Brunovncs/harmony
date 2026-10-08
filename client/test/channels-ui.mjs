@@ -227,10 +227,10 @@ async function run() {
   const sidebar = await cdp.evaluate(`
     const rows = [...document.querySelectorAll('#channel-items li.channel-row')];
     return rows.map((li) => ({
-      // The span right after .kind: .row-tools is a span as well, so
-      // span:not(.kind) would pick the admin buttons up with the name.
       name: li.querySelector('.channel-name')?.textContent,
-      tools: li.querySelectorAll('.row-tools button').length,
+      // Nothing admin-shaped in the row itself any more; it is all behind
+      // a right-click. A row with buttons in it is the regression.
+      buttons: li.querySelectorAll('button').length,
       draggable: li.draggable,
     }));
   `);
@@ -240,12 +240,45 @@ async function run() {
     sidebar.map((r) => r.name).join(', '),
   );
   check(
-    'each row carries its two admin controls',
-    // Two, not four: the up/down arrows are gone. Dragging replaced them,
-    // and keeping both would be two code paths writing the same positions.
-    sidebar.every((r) => r.tools === 2),
-    `${sidebar[0].tools} buttons per row`,
+    'a channel row carries no buttons of its own',
+    sidebar.every((r) => r.buttons === 0),
+    `${sidebar[0].buttons} buttons in the first row`,
   );
+
+  /*
+   * The admin controls, where they live now.
+   *
+   * A real contextmenu event rather than a click on something: the menu
+   * is opened by the browser's own gesture and there is no other way in,
+   * so a test that reached the handler any other way would prove nothing
+   * about whether anybody can.
+   */
+  await cdp.evaluate(`
+    const row = document.querySelector('#channel-items li.channel-row');
+    row.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true, clientX: 60, clientY: 120,
+    }));
+    return true;
+  `);
+  await waitFor(cdp, "!document.getElementById('row-menu').hidden", {
+    label: 'the channel menu',
+  });
+  const rowMenu = await cdp.evaluate(`
+    return {
+      name: document.getElementById('row-menu-name').textContent,
+      items: [...document.querySelectorAll('#row-menu-body button')]
+        .map((b) => b.textContent),
+    };
+  `);
+  check(
+    'right-clicking a channel offers rename and delete',
+    rowMenu.items.length === 2 && rowMenu.name === '#general',
+    `${rowMenu.name}: ${rowMenu.items.join(', ')}`,
+  );
+  await cdp.evaluate(`
+    document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    return true;
+  `);
   check(
     'an admin can pick a row up',
     sidebar.every((r) => r.draggable === true),
@@ -336,8 +369,19 @@ async function run() {
 
   // Deleting the group must NOT delete gamenight with it.
   await cdp.evaluate(`
-    const tools = document.querySelectorAll('#channel-items li.channel-group .row-tools button');
-    tools[tools.length - 1].click();
+    document.querySelector('#channel-items li.channel-group').dispatchEvent(
+      new MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true, clientX: 60, clientY: 160,
+      }),
+    );
+    return true;
+  `);
+  await waitFor(cdp, "!document.getElementById('row-menu').hidden", {
+    label: 'the group menu',
+  });
+  await cdp.evaluate(`
+    const items = [...document.querySelectorAll('#row-menu-body button')];
+    items[items.length - 1].click();
     return true;
   `);
   await dialogOpen(cdp);

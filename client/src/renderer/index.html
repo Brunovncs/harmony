@@ -781,6 +781,21 @@
     </dialog>
 
     <!--
+      What you get when you right-click a channel or a group heading.
+
+      The same two things that used to be a pencil and a cross on every
+      row. A sidebar of twenty channels had forty buttons in it, every one
+      of them an admin action, sitting next to the name you were trying to
+      read and in front of the one you were trying to click.
+    -->
+    <div class="peer-menu" id="row-menu" hidden>
+      <div class="peer-menu-head">
+        <strong id="row-menu-name"></strong>
+      </div>
+      <div id="row-menu-body"></div>
+    </div>
+
+    <!--
       What you get when you right-click somebody in the member list.
 
       Not the peer menu: that one is about a voice connection -- volume,

@@ -809,14 +809,6 @@ select:focus {
 }
 /* The tools only once you are pointing at the heading: a column of
    uppercase labels each wearing two buttons is mostly buttons. */
-.channel-group .row-tools {
-  opacity: 0;
-}
-.channel-group:hover .row-tools,
-.channel-group:focus-within .row-tools {
-  opacity: 1;
-}
-
 /* ---------- dragging a channel, or a whole group ---------- */
 
 .channel-row[data-dragging],
@@ -3237,10 +3229,10 @@ button.danger {
 
 /* ---------- small admin controls ---------- */
 
-.row-tools {
-  margin-left: auto;
-  display: flex;
-  gap: 0.15rem;
+/* A heading with no name is a bar of empty space; the row menu's head has
+   only a name in it. */
+#row-menu .peer-menu-head {
+  padding-bottom: 0.35rem;
 }
 button.tiny {
   padding: 0 0.3rem;

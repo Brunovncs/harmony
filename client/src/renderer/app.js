@@ -120,6 +120,9 @@ const el = {
   serverErrorLine: $('server-error'),
   serverNote: $('server-note'),
   serverCancel: $('server-cancel'),
+  rowMenu: $('row-menu'),
+  rowMenuName: $('row-menu-name'),
+  rowMenuBody: $('row-menu-body'),
   memberMenu: $('member-menu'),
   memberMenuAvatar: $('member-menu-avatar'),
   memberMenuName: $('member-menu-name'),
@@ -1356,16 +1359,49 @@ async function editChannel(channel) {
 }
 
 /** A small admin button that must not also trigger the row's own click. */
-function rowButton(label, title, onClick) {
-  const button = document.createElement('button');
-  button.className = 'ghost tiny';
-  button.textContent = label;
-  button.title = title;
-  button.addEventListener('click', (event) => {
-    event.stopPropagation();
-    onClick();
-  });
-  return button;
+function closeRowMenu() {
+  el.rowMenu.hidden = true;
+}
+
+/**
+ * A little menu of things to do to a row in the sidebar.
+ *
+ * One function for channels and for group headings, because the two
+ * offered the same two things and differed only in their wording. It takes
+ * the items rather than the subject: what can be done to a group is not a
+ * variation on what can be done to a channel, and a function that took one
+ * and branched would be two functions sharing a name.
+ *
+ * @param {string} label  what the menu is about, shown at the top
+ * @param {Array<{label: string, title: string, run: Function, danger?: boolean}>} items
+ * @param {MouseEvent} event
+ */
+function openRowMenu(label, items, event) {
+  closePeerMenu();
+  closeMemberMenu();
+
+  el.rowMenuName.textContent = label;
+  el.rowMenuBody.replaceChildren(...items.map((item) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `ghost menu-item${item.danger ? ' danger' : ''}`;
+    button.textContent = item.label;
+    button.title = item.title;
+    button.addEventListener('click', () => {
+      closeRowMenu();
+      item.run();
+    });
+    return button;
+  }));
+
+  // Shown off-screen first: a hidden element has no size, and the clamp
+  // below needs one. The same trick as the other two menus.
+  el.rowMenu.style.left = '-9999px';
+  el.rowMenu.style.top = '0px';
+  el.rowMenu.hidden = false;
+  const box = el.rowMenu.getBoundingClientRect();
+  el.rowMenu.style.left = `${Math.max(8, Math.min(event.clientX, window.innerWidth - box.width - 8))}px`;
+  el.rowMenu.style.top = `${Math.max(8, Math.min(event.clientY, window.innerHeight - box.height - 8))}px`;
 }
 
 /*
@@ -1544,23 +1580,45 @@ function channelNodes(channel) {
    */
 
   if (isAdmin()) {
-    const tools = document.createElement('span');
-    tools.className = 'row-tools';
-    tools.append(
-      rowButton('\u270E', 'Rename or set a password', () => editChannel(channel)),
-      rowButton('\u2715', 'Delete this channel', async () => {
-        if (!await askConfirm(`Delete #${channel.name}?`, {
-          text: 'Everything written in it goes too. This cannot be undone.',
-          okLabel: 'Delete',
-        })) return;
-        try {
-          await harmony.api.deleteChannel(state.server, channel.id);
-        } catch (err) {
-          showChannelsError(err.message);
-        }
-      }),
-    );
-    li.append(tools);
+    /*
+     * Rename and delete, on right-click rather than on the row.
+     *
+     * They used to be a pencil and a cross drawn into every row, which on
+     * a sidebar of twenty channels is forty buttons -- all of them admin
+     * actions, all of them beside the name you are reading and in front of
+     * the name you are trying to click. A menu costs one more gesture to
+     * reach something nobody does twice a week.
+     */
+    li.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      // The hash only for a text channel: a voice one is a speaker in the
+      // sidebar and calling it #voice here would name it something it is
+      // not called anywhere else.
+      openRowMenu(channel.kind === 'text' ? `#${channel.name}` : channel.name, [
+        {
+          label: 'Rename or set a password',
+          title: 'Change the name, or put a password on it',
+          run: () => editChannel(channel),
+        },
+        {
+          label: 'Delete this channel',
+          title: 'Removes the channel and everything written in it',
+          danger: true,
+          run: async () => {
+            if (!await askConfirm(`Delete #${channel.name}?`, {
+              text: 'Everything written in it goes too. This cannot be undone.',
+              okLabel: 'Delete',
+            })) return;
+            try {
+              await harmony.api.deleteChannel(state.server, channel.id);
+            } catch (err) {
+              showChannelsError(err.message);
+            }
+          },
+        },
+      ], event);
+    });
 
     // The up/down arrows are gone: dragging replaced them, and keeping
     // both would mean two code paths writing the same positions.
@@ -1679,37 +1737,47 @@ function groupNode(group) {
   });
 
   if (isAdmin()) {
-    const tools = document.createElement('span');
-    tools.className = 'row-tools';
-    tools.append(
-      rowButton('\u270E', 'Rename this group', async () => {
-        const answer = await ask({
-          title: `Rename "${group.name}"`,
-          okLabel: 'Save',
-          fields: [{ name: 'name', label: 'Name', value: group.name, required: true }],
-        });
-        if (!answer?.name) return;
-        try {
-          await harmony.api.renameGroup(state.server, group.id, answer.name);
-        } catch (err) {
-          showChannelsError(err.message);
-        }
-      }),
-      rowButton('\u2715', 'Delete this group', async () => {
-        if (!await askConfirm(`Delete the group "${group.name}"?`, {
-          // Worth saying plainly: every other delete in this app takes its
-          // contents with it, and this one deliberately does not.
-          text: 'The channels in it stay, and move back to the top of the list.',
-          okLabel: 'Delete the group',
-        })) return;
-        try {
-          await harmony.api.deleteGroup(state.server, group.id);
-        } catch (err) {
-          showChannelsError(err.message);
-        }
-      }),
-    );
-    li.append(tools);
+    li.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openRowMenu(group.name, [
+        {
+          label: 'Rename this group',
+          title: 'Change what the heading says',
+          run: async () => {
+            const answer = await ask({
+              title: `Rename "${group.name}"`,
+              okLabel: 'Save',
+              fields: [{ name: 'name', label: 'Name', value: group.name, required: true }],
+            });
+            if (!answer?.name) return;
+            try {
+              await harmony.api.renameGroup(state.server, group.id, answer.name);
+            } catch (err) {
+              showChannelsError(err.message);
+            }
+          },
+        },
+        {
+          label: 'Delete this group',
+          title: 'The channels in it stay',
+          danger: true,
+          run: async () => {
+            if (!await askConfirm(`Delete the group "${group.name}"?`, {
+              // Worth saying plainly: every other delete in this app takes
+              // its contents with it, and this one deliberately does not.
+              text: 'The channels in it stay, and move back to the top of the list.',
+              okLabel: 'Delete the group',
+            })) return;
+            try {
+              await harmony.api.deleteGroup(state.server, group.id);
+            } catch (err) {
+              showChannelsError(err.message);
+            }
+          },
+        },
+      ], event);
+    });
 
     li.draggable = true;
     li.addEventListener('dragstart', (event) => {
@@ -7657,9 +7725,20 @@ document.addEventListener('pointerdown', (event) => {
   if (el.memberMenu.contains(event.target)) return;
   closeMemberMenu();
 }, true);
+document.addEventListener('pointerdown', (event) => {
+  if (el.rowMenu.hidden) return;
+  if (el.rowMenu.contains(event.target)) return;
+  closeRowMenu();
+}, true);
+// Scrolling the list out from under it would leave it pointing at nothing.
+el.channelItems.addEventListener('scroll', () => closeRowMenu());
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') closeMemberMenu();
+  if (event.key === 'Escape') {
+    closeMemberMenu();
+    closeRowMenu();
+  }
 });
+window.addEventListener('blur', () => closeRowMenu());
 el.memberItems.addEventListener('scroll', () => closeMemberMenu());
 window.addEventListener('blur', () => closeMemberMenu());
 
