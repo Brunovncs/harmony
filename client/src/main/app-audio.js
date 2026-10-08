@@ -17,18 +17,34 @@ const { resolveWindowPid } = require('./sources');
 
 const FORMAT = { sampleRate: 48000, channels: 2, bitsPerSample: 16 };
 
+/*
+ * Loaded on first use, not when this module is required.
+ *
+ * index.js requires this file before the window exists, so a top-level
+ * require put a native DLL load -- and the antivirus scan Windows does on
+ * loading one from a fresh path -- between double-clicking the app and
+ * seeing it. Nothing needs the addon until somebody asks whether per-app
+ * audio is available, which the renderer does after it has painted.
+ */
 let addon = null;
 let loadError = null;
-try {
-  addon = require('loopback-capture');
-} catch (err) {
-  loadError = err.message;
+let loaded = false;
+
+function loadAddon() {
+  if (loaded) return addon;
+  loaded = true;
+  try {
+    addon = require('loopback-capture');
+  } catch (err) {
+    loadError = err.message;
+  }
+  return addon;
 }
 
 let capture = null;
 
 function availability() {
-  if (addon) return { available: true, reason: null };
+  if (loadAddon()) return { available: true, reason: null };
   if (process.platform !== 'win32') {
     return { available: false, reason: `Per-application audio is Windows-only (this is ${process.platform}).` };
   }

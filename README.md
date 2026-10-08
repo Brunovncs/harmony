@@ -255,8 +255,8 @@ one stream per tile you open.
   no TURN relay, no third party, no per-gigabyte bill.
 - **A connection test** on the connect screen walks health → session → STUN → SDP
   → media and tells you which step failed.
-- **One portable .exe** of about 82 MB, no installer and no admin rights. Enter a
-  server address once and it is remembered.
+- **A per-user installer**, no admin rights and no UAC prompt, that opens in a
+  fraction of a second. Enter a server address once and it is remembered.
 
 ---
 
@@ -283,7 +283,9 @@ perfectly and then play nothing.
 architecture.
 
 **Client:** `cd client && npm install && npm run build` gives you
-`dist/Harmony-2.3.0-portable.exe`.
+`dist/Harmony-3.0.0-setup.exe` in about 12 seconds. `npm run build:release`
+takes about 75 seconds and makes a smaller installer (~86 MB instead of ~108 MB),
+for the copy you hand out.
 
 The full procedure — TLS on a line whose ISP blocks 80 and 443, dynamic IPs,
 packaging, tests and a troubleshooting table — is in
@@ -520,11 +522,11 @@ If you go measuring this yourself, do not trust a single early read.
 </details>
 
 <details>
-<summary><b>Almost all of the 82 MB download is Chromium, not this app</b></summary>
+<summary><b>Almost all of the download is Chromium, not this app</b></summary>
 
 Harmony's own code plus its two runtime dependencies is under a megabyte, so
 shrinking the build means shrinking what Electron ships. Three measures took the
-portable .exe from 95.7 MB to 82.2 MB:
+2.x portable .exe from 95.7 MB to 82.2 MB:
 
 | Change | Saved (uncompressed) |
 | --- | --- |

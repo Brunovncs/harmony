@@ -418,20 +418,46 @@ Needs Node 20+ and whatever `electron` pulls down (~200 MB on first install).
 ## Building
 
 ```bash
-npm run build        # -> dist/Harmony-<version>-portable.exe
-npm run build:all    # additionally a Linux AppImage and a macOS dmg
+npm run build          # -> dist/Harmony-<version>-setup.exe, ~12 s, ~108 MB
+npm run build:release  # the same, ~75 s, ~86 MB -- for the copy you hand out
+npm run build:zip      # a plain zip of the app, for running without installing
+npm run build:all      # release installer plus a Linux AppImage and a macOS dmg
 ```
 
-`npm run build` produces a **single portable .exe of about 82 MB**: no installer,
-no admin rights, nothing written outside `%TEMP%` at runtime. `unpackDirName:
-Harmony` keeps the extraction directory stable, so Windows Firewall rules and the
-saved server address survive an upgrade.
+Since 3.0.0 the Windows build is a **per-user installer**: one click, no admin
+rights, no UAC prompt, installed to `%LOCALAPPDATA%\Programs\Harmony`. Settings
+live in `%APPDATA%` as before and survive upgrades and uninstalls.
+
+It replaced the self-extracting portable .exe of 2.x, which unpacked ~300 MB of
+Chromium into `%TEMP%` on **every launch** before the app could start, and had
+Windows Defender scan all of it each time as freshly written, unsigned
+executables. Measured on the same machine:
+
+| | 2.9.1 portable | 3.0.0 installed |
+| --- | --- | --- |
+| launch to a visible window | ~6.6 s | ~0.1 s |
+| launch to a usable app | ~4.5 s | ~0.2 s |
+| `npm run build` | 77 s | 12 s |
+
+The build time is 7-Zip. electron-builder archives the installer payload at
+`-mx=9` regardless of the `compression` setting; `scripts/build.js` sets
+`ELECTRON_BUILDER_COMPRESSION_LEVEL` (3 for `build`, 9 for `build:release`),
+which is the only override it honours. The measurements behind the two levels
+are in that file.
+
+**Antivirus and SmartScreen.** Defender's own scan finds nothing in either the
+installer or the installed files. What remains is SmartScreen's "Windows
+protected your PC" on a downloaded, unsigned installer -- that is about the
+missing publisher signature, not about the contents, and only code signing
+removes it. The build already avoids the other common triggers: it never
+requests elevation (`requestedExecutionLevel: asInvoker`) and does not ship
+electron-builder's `elevate.exe` helper (`packElevateHelper: false`).
 
 Essentially all of that size is the Chromium runtime — the app itself is under a
 megabyte. The build trims it by shipping only the `en-US` locale (Chromium
 carries 55, ~48 MB), deleting `dxcompiler.dll` and `dxil.dll` (27 MB of DirectX
 shader compilation for WebGPU, which Harmony does not use), and compressing at
-maximum. If a trimmed file ever turns out to be needed on some machine, the list
+7-Zip level 9 for `build:release`. If a trimmed file ever turns out to be needed on some machine, the list
 is one array in [client/scripts/after-pack.js](client/scripts/after-pack.js).
 Verify any change to it against a packaged build, not just `npm start`:
 

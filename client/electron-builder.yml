@@ -6,10 +6,17 @@ directories:
   output: dist
   buildResources: build
 
-# LZMA at its slowest. Costs about a minute of build time and takes a double-
-# digit percentage off the download, which is the right trade for something
-# people re-download whenever it is updated.
-compression: maximum
+# Effectively unused. The NSIS installer's payload is archived by 7-Zip at
+# -mx=9 whatever this says, and the one thing that overrides it -- the
+# ELECTRON_BUILDER_COMPRESSION_LEVEL environment variable -- overrides this
+# too. scripts/build.js always sets it: 3 for `npm run build`, 9 for
+# `npm run build:release`. See that file for the measurements.
+compression: normal
+
+# The one native dependency, loopback-capture, ships N-API prebuilds -- they
+# load in any Electron with no rebuild. Asking electron-builder to rebuild
+# native modules anyway walks the whole dependency tree for nothing.
+npmRebuild: false
 
 # Chromium ships 55 locale files, ~49 MB of them, and Harmony's UI is English
 # only -- so 54 of them are pure weight. This is the single biggest saving
@@ -36,16 +43,46 @@ asarUnpack:
   - node_modules/loopback-capture/**
 
 win:
-  # `portable` produces one self-contained .exe -- no installer, no admin
-  # rights, nothing written outside %TEMP% at runtime.
+  # An installer, not the self-extracting `portable` .exe used up to 2.9.
+  #
+  # The portable build unpacked ~300 MB of Chromium into %TEMP% on EVERY
+  # launch before the app could start: seconds of LZMA decompression, and
+  # then Windows Defender scanning all of it as freshly written, unsigned
+  # executables -- every time. A self-extracting unsigned packer is also
+  # exactly the shape antivirus heuristics distrust, which is where the
+  # false positives came from.
+  #
+  # Installed, the files are written and scanned once and the app starts
+  # like any other. See the `nsis` block for why it still needs no admin.
   target:
-    - portable
-  artifactName: Harmony-${version}-portable.exe
+    - nsis
+  artifactName: Harmony-${version}-setup.exe
+  # Never ask for elevation. Nothing Harmony does needs it, and an unsigned
+  # program asking for admin is the other thing that gets flagged.
+  requestedExecutionLevel: asInvoker
 
-portable:
-  # Keeps the extraction directory stable so Windows Firewall rules and the
-  # saved server address survive an upgrade.
-  unpackDirName: Harmony
+nsis:
+  # Per-user, one click: installs into %LOCALAPPDATA%\Programs\Harmony with
+  # no UAC prompt, the same no-admin promise the portable build made.
+  oneClick: true
+  perMachine: false
+  allowElevation: false
+  # elevate.exe is a UAC helper electron-builder ships into resources/ by
+  # default. A per-user install never elevates, so it would sit there unused
+  # -- and a standalone elevation tool inside an unsigned app is a classic
+  # antivirus false positive.
+  packElevateHelper: false
+  runAfterFinish: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Harmony
+  # Settings, the session and the media cache live in %APPDATA%; an update
+  # (which is an uninstall and reinstall underneath) must not take them.
+  deleteAppDataOnUninstall: false
+  # The .blockmap is for electron-updater's differential downloads, which
+  # Harmony does not use. Skipping it is a little less build time and one
+  # less file in dist/.
+  differentialPackage: false
 
 linux:
   target:

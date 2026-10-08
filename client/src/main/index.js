@@ -52,7 +52,20 @@ if (adapter) console.log(`[gpu] preferring the ${adapter} GPU`);
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'harmony',
-    privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true },
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      /*
+       * V8's code cache, which http(s) gets for free and a custom scheme
+       * only on request. Without it every launch parsed and compiled the
+       * renderer -- app.js alone is ~9000 lines, plus the emoji table --
+       * from scratch before the first frame. With it, the second launch
+       * onwards loads compiled bytecode from the profile instead.
+       */
+      codeCache: true,
+    },
   },
 ]);
 
@@ -126,14 +139,28 @@ function registerProtocol() {
 }
 
 /**
- * How long to wait, after the page has loaded, for a first frame that may
- * never come.
+ * Each palette's --bg, so the window can open already painted in it.
  *
- * Long enough that the normal path always wins it -- ready-to-show lands
- * within a frame or two of the load -- and short enough that somebody
- * staring at a taskbar icon does not conclude the app is broken.
+ * Duplicated from styles.css on purpose: the window exists before any CSS
+ * has loaded, and this is the colour it shows until the page paints over it.
+ * Getting one wrong costs a frame of the wrong shade, nothing more.
  */
-const WINDOW_SHOW_GRACE_MS = 2000;
+const THEME_BACKGROUNDS = {
+  midnight: '#0f1116',
+  dark: '#1e1f22',
+  onyx: '#000000',
+  ocean: '#0b141c',
+  forest: '#0e1512',
+  ember: '#17100e',
+  lavender: '#14111d',
+  daylight: '#f2f3f5',
+};
+
+function windowBackground() {
+  const { theme, customTheme } = settings.read();
+  if (theme === 'custom' && /^#[0-9a-f]{6}$/i.test(customTheme?.bg ?? '')) return customTheme.bg;
+  return THEME_BACKGROUNDS[theme] ?? THEME_BACKGROUNDS.midnight;
+}
 
 function createWindow() {
   win = new BrowserWindow({
@@ -143,10 +170,11 @@ function createWindow() {
     // breakpoints down to this size; below it things genuinely stop fitting.
     minWidth: 560,
     minHeight: 420,
-    backgroundColor: '#0f1116',
+    // Shown at once, in the palette's own background -- see below.
+    backgroundColor: windowBackground(),
     title: 'Harmony',
     autoHideMenuBar: true,
-    show: false,
+    show: true,
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'index.js'),
       contextIsolation: true,
@@ -173,44 +201,26 @@ function createWindow() {
   win.webContents.on('did-finish-load', () => applyScale());
 
   /*
-   * Show the window, and do not let the GPU have a veto.
+   * The window is shown the moment it exists, not on ready-to-show.
    *
-   * ready-to-show fires when the renderer has produced its FIRST FRAME,
-   * which makes it the right moment to reveal a window created with
-   * show: false -- no white flash, no half-drawn layout. It is not a
-   * guarantee. A GPU process that cannot start, or cannot create its
-   * caches, leaves a renderer that has loaded and parsed everything and
-   * never composited anything, and the event simply never arrives.
+   * The usual Electron pattern -- show: false, then show() on ready-to-show
+   * -- waits for the renderer's FIRST FRAME, and that event is not a
+   * guarantee. A GPU process that cannot start or cannot create its caches
+   * leaves a renderer that has loaded everything and composited nothing, and
+   * the event never arrives. Seen on the machine this was written on: twelve
+   * Electron processes, the page answering over the debugger, "Unable to
+   * move the cache: Access is denied" from the GPU cache, and no window.
    *
-   * Seen on this machine: twelve Electron processes alive, the page loaded
-   * and responding over the debugger, "Unable to move the cache: Access is
-   * denied" from the GPU cache, and not one window handle between them.
-   * From outside it looks exactly like the app failing to start, and the
-   * logs say nothing because nothing failed.
+   * 2.9 covered that with a 2-second timer after the load, which meant that
+   * on exactly the machines where the first frame does not come, every
+   * launch waited two seconds staring at nothing. Measured: 2.2 s from
+   * launch to a window, nearly all of it that timer.
    *
-   * So the first frame is the preferred cue and not the only one: whichever
-   * of the two happens first wins, and after the load there is a last
-   * resort on a timer. A window showing a frame late is a flicker; a window
-   * that never shows is a bug report.
+   * Showing at once costs the thing the pattern exists to avoid -- a moment
+   * of empty window before the page paints -- and backgroundColor is what
+   * makes that harmless: it is the palette's own background, so the empty
+   * window is the colour the page is about to be.
    */
-  let shown = false;
-  const reveal = (why) => {
-    if (shown || win?.isDestroyed()) return;
-    shown = true;
-    win.show();
-    if (why !== 'ready-to-show') {
-      console.warn(`[window] shown on ${why} -- the first frame never arrived.`);
-    }
-  };
-
-  win.once('ready-to-show', () => reveal('ready-to-show'));
-  win.webContents.once('did-finish-load', () => {
-    // Not immediately: ready-to-show usually lands a few frames after the
-    // load, and showing here first would give up the flicker-free reveal
-    // on every single launch to cover a case that is rare.
-    setTimeout(() => reveal('a timer after the page loaded'), WINDOW_SHOW_GRACE_MS);
-  });
-
   win.loadURL('harmony://app/index.html');
 
   /**
