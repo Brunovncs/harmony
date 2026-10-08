@@ -975,8 +975,14 @@
             spacing between them. This is the window's own zoom, so a bigger
             setting fits less on screen.
           </p>
+          <!--
+            type="button" on all three, and it is not optional: this dialog is
+            a <form method="dialog">, and a <button> in a form with no type is
+            a SUBMIT button -- so every press of -, + or Reset changed the size
+            and then closed the settings.
+          -->
           <div class="scale-row">
-            <button class="ghost small" id="scale-down" title="Smaller">&#8722;</button>
+            <button type="button" class="ghost small" id="scale-down" title="Smaller">&#8722;</button>
             <input
               id="ui-scale"
               type="range"
@@ -985,9 +991,9 @@
               step="5"
               value="115"
             />
-            <button class="ghost small" id="scale-up" title="Bigger">&#43;</button>
+            <button type="button" class="ghost small" id="scale-up" title="Bigger">&#43;</button>
             <span class="scale-value" id="scale-value">115%</span>
-            <button class="ghost small" id="scale-reset">Reset</button>
+            <button type="button" class="ghost small" id="scale-reset">Reset</button>
           </div>
         </section>
 
