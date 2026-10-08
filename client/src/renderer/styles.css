@@ -3581,6 +3581,13 @@ button.tiny:disabled {
   overflow-y: auto;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  /*
+   * max-content, or the rows are squeezed to fit the box instead of
+   * scrolling. .source has overflow: hidden, which makes a grid item's
+   * automatic minimum height zero -- so with more tiles than fit, an auto
+   * row gives up its thumbnail and label rather than overflowing.
+   */
+  grid-auto-rows: max-content;
   gap: 10px;
   /* Room for the selected tile's border, which the scroll box would clip. */
   padding: 2px;
