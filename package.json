@@ -7,6 +7,7 @@
     "install:all": "npm --prefix ./server install && npm --prefix ./client install",
     "server": "npm --prefix ./server start",
     "client": "npm --prefix ./client start",
+    "start": "npm --prefix ./client start",
     "build:client": "npm --prefix ./client run build"
   },
   "license": "MIT"
