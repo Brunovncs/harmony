@@ -35,6 +35,10 @@ export const harmony = {
 
   relaunch: lift(raw.relaunch),
   setScale: lift(raw.setScale),
+  hotkeys: {
+    set: lift(raw.hotkeys.set),
+    onFired: (handler) => raw.hotkeys.onFired(handler),
+  },
   onWindowVisibility: (handler) => raw.onWindowVisibility(handler),
 
   sources: {

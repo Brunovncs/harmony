@@ -11,6 +11,7 @@ const appAudio = require('./app-audio');
 const api = require('./api');
 const clips = require('./clips');
 const gpu = require('./gpu');
+const hotkeys = require('./hotkeys');
 const { RealtimeClient } = require('./realtime');
 const { MediaCache, HASH_RE } = require('./media-cache');
 
@@ -306,6 +307,15 @@ app.whenReady().then(() => {
   });
 });
 
+// Registrations outlive the window otherwise, holding keys away from every
+// other application until the process is gone.
+app.on('will-quit', () => hotkeys.clear());
+
+// A hotkey fired, wherever the focus was. The renderer decides what it means.
+hotkeys.onFire((id) => {
+  if (win && !win.isDestroyed()) win.webContents.send('hotkey:fired', id);
+});
+
 app.on('window-all-closed', () => {
   appAudio.stop();
   realtime.disconnect();
@@ -461,6 +471,8 @@ function applyScale(percent) {
 }
 
 handle('app:scale', (_e, percent) => applyScale(percent));
+
+handle('hotkeys:set', (_e, bindings) => hotkeys.set(bindings));
 
 handle('media:stats', () => mediaCache?.stats() ?? null);
 

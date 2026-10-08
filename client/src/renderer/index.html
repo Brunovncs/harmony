@@ -209,6 +209,23 @@
       </form>
     </dialog>
 
+    <!--
+      Recording a hotkey. Its own dialog rather than ask(), because it listens
+      to raw key presses rather than to a field, and every global hotkey is
+      released while it is open -- otherwise pressing a combination that is
+      already bound would fire it instead of being recorded.
+    -->
+    <dialog id="hotkey-recorder" class="ask">
+      <h2 id="hotkey-recorder-title">Set a hotkey</h2>
+      <p class="muted">Press the combination you want. Esc cancels.</p>
+      <div class="hotkey-capture" id="hotkey-capture">Waiting for keys&hellip;</div>
+      <p class="error" id="hotkey-recorder-error" hidden></p>
+      <div class="ask-buttons">
+        <button type="button" class="ghost" id="hotkey-recorder-clear">Remove hotkey</button>
+        <button type="button" class="ghost" id="hotkey-recorder-cancel">Cancel</button>
+      </div>
+    </dialog>
+
     <section class="view" id="view-channels">
       <header class="bar">
         <div class="bar-left">
@@ -1045,11 +1062,28 @@
             <label class="check">
               <input type="checkbox" id="voice-sounds" checked />
               <span>
-                Play a sound when somebody joins, leaves or goes live
+                Play sounds in voice channels
                 <small
-                  >Two short tones, synthesised rather than played from a file.
-                  Rising means arriving, falling means leaving.</small
+                  >When you or somebody else joins or leaves, a stream starts or
+                  stops, and when you mute or deafen. Rising means on, falling
+                  means off.</small
                 >
+              </span>
+            </label>
+
+            <label class="field">
+              <span>Sound effects volume</span>
+              <span class="peer-audio">
+                <input
+                  id="sound-volume"
+                  class="peer-volume"
+                  type="range"
+                  min="0"
+                  max="200"
+                  step="5"
+                  value="100"
+                />
+                <span class="peer-volume-label" id="sound-volume-label">100%</span>
               </span>
             </label>
 
@@ -1065,6 +1099,23 @@
             </label>
           </div>
         </section>
+        <!--
+          Hotkeys. Global: they work while a game has focus, which is the only
+          time anybody needs one. Soundpad clips get theirs from a right-click
+          on the clip, next to the clip, rather than from a list here that
+          would have to repeat the whole soundpad.
+        -->
+        <section class="settings-section">
+          <h3>Hotkeys</h3>
+          <p class="muted">
+            Work anywhere, even while a game has focus. A combination you bind
+            here is taken from every other program while Harmony is open, so
+            use a modifier (Ctrl, Alt, Shift) or an F-key. To give a soundpad
+            clip a hotkey, right-click it.
+          </p>
+          <div class="hotkey-list" id="hotkey-list"></div>
+        </section>
+
         <div class="ask-buttons">
           <button type="submit" class="primary" id="devices-close">Done</button>
         </div>

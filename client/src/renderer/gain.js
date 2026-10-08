@@ -226,73 +226,156 @@ export function createMicChain(stream, { gain = 1, threshold = 0 } = {}) {
 }
 
 /**
- * The little noises: somebody arrived, somebody left, somebody went live.
+ * The little noises: arriving, leaving, going live, muting.
  *
- * SYNTHESISED, not played from files. Three reasons, in order: there is
- * nothing to ship, cache or 404 on; the renderer's CSP allows no remote
- * media and a bundled file would still have to come through the harmony://
- * protocol for no benefit; and a pair of sine tones is both smaller and
- * easier to make unobtrusive than any recording would be.
+ * SYNTHESISED, not played from files. There is nothing to ship, cache or 404
+ * on, the renderer's CSP allows no remote media, and a few notes are easier
+ * to keep pleasant than any recording.
  *
- * Sine waves with a soft attack and a long decay, because a square wave or
- * a hard edge is a click, and a click in your ear every time somebody joins
- * is the fastest way to make people turn these off.
+ * 2.x played each note as a bare sine at 7% of full scale. A sine has no
+ * harmonics, and the ear judges loudness largely by them -- so those cues
+ * were both quiet and thin, easy to miss under a game and easy to mistake
+ * for one another. Each note is now a small additive voice: the fundamental,
+ * its octave and its twelfth, with a fast pitch settle at the onset that
+ * gives it the soft "bloop" of a struck note rather than the beep of a test
+ * tone. Played at ~32% of full scale, through a limiter, so two cues landing
+ * together cannot clip.
  *
- * Rising means arriving and falling means leaving. That mapping is not
- * arbitrary -- it is the one every other application of this kind uses, so
- * it is already learned.
+ * The mapping is the one every app of this kind uses, so it is already
+ * learned: rising means arriving or switching on, falling means leaving or
+ * switching off. Two notes for other people, three for you -- your own
+ * arrival is the one you most need to be sure of.
+ *
+ * Each cue is { notes: [[frequency Hz, delay s], ...], length s, level }.
  */
+const C5 = 523.25;
+const D5 = 587.33;
+const E5 = 659.25;
+const G5 = 783.99;
+const A5 = 880.0;
+const B5 = 987.77;
+const D6 = 1174.66;
+const E6 = 1318.51;
+const F6 = 1396.91;
+const G4 = 392.0;
+const D4 = 293.66;
+const A4 = 440.0;
+
 const CUES = {
-  // D5 -> A5, up a fifth.
-  join: [[587.33, 0], [880.0, 0.09]],
-  // A5 -> D5, the same interval downwards.
-  leave: [[880.0, 0], [587.33, 0.09]],
-  // One note, higher and shorter: it fires while people are talking and
-  // should read as a notification rather than as an arrival.
-  live: [[1046.5, 0]],
+  // Somebody else arrived / left. Up a fifth, down a fifth.
+  join: { notes: [[D5, 0], [A5, 0.09]], length: 0.32, level: 1 },
+  leave: { notes: [[A5, 0], [D5, 0.09]], length: 0.32, level: 1 },
+
+  // You connected / disconnected. A full triad, so it cannot be mistaken
+  // for somebody else coming and going.
+  connect: { notes: [[C5, 0], [E5, 0.07], [G5, 0.14]], length: 0.4, level: 1 },
+  disconnect: { notes: [[G5, 0], [E5, 0.07], [C5, 0.14]], length: 0.4, level: 1 },
+
+  // A stream started / stopped -- yours or anybody's in the channel.
+  // Higher and brighter than the arrivals: it is news, not presence.
+  streamStart: { notes: [[E5, 0], [B5, 0.07], [E6, 0.14]], length: 0.45, level: 0.95 },
+  streamStop: { notes: [[E6, 0], [B5, 0.07], [E5, 0.14]], length: 0.45, level: 0.95 },
+
+  // Your microphone. Short and close together, because it answers a key you
+  // just pressed and should be done before your next word.
+  mute: { notes: [[A5, 0], [D5, 0.055]], length: 0.2, level: 0.85 },
+  unmute: { notes: [[D5, 0], [A5, 0.055]], length: 0.2, level: 0.85 },
+
+  // Your ears. Lower than mute, so the two are told apart without looking.
+  deafen: { notes: [[A4, 0], [D4, 0.07]], length: 0.28, level: 0.9 },
+  undeafen: { notes: [[D4, 0], [A4, 0.07]], length: 0.28, level: 0.9 },
+
   /*
    * Somebody wrote your name.
    *
-   * Three notes where everything else has one or two, and the only cue
-   * that goes up twice. It has to be recognisable from another room and
-   * unmistakable for an arrival, because it is the one cue that is asking
-   * for something rather than reporting it.
+   * Three notes going up twice, and the only cue that is asking for
+   * something rather than reporting it -- it has to be recognisable from
+   * another room.
    */
-  mention: [[880.0, 0], [1174.66, 0.08], [1396.91, 0.16]],
+  mention: { notes: [[A5, 0], [D6, 0.08], [F6, 0.16]], length: 0.3, level: 0.9 },
 };
 
-const CUE_GAIN = 0.07;
-const CUE_LENGTH = 0.22;
+/** Loudest a cue gets at 100%, as a fraction of full scale. */
+const CUE_PEAK = 0.32;
+
+/** The partials of one note: [multiple of the fundamental, relative level]. */
+const PARTIALS = [[1, 1], [2, 0.32], [3, 0.1]];
+
+/** 0..2, from the "sound effects volume" setting. */
+let cueVolume = 1;
+
+export function setCueVolume(volume) {
+  cueVolume = Math.max(0, Math.min(2, Number(volume) || 0));
+}
+
+/*
+ * Every cue goes through one limiter on its way out. Two cues can land
+ * together -- somebody joins as somebody else starts streaming -- and at
+ * these levels the sum would otherwise clip.
+ */
+let cueBus = null;
+function bus(ctx) {
+  if (cueBus?.context === ctx) return cueBus;
+  const limiter = ctx.createDynamicsCompressor();
+  limiter.threshold.value = -6;
+  limiter.knee.value = 4;
+  limiter.ratio.value = 12;
+  limiter.attack.value = 0.002;
+  limiter.release.value = 0.12;
+  limiter.connect(ctx.destination);
+  cueBus = limiter;
+  return cueBus;
+}
 
 export function playCue(name, volume = 1) {
-  const notes = CUES[name];
-  if (!notes) return;
-  const ctx = context();
-  const level = Math.max(0, Math.min(1, volume)) * CUE_GAIN;
+  const cue = CUES[name];
+  if (!cue) return;
+  const level = Math.max(0, Math.min(2, volume)) * cueVolume * CUE_PEAK * cue.level;
   if (level <= 0) return;
+  const ctx = context();
+  const out = bus(ctx);
 
-  for (const [frequency, delay] of notes) {
-    const start = ctx.currentTime + delay;
-    const osc = ctx.createOscillator();
-    osc.type = 'sine';
-    osc.frequency.value = frequency;
+  for (const [frequency, delay] of cue.notes) {
+    const start = ctx.currentTime + 0.01 + delay;
+    const end = start + cue.length;
 
     const envelope = ctx.createGain();
-    // Ramps rather than steps. setValueAtTime alone produces a
-    // discontinuity, and a discontinuity in a waveform is a click.
+    // Ramps rather than steps: a discontinuity in a waveform is a click.
     envelope.gain.setValueAtTime(0.0001, start);
-    envelope.gain.exponentialRampToValueAtTime(level, start + 0.015);
-    envelope.gain.exponentialRampToValueAtTime(0.0001, start + CUE_LENGTH);
+    envelope.gain.exponentialRampToValueAtTime(level, start + 0.006);
+    envelope.gain.exponentialRampToValueAtTime(level * 0.35, start + cue.length * 0.35);
+    envelope.gain.exponentialRampToValueAtTime(0.0001, end);
+    envelope.connect(out);
 
-    osc.connect(envelope);
-    envelope.connect(ctx.destination);
-    osc.start(start);
-    osc.stop(start + CUE_LENGTH + 0.02);
-    // Oscillators are one-shot; without this the graph grows for the life
-    // of the context, one dead node per join.
-    osc.addEventListener('ended', () => {
+    const oscillators = PARTIALS.map(([multiple, weight]) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      // The settle: a few per cent sharp at the strike, down to pitch in
+      // 40 ms. Inaudible as a glide, audible as a softer attack.
+      osc.frequency.setValueAtTime(frequency * multiple * 1.03, start);
+      osc.frequency.exponentialRampToValueAtTime(frequency * multiple, start + 0.04);
+      const partial = ctx.createGain();
+      // Higher partials die faster, as they do on anything struck.
+      partial.gain.setValueAtTime(weight, start);
+      partial.gain.exponentialRampToValueAtTime(
+        Math.max(0.0001, weight * 0.05),
+        start + cue.length / multiple,
+      );
+      osc.connect(partial);
+      partial.connect(envelope);
+      osc.start(start);
+      osc.stop(end + 0.02);
+      return { osc, partial };
+    });
+
+    // Oscillators are one-shot; without this the graph grows by a few dead
+    // nodes per cue for the life of the context.
+    oscillators[0].osc.addEventListener('ended', () => {
       try {
-        osc.disconnect();
+        for (const { osc, partial } of oscillators) {
+          osc.disconnect();
+          partial.disconnect();
+        }
         envelope.disconnect();
       } catch { /* already gone */ }
     });

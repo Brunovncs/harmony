@@ -128,6 +128,18 @@ const DEFAULTS = {
    * that will reach you in a channel you are not looking at.
    */
   mentionSound: true,
+  /*
+   * How loud every cue is, as a percentage: joins, leaves, streams, mute,
+   * mention. 100 is the designed level; up to 200 for a noisy room.
+   */
+  soundVolume: 100,
+  /*
+   * Global hotkeys, as Electron accelerators ("Ctrl+Shift+M"). Empty is
+   * unbound. Soundpad clips are kept per SERVER, because a clip id is only
+   * meaningful on the server that issued it: { [serverUrl]: { [clipId]: accel } }.
+   */
+  hotkeys: { mute: '', deafen: '' },
+  clipHotkeys: {},
   // Rolling clip buffer. Off by default: it is memory the user did not ask for.
   clipsEnabled: false,
   // GPU video encoding (NVENC / AMF / Quick Sync). 'auto' leaves Chromium to

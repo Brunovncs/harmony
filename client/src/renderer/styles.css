@@ -2680,6 +2680,65 @@ button.danger {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The clip's hotkey, if it has one. Pushed to the far end of the button and
+   never shrunk: the name is what gives way when there is no room. */
+.clip-key {
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ---------- hotkeys ---------- */
+
+.hotkey-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+.hotkey-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.75rem;
+}
+.hotkey-name {
+  flex: 1 1 12rem;
+  font-size: 0.85rem;
+}
+.hotkey-row .hotkey-key {
+  min-width: 9rem;
+  font-variant-numeric: tabular-nums;
+}
+.hotkey-row .hotkey-key[data-empty] {
+  color: var(--muted);
+  font-style: italic;
+}
+.hotkey-problem {
+  flex: 1 0 100%;
+  color: var(--warn);
+  font-size: 0.75rem;
+}
+/* What has been pressed so far, large, while recording. */
+.hotkey-capture {
+  margin: 0.4rem 0 0.2rem;
+  padding: 0.9rem 1rem;
+  min-width: min(18rem, 80vw);
+  text-align: center;
+  font-size: 1.05rem;
+  font-weight: 600;
+  border: 1px dashed var(--accent);
+  border-radius: 8px;
+  background: var(--bg);
+  font-variant-numeric: tabular-nums;
+}
 .clip-tools {
   position: absolute;
   top: 0.15rem;

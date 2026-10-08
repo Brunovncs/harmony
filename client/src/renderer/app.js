@@ -7,6 +7,7 @@ import { ClipBuffer, CLIP_SECONDS } from './clip-buffer.js';
 import { VoiceSession } from './voice.js';
 import {
   createSink, MAX_GAIN, asPercent, playSample, setOutputDevice, monitorStream, playCue,
+  setCueVolume,
 } from './gain.js';
 
 // ---------------------------------------------------------------------------
@@ -249,6 +250,15 @@ const el = {
   micMeterFill: $('mic-meter-fill'),
   micMeterMark: $('mic-meter-mark'),
   voiceSounds: $('voice-sounds'),
+  soundVolume: $('sound-volume'),
+  soundVolumeLabel: $('sound-volume-label'),
+  hotkeyList: $('hotkey-list'),
+  hotkeyRecorder: $('hotkey-recorder'),
+  hotkeyRecorderTitle: $('hotkey-recorder-title'),
+  hotkeyCapture: $('hotkey-capture'),
+  hotkeyRecorderError: $('hotkey-recorder-error'),
+  hotkeyRecorderClear: $('hotkey-recorder-clear'),
+  hotkeyRecorderCancel: $('hotkey-recorder-cancel'),
   themeGrid: $('theme-grid'),
   themeCustom: $('theme-custom'),
   voiceCamera: $('voice-camera'),
@@ -642,6 +652,11 @@ async function boot() {
   // Main holds the password for every request it makes; hand back what was
   // saved before anything asks the server for anything.
   await harmony.api.setPassword(el.password.value);
+
+  setCueVolume((state.settings.soundVolume ?? 100) / 100);
+  // Mute and deafen are bound from the start; clips join once the soundpad
+  // of a server has loaded, since their ids mean nothing before that.
+  syncHotkeys();
 
   el.rememberAccount.checked = state.settings.rememberAccount !== false;
   if (state.settings.sessionToken) {
@@ -2360,6 +2375,7 @@ async function joinVoice(channel, password) {
     // A new channel is a new room: without this, arriving somewhere with
     // five people in it plays five join sounds at once.
     resetCues();
+    voiceCue('connect');
     applyStage();
 
     await state.voice.startMic(
@@ -2523,6 +2539,9 @@ async function leaveVoice({ silent = false } = {}) {
   if (state.share.target?.channelId === channelId) await teardown();
   await state.voice.leave();
   if (channelId && !silent) {
+    // Not on a silent leave: that is the first half of moving to another
+    // channel, whose own "connect" is the sound that move should make.
+    voiceCue('disconnect');
     await harmony.realtime.request('voice:leave', { channelId }).catch(() => {});
   }
   state.channels.roster = [];
@@ -2992,9 +3011,18 @@ function resetCues() {
   lastCueRoster = null;
 }
 
+/** A voice-channel cue, unless they are switched off. */
+function voiceCue(name) {
+  if (state.settings?.voiceSounds !== false) playCue(name);
+}
+
 function playRosterCues(roster) {
-  if (state.settings?.voiceSounds === false) return;
   const now = new Map(roster.map((m) => [m.userId, m]));
+  if (state.settings?.voiceSounds === false) {
+    lastCueRoster = now;
+    return;
+  }
+  const me = state.auth.user?.id;
 
   if (lastCueRoster === null) {
     lastCueRoster = now;
@@ -3007,14 +3035,18 @@ function playRosterCues(roster) {
   for (const userId of lastCueRoster.keys()) {
     if (!now.has(userId)) playCue('leave');
   }
-  // Going live, which is the one people most want to be told about, and
-  // the only one that can fire for somebody who was already here.
+  /*
+   * Somebody else starting or stopping a stream. Not you: your own share
+   * plays its cue from startBroadcast and stopBroadcast, the moment it
+   * actually happens, rather than when the server's roster echoes it back.
+   */
   for (const [userId, member] of now) {
     const before = lastCueRoster.get(userId);
-    if (!before) continue;
+    if (!before || userId === me) continue;
     const wasSharing = (before.publishing ?? []).includes('s');
     const isSharing = (member.publishing ?? []).includes('s');
-    if (isSharing && !wasSharing) playCue('live');
+    if (isSharing && !wasSharing) playCue('streamStart');
+    if (wasSharing && !isSharing) playCue('streamStop');
   }
 
   lastCueRoster = now;
@@ -3366,6 +3398,318 @@ function renderThemes() {
   }));
   renderCustomEditor(current);
 }
+
+// ---------------------------------------------------------------------------
+// Hotkeys
+//
+// Registered globally by the main process (src/main/hotkeys.js); this side
+// decides what is bound, records new combinations, and acts when one fires.
+// Bindings are Electron accelerators -- "Ctrl+Shift+M" -- built from the
+// physical key (event.code), so they do not change with the keyboard layout
+// the way event.key would.
+// ---------------------------------------------------------------------------
+
+const HOTKEY_ACTIONS = [
+  { id: 'mute', label: 'Mute / unmute microphone' },
+  { id: 'deafen', label: 'Deafen / undeafen' },
+];
+
+/** What the main process said about each binding at the last sync. */
+let hotkeyStatus = new Map();
+
+const HOTKEY_ERRORS = {
+  in_use: 'Another program already uses this combination. Pick another.',
+  duplicate: 'Bound to something else as well.',
+  invalid: 'Not a combination Windows can register.',
+};
+
+const MODIFIER_CODES = new Set([
+  'ControlLeft', 'ControlRight', 'ShiftLeft', 'ShiftRight',
+  'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight', 'OSLeft', 'OSRight',
+]);
+
+const CODE_KEYS = {
+  NumpadAdd: 'numadd', NumpadSubtract: 'numsub', NumpadMultiply: 'nummult',
+  NumpadDivide: 'numdiv', NumpadDecimal: 'numdec', NumpadEnter: 'Enter',
+  ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+  Space: 'Space', Tab: 'Tab', Enter: 'Enter', Backspace: 'Backspace',
+  Delete: 'Delete', Insert: 'Insert', Home: 'Home', End: 'End',
+  PageUp: 'PageUp', PageDown: 'PageDown', ScrollLock: 'Scrolllock', PrintScreen: 'PrintScreen',
+  Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\',
+  Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/', Backquote: '`',
+  MediaPlayPause: 'MediaPlayPause', MediaTrackNext: 'MediaNextTrack',
+  MediaTrackPrevious: 'MediaPreviousTrack', MediaStop: 'MediaStop',
+  AudioVolumeMute: 'VolumeMute', AudioVolumeUp: 'VolumeUp', AudioVolumeDown: 'VolumeDown',
+};
+
+/*
+ * Keys that may be bound with no modifier, or with Shift alone.
+ *
+ * Anything else -- a letter, a digit, Space -- would be taken from every
+ * other program while Harmony runs: bind "M" and nobody on this machine can
+ * type an M. Shift is not enough either, since Shift+M is how a capital M is
+ * typed. These are the keys nobody types text with.
+ */
+const STANDALONE_KEY = /^(F([1-9]|1\d|2[0-4])|num\w+|Media\w+|Volume\w+|Insert|Scrolllock|PrintScreen)$/;
+
+const KEY_NAMES = {
+  numadd: 'Num +', numsub: 'Num -', nummult: 'Num *', numdiv: 'Num /', numdec: 'Num .',
+  Scrolllock: 'Scroll Lock', PrintScreen: 'Print Screen', MediaPlayPause: 'Play/Pause',
+  MediaNextTrack: 'Next track', MediaPreviousTrack: 'Previous track', MediaStop: 'Stop',
+  VolumeMute: 'Volume mute', VolumeUp: 'Volume up', VolumeDown: 'Volume down',
+  Super: 'Win',
+};
+
+function codeToKey(code) {
+  let m = /^Key([A-Z])$/.exec(code);
+  if (m) return m[1];
+  m = /^Digit(\d)$/.exec(code);
+  if (m) return m[1];
+  if (/^F([1-9]|1\d|2[0-4])$/.test(code)) return code;
+  m = /^Numpad(\d)$/.exec(code);
+  if (m) return `num${m[1]}`;
+  return CODE_KEYS[code] ?? null;
+}
+
+/** Readable form of an accelerator, for buttons and badges. */
+function formatAccelerator(accelerator) {
+  if (!accelerator) return '';
+  return accelerator
+    .split('+')
+    .map((t) => KEY_NAMES[t] ?? t.replace(/^num(\d)$/, 'Num $1'))
+    .join(' + ');
+}
+
+/**
+ * Turn a keydown into an accelerator, or say why it cannot be one.
+ * @returns {{accelerator?: string, partial?: boolean, error?: string, display: string}}
+ */
+function acceleratorFrom(event) {
+  const mods = [];
+  if (event.ctrlKey) mods.push('Ctrl');
+  if (event.altKey) mods.push('Alt');
+  if (event.shiftKey) mods.push('Shift');
+  if (event.metaKey) mods.push(harmony.platform === 'darwin' ? 'Command' : 'Super');
+  const display = formatAccelerator(mods.join('+'));
+
+  if (MODIFIER_CODES.has(event.code)) return { partial: true, display };
+  const key = codeToKey(event.code);
+  if (!key) return { error: 'That key cannot be used as a hotkey.', display };
+
+  const accelerator = [...mods, key].join('+');
+  const strong = event.ctrlKey || event.altKey || event.metaKey;
+  if (!strong && !STANDALONE_KEY.test(key)) {
+    return {
+      error: 'Add Ctrl or Alt. On its own this key would stop working in every other program while Harmony is open.',
+      display: formatAccelerator(accelerator),
+    };
+  }
+  return { accelerator, display: formatAccelerator(accelerator) };
+}
+
+/** Which server the soundpad bindings belong to. */
+function hotkeyServer() {
+  return state.server || state.settings?.serverUrl || '';
+}
+
+function clipHotkey(clipId) {
+  return state.settings?.clipHotkeys?.[hotkeyServer()]?.[clipId] ?? '';
+}
+
+function hotkeyFor(id) {
+  if (id.startsWith('clip:')) return clipHotkey(id.slice(5));
+  return state.settings?.hotkeys?.[id] ?? '';
+}
+
+/**
+ * Hand the main process everything that should be bound right now.
+ *
+ * Clips only for the server you are on and only for clips that still exist:
+ * a deleted clip's binding is kept in settings (re-adding a clip does not
+ * bring its id back, so it is harmless) but is not registered, so it does
+ * not hold a key for nothing.
+ */
+async function syncHotkeys() {
+  const bindings = HOTKEY_ACTIONS
+    .map(({ id }) => ({ id, accelerator: hotkeyFor(id) }))
+    .filter((b) => b.accelerator);
+  for (const clip of state.soundpad?.clips ?? []) {
+    const accelerator = clipHotkey(clip.id);
+    if (accelerator) bindings.push({ id: `clip:${clip.id}`, accelerator });
+  }
+  try {
+    const results = await harmony.hotkeys.set(bindings);
+    hotkeyStatus = new Map(results.map((r) => [r.id, r]));
+  } catch (err) {
+    console.warn('[hotkeys] could not register:', err.message);
+  }
+  if (!el.devicesDialog.open) return;
+  renderHotkeyList();
+}
+
+/**
+ * Bind (or, with '', unbind) one action.
+ *
+ * One combination does one thing: binding a key that already belongs to
+ * something else moves it, because both firing at once is never what
+ * anybody meant.
+ */
+async function saveHotkey(id, accelerator) {
+  const server = hotkeyServer();
+  const hotkeys = { ...(state.settings.hotkeys ?? {}) };
+  const allClips = { ...(state.settings.clipHotkeys ?? {}) };
+  const clips = { ...(allClips[server] ?? {}) };
+  const same = (a) => a && a.toLowerCase() === accelerator.toLowerCase();
+
+  if (accelerator) {
+    for (const key of Object.keys(hotkeys)) if (key !== id && same(hotkeys[key])) hotkeys[key] = '';
+    for (const key of Object.keys(clips)) if (`clip:${key}` !== id && same(clips[key])) delete clips[key];
+  }
+  if (id.startsWith('clip:')) {
+    if (accelerator) clips[id.slice(5)] = accelerator;
+    else delete clips[id.slice(5)];
+  } else {
+    hotkeys[id] = accelerator;
+  }
+  allClips[server] = clips;
+
+  await harmony.settings.set({ hotkeys, clipHotkeys: allClips });
+  state.settings = await harmony.settings.get();
+  await syncHotkeys();
+  renderSoundpad();
+
+  const result = hotkeyStatus.get(id);
+  if (accelerator && result && !result.ok) {
+    toast(`${formatAccelerator(accelerator)}: ${HOTKEY_ERRORS[result.error] ?? 'could not be registered.'}`);
+  }
+}
+
+/**
+ * Ask for a key combination.
+ *
+ * @returns {Promise<string|null>} an accelerator, '' to remove the binding,
+ *   or null for "cancelled, change nothing".
+ */
+function recordHotkey(title) {
+  return new Promise((resolve) => {
+    el.hotkeyRecorderTitle.textContent = title;
+    el.hotkeyCapture.textContent = 'Waiting for keys…';
+    el.hotkeyRecorderError.hidden = true;
+    // Every global hotkey released while recording. Windows delivers a
+    // registered combination to us INSTEAD of to the focused window, so
+    // without this, pressing one that is already bound would fire it rather
+    // than reach this dialog. finish() hands them back via the caller.
+    harmony.hotkeys.set([]).catch(() => {});
+
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      document.removeEventListener('keydown', onKey, true);
+      el.hotkeyRecorder.removeEventListener('cancel', onCancel);
+      el.hotkeyRecorderClear.onclick = null;
+      el.hotkeyRecorderCancel.onclick = null;
+      if (el.hotkeyRecorder.open) el.hotkeyRecorder.close();
+      resolve(value);
+    };
+    const onKey = (event) => {
+      // Captured and swallowed, so Alt does not open a menu and Tab does
+      // not move focus while somebody is pressing their combination.
+      event.preventDefault();
+      event.stopPropagation();
+      const bare = !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey;
+      if (event.code === 'Escape' && bare) {
+        finish(null);
+        return;
+      }
+      const result = acceleratorFrom(event);
+      if (result.partial) {
+        el.hotkeyCapture.textContent = `${result.display} + …`;
+        return;
+      }
+      el.hotkeyCapture.textContent = result.display || 'Waiting for keys…';
+      if (result.error) {
+        el.hotkeyRecorderError.textContent = result.error;
+        el.hotkeyRecorderError.hidden = false;
+        return;
+      }
+      el.hotkeyRecorderError.hidden = true;
+      // A beat to show what was caught before the dialog goes.
+      setTimeout(() => finish(result.accelerator), 300);
+    };
+    const onCancel = (event) => {
+      event.preventDefault();
+      finish(null);
+    };
+
+    document.addEventListener('keydown', onKey, true);
+    el.hotkeyRecorder.addEventListener('cancel', onCancel);
+    el.hotkeyRecorderClear.onclick = () => finish('');
+    el.hotkeyRecorderCancel.onclick = () => finish(null);
+    el.hotkeyRecorder.showModal();
+  });
+}
+
+async function editHotkey(id, label) {
+  const value = await recordHotkey(`Hotkey: ${label}`);
+  // Cancelled: nothing changes, but the bindings released for recording
+  // still have to be handed back.
+  if (value === null) return syncHotkeys();
+  return saveHotkey(id, value);
+}
+
+/** The mute and deafen rows in the settings dialog. */
+function renderHotkeyList() {
+  el.hotkeyList.replaceChildren(...HOTKEY_ACTIONS.map(({ id, label }) => {
+    const row = document.createElement('div');
+    row.className = 'hotkey-row';
+
+    const name = document.createElement('span');
+    name.className = 'hotkey-name';
+    name.textContent = label;
+
+    const bound = hotkeyFor(id);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'ghost small hotkey-key';
+    button.textContent = bound ? formatAccelerator(bound) : 'Not set';
+    button.toggleAttribute('data-empty', !bound);
+    button.title = bound ? 'Click to change' : 'Click, then press a combination';
+    button.addEventListener('click', () => editHotkey(id, label));
+
+    row.append(name, button);
+
+    const status = hotkeyStatus.get(id);
+    if (bound && status && !status.ok) {
+      const problem = document.createElement('small');
+      problem.className = 'hotkey-problem';
+      problem.textContent = HOTKEY_ERRORS[status.error] ?? 'Could not be registered.';
+      row.append(problem);
+    }
+    return row;
+  }));
+}
+
+/**
+ * A hotkey fired -- usually while a game, not Harmony, has focus.
+ *
+ * Mute and deafen go through their buttons, so a hotkey does exactly what a
+ * click does: the same state, the same cue, the same message to the server.
+ * The cue matters more here than anywhere: it is the only confirmation
+ * somebody gets without alt-tabbing.
+ */
+harmony.hotkeys.onFired((id) => {
+  if (id === 'mute' || id === 'deafen') {
+    const button = id === 'mute' ? el.voiceMute : el.voiceDeafen;
+    if (!state.voice.channelId || button.disabled) return;
+    button.click();
+    return;
+  }
+  if (id.startsWith('clip:')) {
+    const clip = state.soundpad.clips.find((c) => String(c.id) === id.slice(5));
+    if (clip) playSoundpadClip(clip);
+  }
+});
 
 /** Devices seen at the last enumeration, so a change can be compared. */
 let lastDevices = { inputs: [], outputs: [], cameras: [] };
@@ -5485,6 +5829,7 @@ async function loadSoundpad() {
     const { clips } = await harmony.api.soundpad(state.server);
     state.soundpad.clips = clips;
     renderSoundpad();
+    syncHotkeys();
     // Clips must survive cache eviction: the first press of a button should
     // never be a 300 ms download, and they are small.
     await refreshKeepSet();
@@ -5585,6 +5930,29 @@ function closeSoundpad() {
   applyVoiceButtons();
 }
 
+/**
+ * Play a clip for the whole channel. From a click or from a hotkey.
+ *
+ * Only the event is sent. Every client plays its own cached copy -- see the
+ * Soundpad comment in the server's chat.js for why.
+ */
+function playSoundpadClip(clip, button = null) {
+  if (!state.voice.channelId) {
+    showChannelsError('Join a voice channel first.');
+    return undefined;
+  }
+  // Acknowledged on the button rather than by closing the panel: people
+  // fire several in a row, and a soundboard that shuts after one is a
+  // soundboard you have to reopen to use.
+  if (button) {
+    button.setAttribute('data-playing', '');
+    setTimeout(() => button.removeAttribute('data-playing'), 350);
+  }
+  return harmony.realtime
+    .request('soundpad:play', { channelId: state.voice.channelId, clipId: clip.id })
+    .catch((err) => showChannelsError(err.message));
+}
+
 function renderSoundpad() {
   el.soundpadAdd.hidden = !isAdmin();
   applySoundpadVolume();
@@ -5619,18 +5987,33 @@ function renderSoundpad() {
     play.append(name);
     play.title = clip.name;
 
-    play.addEventListener('click', () => {
-      if (!state.voice.channelId) return showChannelsError('Join a voice channel first.');
-      // The press is acknowledged on the button rather than by closing the
-      // panel: people fire several in a row, and a soundboard that shuts
-      // after one is a soundboard you have to reopen to use.
-      play.setAttribute('data-playing', '');
-      setTimeout(() => play.removeAttribute('data-playing'), 350);
-      // Only the event is sent. Every client plays its own cached copy --
-      // see the Soundpad comment in the server's chat.js for why.
-      return harmony.realtime
-        .request('soundpad:play', { channelId: state.voice.channelId, clipId: clip.id })
-        .catch((err) => showChannelsError(err.message));
+    const bound = clipHotkey(clip.id);
+    if (bound) {
+      const key = document.createElement('span');
+      key.className = 'clip-key';
+      key.textContent = formatAccelerator(bound);
+      play.append(key);
+      play.title = `${clip.name} (${formatAccelerator(bound)})`;
+    }
+
+    play.addEventListener('click', () => playSoundpadClip(clip, play));
+
+    // Hotkeys are personal, so this is for everybody, not only admins.
+    cell.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      const current = clipHotkey(clip.id);
+      openRowMenu(clip.name, [
+        {
+          label: current ? `Change hotkey (${formatAccelerator(current)})` : 'Set hotkey',
+          title: 'Play this clip from anywhere, even inside a game',
+          run: () => editHotkey(`clip:${clip.id}`, clip.name),
+        },
+        ...(current ? [{
+          label: 'Remove hotkey',
+          title: 'Stop this combination playing the clip',
+          run: () => saveHotkey(`clip:${clip.id}`, ''),
+        }] : []),
+      ], event);
     });
 
     cell.append(play);
@@ -6031,6 +6414,7 @@ function onRealtimeEvent(msg) {
     case 'soundpad':
       state.soundpad.clips = msg.clips;
       renderSoundpad();
+      syncHotkeys();
       break;
 
     /*
@@ -6657,6 +7041,7 @@ async function startBroadcast() {
     renderChannelVideo();
     el.broadcastAudioNote.textContent = audioNote;
     el.broadcastStats.textContent = 'Connecting…';
+    voiceCue('streamStart');
     el.liveResolution.value = resolution;
     el.liveFramerate.value = String(framerate);
     updateMonitorButton();
@@ -7005,6 +7390,7 @@ function updateMonitorButton() {
 
 async function stopBroadcast(reason) {
   const wasChannel = Boolean(state.share.target);
+  if (isBroadcasting()) voiceCue('streamStop');
   await teardown();
   if (wasChannel) {
     if (reason) showChannelsError(reason);
@@ -7986,7 +8372,12 @@ el.channelsSignout.addEventListener('click', async () => {
 });
 
 el.voiceMute.addEventListener('click', async () => {
-  const muted = state.voice.setMuted(!state.voice.muted);
+  const before = state.voice.muted;
+  const muted = state.voice.setMuted(!before);
+  // From what actually happened, not from what was asked: an admin's mute
+  // can refuse the unmute, and a cue saying otherwise would be a lie told
+  // to somebody who is not looking at the screen.
+  if (muted !== before) voiceCue(muted ? 'mute' : 'unmute');
   applyVoiceButtons();
   await harmony.realtime
     .request('voice:mute', {
@@ -8001,6 +8392,7 @@ el.voiceDeafen.addEventListener('click', () => {
   // conversation they think is private.
   state.voice.setDeafened(!state.voice.deafened);
   if (state.voice.deafened && !state.voice.muted) state.voice.setMuted(true);
+  voiceCue(state.voice.deafened ? 'deafen' : 'undeafen');
   harmony.realtime
     .request('voice:mute', {
       channelId: state.voice.channelId,
@@ -8141,6 +8533,18 @@ el.soundpadMute.addEventListener('click', async () => {
  * can have appeared while the app was in the background and this is the
  * exact moment somebody wants to see it.
  */
+// Applied as it moves; saved, and previewed, when it is let go.
+el.soundVolume.addEventListener('input', () => {
+  const percent = Number(el.soundVolume.value);
+  showVolume(el.soundVolume, el.soundVolumeLabel, percent);
+  setCueVolume(percent / 100);
+});
+el.soundVolume.addEventListener('change', async () => {
+  playCue('join');
+  await harmony.settings.set({ soundVolume: Number(el.soundVolume.value) });
+  state.settings = await harmony.settings.get();
+});
+
 el.voiceSounds.addEventListener('change', async () => {
   await harmony.settings.set({ voiceSounds: el.voiceSounds.checked });
   state.settings = await harmony.settings.get();
@@ -8154,6 +8558,8 @@ el.voiceConfig.addEventListener('click', () => {
   renderThemes();
   el.voiceSounds.checked = state.settings?.voiceSounds !== false;
   el.mentionSound.checked = state.settings?.mentionSound !== false;
+  showVolume(el.soundVolume, el.soundVolumeLabel, state.settings?.soundVolume ?? 100);
+  renderHotkeyList();
   // No save: this is drawing the dialog from what is already stored, and
   // writing it back on every open is a write for nothing.
   applyScale(state.settings?.uiScale ?? SCALE_DEFAULT, { save: false });

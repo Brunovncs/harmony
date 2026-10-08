@@ -25,6 +25,21 @@ contextBridge.exposeInMainWorld('harmony', {
   relaunch: invoke('app:relaunch'),
   setScale: invoke('app:scale'),
 
+  hotkeys: {
+    set: invoke('hotkeys:set'),
+
+    /**
+     * A global hotkey fired, whichever application had focus.
+     * @param {(id: string) => void} handler
+     * @returns {() => void} unsubscribe
+     */
+    onFired(handler) {
+      const listener = (_event, id) => handler(id);
+      ipcRenderer.on('hotkey:fired', listener);
+      return () => ipcRenderer.removeListener('hotkey:fired', listener);
+    },
+  },
+
   /**
    * Fires when the window is minimised or restored.
    * @param {(visible: boolean) => void} handler
