@@ -740,17 +740,27 @@ select:focus {
   opacity: 1;
 }
 
-/* ---------- dragging a channel ---------- */
+/* ---------- dragging a channel, or a whole group ---------- */
 
-.channel-row[data-dragging] {
+.channel-row[data-dragging],
+.channel-group[data-dragging] {
   opacity: 0.4;
 }
 /* A line where it would land, rather than moving the rows around under the
    cursor: the sidebar is short and reflowing it mid-drag makes the target
    you were aiming at move away from you. */
-.channel-row[data-drop-before] {
+.channel-row[data-drop-before],
+.channel-group[data-drop-before] {
   box-shadow: inset 0 2px 0 var(--accent);
 }
+/*
+ * A heading is two targets at once, and the mark says which.
+ *
+ * A line above it means the thing you are dragging lands there; a filled
+ * heading means it goes INSIDE. Drawing both the same way would make a
+ * group heading the one place in the sidebar where you cannot tell what
+ * the drop is about to do.
+ */
 .channel-group[data-drop-into] {
   background: rgb(var(--accent-rgb) / 0.22);
   color: var(--text);

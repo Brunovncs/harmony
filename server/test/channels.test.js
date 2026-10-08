@@ -365,6 +365,37 @@ describe('channel groups', () => {
     assert.equal(res.body.error, 'no_such_group');
   });
 
+  it('REORDERS THE GROUPS THEMSELVES, and their channels follow', async () => {
+    // The route accepted this from the day it was written and nothing in
+    // the client could ask for it, which is the same shape of gap as a
+    // tested route with no button in front of it.
+    const second = (await api('/api/channels/groups', {
+      method: 'POST', body: { name: 'Quiet Corner' }, token: adminToken,
+    })).body.group.id;
+
+    const before = (await api('/api/channels', { token: adminToken })).body.groups;
+    assert.deepEqual(before.map((g) => g.id), [groupId, second]);
+
+    const res = await api('/api/channels/arrange', {
+      method: 'POST',
+      body: {
+        groups: [second, groupId],
+        channels: [{ id: channelId, groupId }],
+      },
+      token: adminToken,
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.groups.map((g) => g.id), [second, groupId],
+      'position comes from the index in the submitted list');
+
+    const after = (await api('/api/channels', { token: memberToken })).body.groups;
+    assert.deepEqual(after.map((g) => g.id), [second, groupId],
+      'and everybody sees the same order');
+
+    // Put it back, so the delete test below still finds what it expects.
+    await api(`/api/channels/groups/${second}/delete`, { method: 'POST', token: adminToken });
+  });
+
   it('renames one', async () => {
     const res = await api(`/api/channels/groups/${groupId}`, {
       method: 'POST', body: { name: 'Lounge' }, token: adminToken,

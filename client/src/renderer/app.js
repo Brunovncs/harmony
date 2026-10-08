@@ -1361,9 +1361,17 @@ function rowButton(label, title, onClick) {
  */
 
 /** Channels in the order they are drawn: ungrouped, then group by group. */
-function orderedChannels() {
+/**
+ * Every channel, in the order the sidebar draws them.
+ *
+ * `groups` is a parameter rather than always state, because moving a group
+ * moves its channels with it: the caller works out the new group order and
+ * asks what the channel order would be under it, without anything in state
+ * changing until the server has agreed.
+ */
+function orderedChannels(groups = state.channels.groups) {
   const byGroup = new Map([[null, []]]);
-  for (const group of state.channels.groups) byGroup.set(group.id, []);
+  for (const group of groups) byGroup.set(group.id, []);
   for (const channel of state.channels.list) {
     const key = channel.groupId ?? null;
     // A channel in a group this client has not heard of yet reads as
@@ -1372,15 +1380,21 @@ function orderedChannels() {
   }
   return [
     ...byGroup.get(null),
-    ...state.channels.groups.flatMap((group) => byGroup.get(group.id) ?? []),
+    ...groups.flatMap((group) => byGroup.get(group.id) ?? []),
   ];
 }
 
-/** Send the whole tree. See Channels.arrange for why it is not a move. */
-async function applyArrangement(ordered) {
+/**
+ * Send the whole tree. See Channels.arrange for why it is not a move.
+ *
+ * Nothing in state is touched before this: both orders are worked out in
+ * local arrays and sent, so a refusal can redraw from what the server last
+ * said rather than from a guess this client made.
+ */
+async function applyArrangement(ordered, groups = state.channels.groups) {
   try {
     await harmony.api.arrange(state.server, {
-      groups: state.channels.groups.map((g) => g.id),
+      groups: groups.map((g) => g.id),
       channels: ordered.map((c) => ({ id: c.id, groupId: c.groupId ?? null })),
     });
   } catch (err) {
@@ -1433,6 +1447,36 @@ function moveChannel(id, to) {
 
   rest.splice(index, 0, moving);
   applyArrangement(rest);
+}
+
+/**
+ * Move a group, and everything in it.
+ *
+ * The channels are not mentioned anywhere below, and they do not need to
+ * be: positions are written from the order of the submitted list, and
+ * orderedChannels() walks the groups in the order it is given. Ask it about
+ * the new group order and the channels come out already following their
+ * headings.
+ *
+ * @param {number} id        the group being dragged
+ * @param {number|null} beforeId  the group to land above, or null for last
+ */
+function moveGroup(id, beforeId) {
+  const groups = [...state.channels.groups];
+  const from = groups.findIndex((g) => g.id === id);
+  if (from < 0) return;
+
+  const [moving] = groups.splice(from, 1);
+  let index = groups.length;
+  if (beforeId != null) {
+    index = groups.findIndex((g) => g.id === beforeId);
+    // The anchor was the group being dragged, or one this client has not
+    // heard of. Either way there is nothing to be above.
+    if (index < 0) return;
+  }
+  groups.splice(index, 0, moving);
+
+  applyArrangement(orderedChannels(groups), groups);
 }
 
 /** The row for one channel, plus its member list where it has one. */
@@ -1644,22 +1688,61 @@ function groupNode(group) {
     );
     li.append(tools);
 
-    // Dropping ON a heading means "into this group, at the end", which is
-    // the only way to reach an empty one or to add to a collapsed one.
-    li.addEventListener('dragover', (event) => {
-      if (dragging?.kind !== 'channel') return;
-      event.preventDefault();
+    li.draggable = true;
+    li.addEventListener('dragstart', (event) => {
+      dragging = { kind: 'group', id: group.id };
+      event.dataTransfer.effectAllowed = 'move';
+      // Firefox will not start a drag without data on the transfer.
+      event.dataTransfer.setData('text/plain', `group:${group.id}`);
+      li.setAttribute('data-dragging', '');
+    });
+    li.addEventListener('dragend', () => {
+      dragging = null;
+      li.removeAttribute('data-dragging');
       clearDropMarks();
-      li.setAttribute('data-drop-into', '');
+    });
+
+    /*
+     * A heading is two different drop targets, and which one it is depends
+     * on what is being dragged.
+     *
+     * A channel dropped on it goes INTO the group, at the end -- the only
+     * way to reach an empty one or to add to a collapsed one. A group
+     * dropped on it lands ABOVE it, which is how every other reorder in
+     * this sidebar works. Two marks, so the difference is visible before
+     * the mouse is released rather than after.
+     */
+    li.addEventListener('dragover', (event) => {
+      if (dragging?.kind === 'channel') {
+        event.preventDefault();
+        clearDropMarks();
+        li.setAttribute('data-drop-into', '');
+        return;
+      }
+      if (dragging?.kind === 'group' && dragging.id !== group.id) {
+        event.preventDefault();
+        clearDropMarks();
+        li.setAttribute('data-drop-before', '');
+      }
     });
     li.addEventListener('drop', (event) => {
-      if (dragging?.kind !== 'channel') return;
-      event.preventDefault();
-      event.stopPropagation();
-      const id = dragging.id;
-      dragging = null;
-      clearDropMarks();
-      moveChannel(id, { groupId: group.id });
+      if (dragging?.kind === 'channel') {
+        event.preventDefault();
+        event.stopPropagation();
+        const id = dragging.id;
+        dragging = null;
+        clearDropMarks();
+        moveChannel(id, { groupId: group.id });
+        return;
+      }
+      if (dragging?.kind === 'group' && dragging.id !== group.id) {
+        event.preventDefault();
+        event.stopPropagation();
+        const id = dragging.id;
+        dragging = null;
+        clearDropMarks();
+        moveGroup(id, group.id);
+      }
     });
   }
 
@@ -7693,17 +7776,25 @@ el.chatSearchClear.addEventListener('click', () => {
  * once the sidebar has any. Dropping on the empty space below everything
  * puts it back at the end of the ungrouped block.
  */
+/*
+ * The empty space under the list.
+ *
+ * For a channel it means "out of every group", which is the only way back
+ * out of one. For a group it means last, which is the only way to reach the
+ * bottom -- there is no heading below the last heading to drop above.
+ */
 el.channelItems.addEventListener('dragover', (event) => {
-  if (dragging?.kind !== 'channel') return;
+  if (!dragging) return;
   event.preventDefault();
 });
 el.channelItems.addEventListener('drop', (event) => {
-  if (dragging?.kind !== 'channel') return;
+  if (!dragging) return;
   event.preventDefault();
-  const id = dragging.id;
+  const { kind, id } = dragging;
   dragging = null;
   clearDropMarks();
-  moveChannel(id, { groupId: null });
+  if (kind === 'channel') moveChannel(id, { groupId: null });
+  else if (kind === 'group') moveGroup(id, null);
 });
 
 el.channelAdd.addEventListener('click', async () => {
