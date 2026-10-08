@@ -14,7 +14,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import { hashPassword, verifyPassword } from './accounts.js';
-import { normalizeName } from './rooms.js';
+
 
 /** Media kinds a member can publish, and the letter each takes in a path. */
 export const MEDIA_KINDS = { voice: 'v', cam: 'c', screen: 's' };
@@ -131,16 +131,42 @@ export function readChannelToken(secret, token) {
 // ---------------------------------------------------------------------------
 
 /**
- * Channel names are stored the same way nicknames are: folded to lowercase
- * with spaces removed, so "Game Night" is typed freely and stored as
- * `gamenight`.
+ * A channel name is kept as it was typed.
  *
- * A channel name is not a path -- voice paths are `vc-<cid>-<mid>-<k>` and
- * never contain it -- so this is not a technical requirement the way it is for
- * nicknames. It is consistency: one spelling per name, no two channels that
- * look identical in a sidebar, and nothing to decide about when matching.
+ * It used to be folded the way a nickname is -- "Game Night" stored as
+ * `gamenight` -- on the reasoning that one spelling per name is simpler.
+ * That reasoning was borrowed from nicknames and does not survive the
+ * move: a nickname is an IDENTIFIER. It is what @mentions match, what the
+ * MediaMTX username namespace holds, and what one person is and another
+ * is not, so two spellings of it would be two people.
+ *
+ * A channel name is a LABEL. Nothing matches on it, nothing is routed by
+ * it -- voice paths are `vc-<cid>-<mid>-<k>` and never contain it -- and
+ * the only thing it has to do is read well in a sidebar. Group names have
+ * always been kept as typed, which made "Game Night" sit under "Hangouts"
+ * as `gamenight`, in the same list, for no reason anybody could see.
+ *
+ * What is still refused: anything invisible. Control characters, and the
+ * format characters too -- a right-to-left override in a sidebar reverses
+ * the names around it, which is the same reason a display name and a
+ * soundpad label refuse one.
+ *
+ * The two exceptions are U+200D and U+FE0F, which hold emoji together.
+ * \p{C} would be the obvious one-line test and it takes both of those with
+ * it, so an emoji in a channel name would silently come apart into its
+ * pieces. The same hole, named for the same reason, as in reactionKey.
+ *
+ * Runs of whitespace collapse to one space so that two names cannot differ
+ * by something nobody can see.
  */
-const NAME_RE = /^[^\u0000-\u001f\s]{1,32}$/;
+function cleanChannelName(raw) {
+  return String(raw ?? '')
+    .replace(/[\p{Cc}\p{Cs}]/gu, '')
+    .replace(/[\p{Cf}]/gu, (c) => (c === '\u200d' ? c : ''))
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 32);
+}
 
 export class Channels {
   #db;
@@ -195,8 +221,8 @@ export class Channels {
 
   async create({ kind, name, password }) {
     if (kind !== 'voice' && kind !== 'text') return { ok: false, error: 'invalid_kind' };
-    const clean = normalizeName(name);
-    if (!NAME_RE.test(clean)) return { ok: false, error: 'invalid_name' };
+    const clean = cleanChannelName(name);
+    if (!clean) return { ok: false, error: 'invalid_name' };
 
     const hash = password ? await hashPassword(password) : null;
     const position = this.#q.nextPosition.get().p;
@@ -209,8 +235,8 @@ export class Channels {
     if (!channel) return { ok: false, error: 'no_such_channel' };
 
     if (name !== undefined) {
-      const clean = normalizeName(name);
-      if (!NAME_RE.test(clean)) return { ok: false, error: 'invalid_name' };
+      const clean = cleanChannelName(name);
+      if (!clean) return { ok: false, error: 'invalid_name' };
       this.#q.rename.run(clean, id);
     }
     if (password !== undefined) {
@@ -237,7 +263,7 @@ export class Channels {
   }
 
   createGroup(name) {
-    const clean = String(name ?? '').trim().slice(0, 32);
+    const clean = cleanChannelName(name);
     if (!clean) return { ok: false, error: 'invalid_name' };
     const position = this.#q.nextGroupPosition.get().p;
     const info = this.#q.insertGroup.run(clean, position, Date.now());
@@ -246,7 +272,7 @@ export class Channels {
 
   renameGroup(id, name) {
     if (!this.#q.groupById.get(id)) return { ok: false, error: 'no_such_group' };
-    const clean = String(name ?? '').trim().slice(0, 32);
+    const clean = cleanChannelName(name);
     if (!clean) return { ok: false, error: 'invalid_name' };
     this.#q.renameGroup.run(clean, id);
     return { ok: true, group: this.#q.groupById.get(id) };

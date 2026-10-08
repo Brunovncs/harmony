@@ -1436,13 +1436,18 @@ function channelNodes(channel) {
     li.append(lock);
   }
 
-  const occupants = state.channels.occupancy[channel.id] ?? 0;
-  if (channel.kind === 'voice' && occupants) {
-    const count = document.createElement('span');
-    count.className = 'count';
-    count.textContent = String(occupants);
-    li.append(count);
-  }
+  /*
+   * No occupant count beside the name.
+   *
+   * The people are listed directly underneath, with their faces on. A
+   * number saying there are two of them, a centimetre above two of them,
+   * is the same fact twice -- and it was the thing crowding the name on a
+   * narrow sidebar.
+   *
+   * state.channels.occupancy is still kept: it is a server push and it is
+   * what tells the sidebar a channel has anybody in it at all, without
+   * needing the whole roster for every channel.
+   */
 
   if (isAdmin()) {
     const tools = document.createElement('span');

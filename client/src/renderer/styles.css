@@ -742,12 +742,6 @@ select:focus {
   background: rgb(var(--accent-rgb) / 0.22);
   color: var(--text);
 }
-.channel-list li .count {
-  margin-left: auto;
-  font-size: 0.8rem;
-  opacity: 0.6;
-}
-
 /* ---------- who is in a voice channel ---------- */
 
 /*
@@ -769,26 +763,49 @@ select:focus {
  * fix; the lesson is that a shared `li` selector reaches further than it
  * looks.
  */
-.channel-members {
+/*
+ * `.channel-list li.channel-members`, and the extra class is the whole
+ * point of the selector.
+ *
+ * The previous attempt at this was `.channel-members` on its own, with a
+ * comment explaining that `.channel-list li` reaches further than it
+ * looks. It explained the problem and then lost to it: `.channel-list li`
+ * is (0,1,1) and `.channel-members` is (0,1,0), so NAMING a property here
+ * does not win it -- `align-items: center` kept applying, and in a column
+ * container that centres every child horizontally. That is why the names
+ * sat in the middle of the sidebar with their icons trailing them instead
+ * of in a column down the right.
+ *
+ * (0,2,1) beats it. Specificity is not a tie-break between rules that
+ * mention a property; it decides which rule is read at all.
+ */
+.channel-list li.channel-members {
   list-style: none;
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 0.15rem;
-  /* Barely indented. This is the roster now, not a footnote under the
-     channel row, so it gets the width the names need. */
-  padding: 0.15rem 0 0.4rem 0.6rem;
+  gap: 0.05rem;
+  /* Indented to put the faces under the channel's own icon, which is what
+     makes the two read as one block rather than two lists. */
+  padding: 0.1rem 0 0.35rem 0.55rem;
   margin: 0;
+  border-radius: 0;
+  /* It is a list of people, not a button. The rows have their own menu. */
+  cursor: default;
+}
+.channel-list li.channel-members:hover {
+  background: none;
 }
 .channel-member {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  font-size: 0.95rem;
-  padding: 0.25rem 0.4rem;
+  gap: 0.45rem;
+  font-size: 0.9rem;
+  padding: 0.2rem 0.35rem;
   border-radius: 6px;
   opacity: 0.9;
   min-width: 0;
+  cursor: default;
 }
 .channel-member:hover {
   background: rgb(var(--tint-rgb) / 0.06);
@@ -797,13 +814,19 @@ select:focus {
    vertical-align does nothing to a flex item and the right margin fought
    with the row's own gap. */
 .channel-member .avatar.tiny {
+  flex: 0 0 auto;
   width: 2em;
   height: 2em;
   font-size: 0.62em;
   margin-right: 0;
   vertical-align: baseline;
 }
+/* flex, so it takes the room between the face and the icons and the
+   ellipsis has something to happen inside. Without it a long name pushes
+   the icons off the edge instead of being cut. */
 .channel-member .member-name {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -820,13 +843,23 @@ select:focus {
 .channel-member[data-forced] .avatar {
   filter: grayscale(1);
 }
-/* Muted, deafened and the rest sit hard against the right edge of the
-   list, in a column of their own, rather than trailing each name at
-   whatever x the name happens to end at. */
+/*
+ * Muted, deafened and the rest sit hard against the right edge of the
+ * list, in a column of their own, rather than trailing each name at
+ * whatever x the name happens to end at.
+ *
+ * margin-left: auto was already doing this and was never visible, because
+ * the list above was centring its children -- there was no right edge to
+ * sit against. It works now.
+ */
 .channel-member .status {
+  flex: 0 0 auto;
   margin-left: auto;
   padding-left: 0.3rem;
   font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
 }
 .channel-member .status-dot {
   font-size: 0.8rem;

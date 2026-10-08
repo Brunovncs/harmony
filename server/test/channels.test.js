@@ -193,15 +193,42 @@ describe('channel management', () => {
     assert.equal(res.status, 403);
   });
 
-  it('lets an owner create one, and stores the name folded', async () => {
+  it('KEEPS THE NAME AS IT WAS TYPED', async () => {
+    // Not folded like a nickname. A nickname is an identifier -- it is what
+    // a mention matches and what the MediaMTX namespace holds, so two
+    // spellings would be two people. A channel name is a label: nothing
+    // matches on it and nothing is routed by it.
     const res = await api('/api/channels', {
       method: 'POST', body: { kind: 'voice', name: 'Game Night' }, token: adminToken,
     });
     assert.equal(res.status, 201);
-    assert.equal(res.body.channel.name, 'gamenight',
-      '"Game Night" is accepted as typed and stored folded');
+    assert.equal(res.body.channel.name, 'Game Night');
     assert.equal(res.body.channel.kind, 'voice');
     assert.equal(res.body.channel.locked, false);
+  });
+
+  it('collapses whitespace nobody can see, and strips control characters', async () => {
+    const res = await api('/api/channels', {
+      method: 'POST',
+      body: { kind: 'text', name: '  Book\u0007   Club \u202e ' },
+      token: adminToken,
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.channel.name, 'Book Club',
+      'two names must not be able to differ by something invisible');
+  });
+
+  it('keeps an emoji in one piece', async () => {
+    // \p{C} is the obvious way to strip the invisible characters and it
+    // would take the zero width joiner with it, quietly breaking every
+    // emoji made of more than one code point.
+    const res = await api('/api/channels', {
+      method: 'POST',
+      body: { kind: 'text', name: '\u{1F468}\u200D\u{1F4BB} dev talk' },
+      token: adminToken,
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.channel.name, '\u{1F468}\u200D\u{1F4BB} dev talk');
   });
 
   it('refuses a name that is nothing but spaces', async () => {
@@ -227,7 +254,7 @@ describe('channel management', () => {
       token: adminToken,
     });
     assert.equal(res.status, 201);
-    assert.equal(res.body.channel.name, 'privateroom');
+    assert.equal(res.body.channel.name, 'Private Room');
     assert.equal(res.body.channel.locked, true);
   });
 
