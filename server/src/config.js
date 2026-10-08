@@ -98,12 +98,22 @@ export const config = {
   // does not stay logged in forever.
   sessionIdleMs: num(process.env.HARMONY_SESSION_IDLE_MS, 30 * 24 * 60 * 60 * 1000),
 
-  // Handed to clients so their RTCPeerConnection can discover its own public
-  // address. The server does not need STUN for itself; MTX_WEBRTCADDITIONALHOSTS
-  // tells it what to advertise.
-  iceServers: list(process.env.HARMONY_STUN_URLS, ['stun:stun.l.google.com:19302']).map(
-    (urls) => ({ urls }),
-  ),
+  // STUN servers handed to clients. NONE by default, because nothing here
+  // needs one.
+  //
+  // STUN tells a peer its own public address so that ANOTHER peer can reach
+  // it. Every Harmony connection is client -> this server, never client ->
+  // client: the server advertises its own address (MTX_WEBRTCADDITIONALHOSTS)
+  // and learns each client's from the client's first packet. A STUN round
+  // trip only delays the offer -- and, measured on a network with no public
+  // IPv6, with Google's and Cloudflare's STUN servers ICE gathering NEVER
+  // finished: the IPv6 lookups fail (ERR_NAME_NOT_RESOLVED) and the port
+  // they belong to never reports done, so every connection sat out the
+  // client's whole 4-second gathering timeout before sending its offer.
+  // Without STUN, gathering takes ~140 ms.
+  //
+  // Still configurable, for anybody whose setup somehow needs it.
+  iceServers: list(process.env.HARMONY_STUN_URLS, []).map((urls) => ({ urls })),
 
   // Optional: a TURN relay for clients on networks that block direct UDP.
   // Not required for the server itself -- it is reachable via the forwarded port.

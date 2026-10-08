@@ -97,11 +97,18 @@ export async function runConnectionTest(server, onStep) {
     });
 
     // srflx means a STUN server answered, which also proves outbound UDP works.
+    // A server that hands out no STUN -- the default since 3.0, because none is
+    // needed -- has nothing to ask, so the step says so instead of failing.
     const hasSrflx = types.has('srflx');
+    const stunOffered = (session.iceServers ?? []).some(
+      (s) => [].concat(s?.urls ?? []).some((u) => /^stuns?:/i.test(String(u))),
+    );
     step(
       'Discover your public address (STUN)',
-      hasSrflx,
-      hasSrflx ? [...types].join(', ') : `only ${[...types].join(', ') || 'none'} — UDP may be blocked`,
+      hasSrflx || !stunOffered,
+      !stunOffered
+        ? 'not needed: this server offers no STUN'
+        : hasSrflx ? [...types].join(', ') : `only ${[...types].join(', ') || 'none'} — UDP may be blocked`,
     );
 
     // --- 4. the media path ---------------------------------------------------

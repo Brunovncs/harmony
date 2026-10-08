@@ -10,6 +10,28 @@ import { harmony } from './bridge.js';
 const ICE_GATHER_TIMEOUT_MS = 4000;
 
 /**
+ * The ICE servers worth using: TURN relays, never STUN.
+ *
+ * Every connection here is to the media server, which advertises its own
+ * address and learns ours from our first packet, so a STUN-discovered public
+ * address adds nothing. It costs, though. Measured on a network with no
+ * public IPv6: with STUN configured, gathering never completed -- the IPv6
+ * lookups fail (ERR_NAME_NOT_RESOLVED) and that port never reports done -- so
+ * every publish and every subscription waited the whole timeout above before
+ * sending its offer. Without STUN it finishes in ~140 ms.
+ *
+ * Servers since 3.0 send no STUN by default; this covers one that still does.
+ */
+export function relayServers(iceServers = []) {
+  const out = [];
+  for (const server of iceServers ?? []) {
+    const urls = [].concat(server?.urls ?? []).filter((u) => !/^stuns?:/i.test(String(u)));
+    if (urls.length) out.push({ ...server, urls });
+  }
+  return out;
+}
+
+/**
  * Wait for ICE gathering to finish so we can send one complete offer.
  *
  * WHIP supports trickle ICE, but MediaMTX answers a single shot fine and
@@ -147,7 +169,7 @@ export async function publish({
   insertableStreams = false,
 }) {
   const pc = new RTCPeerConnection({
-    iceServers,
+    iceServers: relayServers(iceServers),
     bundlePolicy: 'max-bundle',
     // Only when a clip buffer is going to read the frames.
     //
@@ -208,7 +230,7 @@ export async function watch({
   media = 'both',
 }) {
   const pc = new RTCPeerConnection({
-    iceServers,
+    iceServers: relayServers(iceServers),
     bundlePolicy: 'max-bundle',
     // Only when a clip buffer is going to read the frames.
     //
