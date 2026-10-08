@@ -10,10 +10,6 @@ use std::sync::Arc;
 
 fn shapes(name: &str) -> &'static str {
     match name {
-        // Harmony's mark: a microphone on a stand, its capsule a thick round-capped stroke.
-        "brand" => {
-            r#"<path d="M12 6.5v4" stroke-width="5.6"/><path d="M6.8 8.6v1.9a5.2 5.2 0 0 0 10.4 0V8.6M12 15.7v4.2M8.6 19.9h6.8" stroke-width="1.7"/>"#
-        }
         // Pads that play sounds.
         "soundboard" => {
             r#"<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><circle cx="15.5" cy="19.5" r="1.5"/><path d="M17 19.5V14l3.5 1.5"/>"#

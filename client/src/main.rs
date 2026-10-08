@@ -22,6 +22,15 @@ mod widgets;
 
 use gpui::{AppContext, Bounds, QuitMode, TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowOptions, size};
 
+/// 1180×760, or less on a small screen, so the whole window and its title bar start in view
+/// with room around them.
+fn first_size(cx: &gpui::App) -> gpui::Size<gpui::Pixels> {
+    let want = size(gpui::px(1180.), gpui::px(760.));
+    let Some(display) = cx.primary_display() else { return want };
+    let room = display.visible_bounds().size;
+    size(want.width.min(room.width * 0.85), want.height.min(room.height * 0.8))
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("harmony=info,warn")).init();
     let smoke = std::env::args().any(|a| a == "--smoke");
@@ -37,7 +46,7 @@ fn main() {
         ui::updates::init(cx);
 
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(gpui::px(1240.), gpui::px(820.)), cx))),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, first_size(cx), cx))),
             titlebar: Some(TitlebarOptions { title: Some("Harmony".into()), ..Default::default() }),
             app_id: Some("harmony".into()),
             window_min_size: Some(size(gpui::px(640.), gpui::px(480.))),

@@ -11,13 +11,6 @@ client. This fork keeps his server, with a few small additions that stay
 compatible, and replaces the client with a native one written in Rust on
 [GPUI](https://www.gpui.rs/), the UI framework behind the Zed editor.
 
-<p align="center">
-  <img src="media/server_view.png" alt="A server: channels, chat and members" width="49%">
-  <img src="media/voice_view.png" alt="A voice channel with two people in it" width="49%">
-  <img src="media/home_screen.png" alt="The connect screen" width="49%">
-  <img src="media/settings_view.png" alt="Settings: the colour palettes" width="49%">
-</p>
-
 ## What is different in this fork
 
 The client is one native `harmony.exe`, with no browser engine inside. It talks
@@ -100,8 +93,7 @@ TLS, dynamic IPs, ports and troubleshooting are covered in
 
 Harmony was created by [Pedro Lucas Miguel](https://github.com/PedroLucasMiguel).
 The GPUI client and the changes in this fork are by
-[Brunovncs](https://github.com/Brunovncs), and part of its interface comes from
-OpenController and Texel by the same author. Third-party material in the client is
+[Brunovncs](https://github.com/Brunovncs). Third-party material in the client is
 listed in [client/THIRD_PARTY_NOTICES.md](client/THIRD_PARTY_NOTICES.md).
 
 MIT, see [LICENSE](LICENSE).

@@ -115,7 +115,17 @@ impl Root {
 /// The Harmony mark: a microphone on a stand inside a rounded square, in the accent, as the app
 /// icon draws it.
 pub fn brand_mark(size: f32, t: &Theme) -> gpui::Div {
-    div().flex_none().size(px(size)).rounded(px(size * 0.24)).bg(t.accent).child(icon("brand", size, t.on_accent))
+    let bar = |h: f32| div().w(px(size * 0.085)).h(px(size * h)).rounded(px(size * 0.05)).bg(t.on_accent);
+    div()
+        .flex_none()
+        .size(px(size))
+        .rounded(px(size * 0.26))
+        .bg(t.accent)
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(size * 0.055))
+        .children([0.18, 0.36, 0.52, 0.36, 0.18].map(bar))
 }
 
 impl Render for Root {
@@ -142,6 +152,17 @@ impl Render for Root {
             .flex()
             .children(rail)
             .child(div().flex_1().min_w(px(0.)).h_full().child(screen))
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .right(px(12.))
+                    .text_size(px(10.))
+                    .line_height(px(10.))
+                    .text_color(t.text3)
+                    .opacity(0.6)
+                    .child(concat!("v", env!("CARGO_PKG_VERSION"))),
+            )
             .children(self.render_overlay(&t, cx))
             .when(!self.toasts.is_empty(), |d| {
                 d.child(div().absolute().bottom(px(24.)).left_0().right_0().flex().flex_col().items_center().gap(px(8.)).children(

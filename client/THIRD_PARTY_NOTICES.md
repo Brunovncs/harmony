@@ -6,13 +6,13 @@ Everything here ships inside `harmony.exe`.
 | --- | --- | --- |
 | Geist and Geist Mono, by Vercel | `assets/fonts/` | SIL Open Font License 1.1, in `assets/fonts/OFL.txt` |
 | MediaPipe selfie segmentation, by Google, as converted to ONNX by onnx-community | `assets/models/selfie_segmentation.onnx` | Apache 2.0 |
-| Lucide icons, by the Lucide contributors (path data, every icon but `brand`, `soundboard` and `blur`) | `src/icons.rs` | ISC, below |
+| Lucide icons, by the Lucide contributors (path data, every icon but `soundboard` and `blur`) | `src/icons.rs` | ISC, below |
 | The text field, the theme's Windows accent reader and the widget patterns, from OpenController by Brunovncs | `src/text_field.rs`, `src/theme.rs`, `src/widgets.rs` | MIT |
 | libwebrtc, by the WebRTC project, through LiveKit's `libwebrtc` and `webrtc-sys` crates | linked in | BSD 3-Clause (libwebrtc), Apache 2.0 (bindings) |
 
 Harmony's own icon (`assets/icon.ico` and `assets/icon.png`) is drawn in code by `examples/icon.rs`,
 and the camera backgrounds in `assets/backgrounds/` by `examples/backgrounds.rs`. They, and the
-`brand`, `soundboard` and `blur` shapes in `src/icons.rs`, are original to this repository and
+`soundboard` and `blur` shapes in `src/icons.rs`, are original to this repository and
 covered by its MIT licence.
 
 Rust crates are listed with their licences in `Cargo.lock`; `cargo about` or `cargo license`
