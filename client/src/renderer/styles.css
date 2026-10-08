@@ -240,6 +240,64 @@ body {
   user-select: none;
 }
 
+/* ---------- scrollbars ---------- */
+
+/*
+ * Every scrolling area in the app, in one place.
+ *
+ * The default Chromium scrollbar is a light grey trough with arrow buttons
+ * at each end, which is the one thing on screen that does not change with
+ * the palette -- a white-ish bar down the side of a midnight window, and
+ * the same bar again inside every popover, code block and emoji grid.
+ *
+ * ::-webkit-scrollbar rather than `scrollbar-color`. The two are mutually
+ * exclusive in Chromium -- setting the standard property makes it ignore
+ * these entirely -- and the standard one cannot round the thumb, inset it
+ * from the edge, or take the arrow buttons away.
+ *
+ * The colour is --tint-rgb, which is white on the dark palettes and black
+ * on the light one, so the thumb is a shadow of whatever it is sitting on
+ * rather than a colour that has to be chosen eight times.
+ */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+/* Transparent, not --surface: a scrollbar track drawn in a colour is a
+   stripe down the side of every pane, and these panes already have edges. */
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+/*
+ * The border is transparent and the background is clipped to the padding
+ * box, which insets the thumb without changing the width of the bar. That
+ * gap is the whole difference between a thumb that looks designed and one
+ * that looks like it is touching the wall.
+ */
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--tint-rgb) / 0.18);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--tint-rgb) / 0.32);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:active {
+  background: rgb(var(--tint-rgb) / 0.45);
+  background-clip: padding-box;
+}
+/* The little arrows at each end. Nobody has clicked one this decade, and
+   they are the half of the default scrollbar that cannot be made to look
+   like anything else. */
+::-webkit-scrollbar-button {
+  display: none;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 h1,
 h2 {
   margin: 0;
