@@ -329,6 +329,9 @@ pub struct Mic {
     pub level: AtomicF32,
     /// Whether the gate let the last frame through.
     pub open: AtomicBool,
+    /// Whether a capture stream is open. While none is (muted, or no device), the publisher still
+    /// gets silence every 10 ms, so the people listening don't take the stream for stalled.
+    capturing: AtomicBool,
     /// Where processed 10 ms frames go: the voice publisher, when there is one.
     sink: Mutex<Option<MicSink>>,
     users: AtomicU64,
@@ -368,14 +371,15 @@ impl Audio {
             noise_suppression: AtomicBool::new(true),
             level: AtomicF32::default(),
             open: AtomicBool::new(false),
+            capturing: AtomicBool::new(false),
             sink: Mutex::new(None),
             users: AtomicU64::new(0),
         });
         let near = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
         let (tx, rx) = mpsc::channel();
         {
-            let (mixer, near) = (mixer.clone(), near.clone());
-            std::thread::Builder::new().name("harmony-audio".into()).spawn(move || device_thread(rx, mixer, near)).ok();
+            let (mixer, mic, near) = (mixer.clone(), mic.clone(), near.clone());
+            std::thread::Builder::new().name("harmony-audio".into()).spawn(move || device_thread(rx, mixer, mic, near)).ok();
         }
         {
             let (mixer, mic, near) = (mixer.clone(), mic.clone(), near.clone());
@@ -427,7 +431,7 @@ impl Drop for MicGuard {
     }
 }
 
-fn device_thread(rx: mpsc::Receiver<Command>, mixer: Arc<Mixer>, near: Arc<(Mutex<VecDeque<f32>>, Condvar)>) {
+fn device_thread(rx: mpsc::Receiver<Command>, mixer: Arc<Mixer>, mic: Arc<Mic>, near: Arc<(Mutex<VecDeque<f32>>, Condvar)>) {
     let mut output: Option<cpal::Stream> = None;
     let mut input: Option<cpal::Stream> = None;
     while let Ok(cmd) = rx.recv() {
@@ -440,11 +444,15 @@ fn device_thread(rx: mpsc::Receiver<Command>, mixer: Arc<Mixer>, near: Arc<(Mute
                 }
             }
             Command::Input(id) => {
+                mic.capturing.store(false, Ordering::Relaxed);
                 input = None;
                 near.0.lock().clear();
                 if let Some(id) = id {
                     match open_input(&id, near.clone()) {
-                        Ok(s) => input = Some(s),
+                        Ok(s) => {
+                            input = Some(s);
+                            mic.capturing.store(true, Ordering::Relaxed);
+                        }
                         Err(e) => log::warn!("microphone did not open: {e}"),
                     }
                 }
@@ -567,16 +575,38 @@ fn dsp_thread(mixer: Arc<Mixer>, mic: Arc<Mic>, near: Arc<(Mutex<VecDeque<f32>>,
     let mut far_pending: VecDeque<f32> = VecDeque::new();
     let mut gate_gain = 0f32;
     let mut held_until = Instant::now();
+    let tick = Duration::from_millis(10);
+    let mut next_silence = Instant::now() + tick;
     loop {
-        {
+        let heard = {
             let (buf, cv) = &*near;
             let mut b = buf.lock();
-            while b.len() < FRAME {
-                cv.wait_for(&mut b, Duration::from_millis(200));
+            loop {
+                if b.len() >= FRAME {
+                    for (d, s) in frame.iter_mut().zip(b.drain(..FRAME)) {
+                        *d = s;
+                    }
+                    next_silence = Instant::now() + tick;
+                    break true;
+                }
+                if mic.capturing.load(Ordering::Relaxed) {
+                    cv.wait_for(&mut b, Duration::from_millis(200));
+                } else if Instant::now() >= next_silence {
+                    next_silence = (next_silence + tick).max(Instant::now());
+                    break false;
+                } else {
+                    cv.wait_until(&mut b, next_silence);
+                }
             }
-            for (d, s) in frame.iter_mut().zip(b.drain(..FRAME)) {
-                *d = s;
+        };
+        if !heard {
+            mic.open.store(false, Ordering::Relaxed);
+            gate_gain = 0.;
+            if let Some(sink) = mic.sink.lock().as_mut() {
+                pcm.fill(0);
+                sink(&pcm);
             }
+            continue;
         }
         let (aec, ns) = (mic.echo_cancellation.load(Ordering::Relaxed), mic.noise_suppression.load(Ordering::Relaxed));
         if apm.as_ref().is_none_or(|(a, n, _)| (*a, *n) != (aec, ns)) {

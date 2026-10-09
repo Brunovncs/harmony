@@ -225,7 +225,9 @@ pub struct Voice {
     /// The microphone publish in flight, by generation.
     mic_attempt: Option<u64>,
     mic_backoff: Backoff,
-    _mic_guard: Option<MicGuard>,
+    /// Held only while unmuted: muted, the microphone is closed, so a headset's sidetone and
+    /// Windows' "in use" light go quiet too.
+    mic_guard: Option<MicGuard>,
     peers: HashMap<i64, Peer>,
     /// What was last told to the server about each path, and when.
     announced: HashMap<&'static str, (bool, Instant)>,
@@ -295,7 +297,7 @@ impl Voice {
             mic: None,
             mic_attempt: None,
             mic_backoff: Backoff::default(),
-            _mic_guard: Some(a.acquire_mic()),
+            mic_guard: (!muted).then(|| a.acquire_mic()),
             peers: HashMap::new(),
             announced: HashMap::new(),
             speaking: HashSet::new(),
@@ -408,7 +410,13 @@ impl Voice {
 
     pub fn set_muted(&mut self, muted: bool, cx: &mut Context<Self>) {
         self.muted = muted;
-        audio::audio().mic.muted.store(muted, std::sync::atomic::Ordering::Relaxed);
+        let a = audio::audio();
+        a.mic.muted.store(muted, std::sync::atomic::Ordering::Relaxed);
+        if muted {
+            self.mic_guard = None;
+        } else if self.mic_guard.is_none() {
+            self.mic_guard = Some(a.acquire_mic());
+        }
         cx.notify();
     }
 
@@ -781,7 +789,7 @@ impl Voice {
         self.stop_camera(cx);
         self.end_screen(cx);
         self.drop_mic();
-        self._mic_guard = None;
+        self.mic_guard = None;
         for (_, p) in self.peers.drain() {
             close_peer(p);
         }
