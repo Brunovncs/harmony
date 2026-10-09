@@ -119,9 +119,9 @@ fn line_el(id: impl Into<SharedString>, line: &Line, size: f32, t: &Theme, look:
     if pieces.is_empty() {
         return div().h(px(size * 1.45)).into_any_element();
     }
-    let mut row = div().flex().flex_wrap().items_center();
-    for (i, p) in pieces.into_iter().enumerate() {
-        row = row.child(match p {
+    let only_text = matches!(pieces.as_slice(), [Piece::Text { .. }]);
+    let mut els = pieces.into_iter().enumerate().map(|(i, p)| {
+        match p {
             Piece::Text { text, highlights, mono, links } => {
                 let targets: Vec<(String, String)> = links.iter().map(|(r, url)| (text[r.clone()].to_string(), url.clone())).collect();
                 let ranges: Vec<Range<usize>> = links.iter().map(|l| l.0.clone()).collect();
@@ -143,9 +143,15 @@ fn line_el(id: impl Into<SharedString>, line: &Line, size: f32, t: &Theme, look:
             }
             Piece::Emoji(Some(image), _) => img(image).h(px(size * 1.3)).max_w(px(size * 4.)).into_any_element(),
             Piece::Emoji(None, raw) => div().child(raw).into_any_element(),
-        });
+        }
+    });
+    // Text as a flex item is measured on one line and can't shrink below it, so a long message ran
+    // past the edge. Alone it is a block, which wraps at the width it gets; among emoji, each run
+    // may shrink, and wraps once it does.
+    if only_text && let Some(el) = els.next() {
+        return div().w_full().child(el).into_any_element();
     }
-    row.into_any_element()
+    div().flex().flex_wrap().items_center().children(els.map(|el| div().min_w(px(0.)).child(el))).into_any_element()
 }
 
 /// Opens a link, after asking when its text names somewhere other than where it goes.
