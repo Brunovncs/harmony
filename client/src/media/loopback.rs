@@ -116,7 +116,10 @@ mod imp {
                 ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS { TargetProcessId: pid, ProcessLoopbackMode: loopback_mode },
             },
         };
-        let prop = PROPVARIANT {
+        // Never dropped: PROPVARIANT's drop is PropVariantClear, which hands a VT_BLOB's data to
+        // CoTaskMemFree, and this blob points at `params` on the stack. Freeing it corrupted the
+        // heap, and Harmony crashed as the share's sound stopped.
+        let prop = std::mem::ManuallyDrop::new(PROPVARIANT {
             Anonymous: PROPVARIANT_0 {
                 Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
                     vt: VT_BLOB,
@@ -129,10 +132,10 @@ mod imp {
                     ..Default::default()
                 }),
             },
-        };
+        });
         let signal = Arc::new((Mutex::new(false), Condvar::new()));
         let handler: IActivateAudioInterfaceCompletionHandler = Done(signal.clone()).into();
-        let op = unsafe { ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, &IAudioClient::IID, Some(&prop), &handler)? };
+        let op = unsafe { ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, &IAudioClient::IID, Some(&*prop), &handler)? };
         {
             let (m, cv) = &*signal;
             let mut done = m.lock();
