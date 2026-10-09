@@ -211,8 +211,16 @@ pub struct Session {
     pub emojis: Vec<CustomEmoji>,
     pub clips: Vec<Clip>,
     pub chats: HashMap<ChannelId, ChatLog>,
-    pub mentioned: HashSet<ChannelId>,
+    /// Messages naming you (or everyone) per channel since you last opened it. Counted here from
+    /// the pushes and nowhere else: nothing is sent to the server, and it goes when the app closes.
+    pub mentioned: HashMap<ChannelId, u32>,
     pub open_channel: Option<ChannelId>,
+    /// Channels with messages from others since you last looked at them. Counted from the pushes,
+    /// like the mentions, and kept nowhere else.
+    pub unread: HashSet<ChannelId>,
+    /// The chat on screen; none while the stage is. `open_channel` stays on the last chat opened,
+    /// which is not the same thing once you go to the stage.
+    pub viewing: Option<ChannelId>,
     pictures: Lru<String, Slot>,
     _pump: Task<()>,
 }
@@ -269,8 +277,10 @@ impl Session {
                 emojis: Vec::new(),
                 clips: Vec::new(),
                 chats: HashMap::new(),
-                mentioned: HashSet::new(),
+                mentioned: HashMap::new(),
                 open_channel: None,
+                unread: HashSet::new(),
+                viewing: None,
                 pictures: Lru::new(PICTURE_BUDGET),
                 _pump: pump,
             };
@@ -381,8 +391,12 @@ impl Session {
                 if let Ok(m) = serde_json::from_value::<Message>(parse("message")) {
                     let mine = m.user_id == Some(self.me.id);
                     let for_me = m.mentions.contains(&self.me.id) || m.mentions_everyone;
-                    if for_me && !mine && self.open_channel != Some(m.channel_id) {
-                        self.mentioned.insert(m.channel_id);
+                    let away = self.viewing != Some(m.channel_id);
+                    if !mine && away {
+                        self.unread.insert(m.channel_id);
+                    }
+                    if for_me && !mine && away {
+                        *self.mentioned.entry(m.channel_id).or_default() += 1;
                         cx.emit(SessionEvent::Mentioned);
                     }
                     if let Some(log) = self.chats.get_mut(&m.channel_id) {
@@ -607,12 +621,21 @@ impl Session {
 
     pub fn open(&mut self, channel: ChannelId, cx: &mut Context<Self>) {
         self.open_channel = Some(channel);
+        self.viewing = Some(channel);
         self.mentioned.remove(&channel);
+        self.unread.remove(&channel);
         let log = self.chats.entry(channel).or_default();
         if !log.loaded && !log.fetching {
             self.fetch_latest(channel, cx);
         }
         cx.notify();
+    }
+
+    /// No chat is on screen any more: the stage took its place.
+    pub fn leave_chat(&mut self, cx: &mut Context<Self>) {
+        if self.viewing.take().is_some() {
+            cx.notify();
+        }
     }
 
     /// After a reconnect: whatever happened in the channels already shown while the socket was

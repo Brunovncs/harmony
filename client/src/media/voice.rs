@@ -212,6 +212,10 @@ enum Watched {
     Tile(WeakEntity<Tile>),
 }
 
+/// How long the microphone's connection may sit `Disconnected` before it is published again.
+/// Below this ICE usually recovers by itself; muted, nobody would notice that it had not.
+const MIC_DISCONNECTED: Duration = Duration::from_secs(8);
+
 pub struct Voice {
     session: Entity<Session>,
     pub channel: ChannelId,
@@ -667,7 +671,7 @@ impl Voice {
     /// holds you muted), the camera and screen, and what the server is told about them.
     fn reconcile(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
-        if self.mic.as_ref().is_some_and(|l| l.is_dead()) {
+        if self.mic.as_ref().is_some_and(|l| l.is_stuck(MIC_DISCONNECTED)) {
             log::info!("the microphone connection dropped; publishing again");
             self.drop_mic();
         }

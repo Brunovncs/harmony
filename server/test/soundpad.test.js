@@ -315,6 +315,11 @@ describe('playing a clip', () => {
       'the hash is what lets each client play its own cached copy');
     assert.equal(event.by, 'boss');
 
+    // Leave rather than only close. Closing is leaving too, but the server
+    // learns of it when the close reaches it, and the next test connects as
+    // the same member at once -- so under load it could find them still here.
+    await a.request({ type: 'voice:leave', channelId: voiceChannelId });
+    await b.request({ type: 'voice:leave', channelId: voiceChannelId });
     a.ws.close();
     b.ws.close();
   });

@@ -2,7 +2,7 @@
 //! cameras and screens being shared as tiles, one of them big when focused; and the soundboard.
 
 use super::sidebar::live_chip;
-use super::{Center, ServerView, VolumeSlider};
+use super::{ServerView, VolumeSlider};
 use crate::core;
 use crate::core::settings::HotkeyAction;
 use crate::core::types::*;
@@ -425,8 +425,7 @@ impl ServerView {
     }
 
     pub fn ensure_stage(&mut self, cx: &mut Context<Self>) {
-        self.center = Center::Stage;
-        cx.notify();
+        self.show_stage(cx);
     }
 }
 

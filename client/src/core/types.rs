@@ -351,8 +351,9 @@ fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D:
 pub struct ServerInfo {
     #[serde(default)]
     pub name: String,
-    /// The picture's upload hash, None for none (and from servers older than pictures).
-    #[serde(default)]
+    /// The picture's upload hash, None for none (and from servers older than pictures). The
+    /// Electron line's servers call it `logo`.
+    #[serde(default, alias = "logo")]
     pub icon_hash: Option<String>,
     #[serde(default)]
     pub password_required: bool,
@@ -376,7 +377,7 @@ pub struct Health {
     pub authenticated: bool,
     #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "logo")]
     pub icon_hash: Option<String>,
     #[serde(default)]
     pub has_accounts: Option<bool>,
@@ -567,5 +568,15 @@ mod tests {
         let b: IceServer = serde_json::from_str(r#"{"urls":["turn:y"],"username":"u","credential":"c"}"#).unwrap();
         assert_eq!(a.urls, vec!["stun:x"]);
         assert_eq!(b.username.as_deref(), Some("u"));
+    }
+
+    #[test]
+    fn a_server_picture_is_read_under_either_name() {
+        let ours: Health = serde_json::from_str(r#"{"ok":true,"iconHash":"ab"}"#).unwrap();
+        let electron: Health = serde_json::from_str(r#"{"ok":true,"logo":"cd"}"#).unwrap();
+        let none: ServerInfo = serde_json::from_str(r#"{"name":"x","logo":null}"#).unwrap();
+        assert_eq!(ours.icon_hash.as_deref(), Some("ab"));
+        assert_eq!(electron.icon_hash.as_deref(), Some("cd"));
+        assert_eq!(none.icon_hash, None);
     }
 }

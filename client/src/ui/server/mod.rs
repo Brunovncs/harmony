@@ -50,6 +50,8 @@ pub struct ServerView {
     pub focused_tile: Option<Entity<crate::media::video::Tile>>,
     /// The pointer is on the connection dot, which opens to say what it means.
     link_hover: bool,
+    /// When the last message tone played, so a burst of messages makes one sound.
+    message_cue_at: Option<std::time::Instant>,
     /// The channel list draws again whenever this view is notified (the session, the call and
     /// who speaks all notify it); the member list only when the session changes.
     sidebar: Entity<Panel>,
@@ -135,6 +137,7 @@ impl ServerView {
             call: None,
             focused_tile: None,
             link_hover: false,
+            message_cue_at: None,
             sidebar,
             members,
             focus: cx.focus_handle(),
@@ -158,7 +161,7 @@ impl ServerView {
         if let Center::Text(id) = self.center
             && self.session.read(cx).channel(id).is_none()
         {
-            self.center = Center::Stage;
+            self.show_stage(cx);
         }
         cx.notify();
     }
@@ -170,6 +173,7 @@ impl ServerView {
                     crate::media::audio::cue(Cue::Mention, cue_volume(cx));
                 }
             }
+            SessionEvent::Message(m) => self.message_cue(m, window, cx),
             SessionEvent::SoundpadPlay { hash } => {
                 let deaf = self.call.as_ref().is_some_and(|c| c.read(cx).deafened);
                 if !deaf {
@@ -185,6 +189,34 @@ impl ServerView {
             }
             _ => {}
         }
+    }
+
+    /// The tone for someone else's message, unless you are looking at it, silenced its channel or
+    /// turned the tone off. A mention has its own; a burst makes one sound.
+    fn message_cue(&mut self, m: &Message, window: &Window, cx: &mut Context<Self>) {
+        const BURST: std::time::Duration = std::time::Duration::from_secs(2);
+        let s = self.session.read(cx);
+        let p = prefs(cx);
+        let mention = m.mentions.contains(&s.me.id) || m.mentions_everyone;
+        let looking = s.viewing == Some(m.channel_id) && window.is_window_active();
+        if m.user_id == Some(s.me.id)
+            || mention
+            || looking
+            || !p.message_sound
+            || p.channel_muted(&s.api.base(), m.channel_id)
+            || self.message_cue_at.is_some_and(|at| at.elapsed() < BURST)
+        {
+            return;
+        }
+        self.message_cue_at = Some(std::time::Instant::now());
+        crate::media::audio::cue(Cue::Message, cue_volume(cx));
+    }
+
+    /// The voice stage in the middle, in place of any chat.
+    pub fn show_stage(&mut self, cx: &mut Context<Self>) {
+        self.center = Center::Stage;
+        self.session.update(cx, |s, cx| s.leave_chat(cx));
+        cx.notify();
     }
 
     pub fn shutdown(&mut self, cx: &mut Context<Self>) {
@@ -256,7 +288,7 @@ impl ServerView {
 
     pub fn join_voice(&mut self, id: ChannelId, password: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         if self.call_channel(cx) == Some(id) {
-            self.center = Center::Stage;
+            self.show_stage(cx);
             cx.notify();
             return;
         }
@@ -277,7 +309,7 @@ impl ServerView {
         cx.observe(&call, |_, _, cx| cx.notify()).detach();
         self.call = Some(call);
         crate::ui::updates::call_changed(true, cx);
-        self.center = Center::Stage;
+        self.show_stage(cx);
         cx.notify();
     }
 
@@ -700,7 +732,7 @@ impl ServerView {
                                 .child(div().text_size(px(13.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(color).child(label_text))
                                 .child(div().truncate().text_size(px(12.)).text_color(t.text2).child(name))
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.center = Center::Stage;
+                                    this.show_stage(cx);
                                     cx.notify();
                                 })),
                         )

@@ -332,6 +332,8 @@ pub struct Mic {
     /// Whether a capture stream is open. While none is (muted, or no device), the publisher still
     /// gets silence every 10 ms, so the people listening don't take the stream for stalled.
     capturing: AtomicBool,
+    /// Capture callbacks so far: the audio thread watches it for a microphone that stopped.
+    frames: AtomicU64,
     /// Where processed 10 ms frames go: the voice publisher, when there is one.
     sink: Mutex<Option<MicSink>>,
     users: AtomicU64,
@@ -372,6 +374,7 @@ impl Audio {
             level: AtomicF32::default(),
             open: AtomicBool::new(false),
             capturing: AtomicBool::new(false),
+            frames: AtomicU64::new(0),
             sink: Mutex::new(None),
             users: AtomicU64::new(0),
         });
@@ -431,35 +434,73 @@ impl Drop for MicGuard {
     }
 }
 
+/// A capture that delivers nothing for this long is taken for dead and opened again: the device
+/// was unplugged, went to sleep, or a headset switched mode. Nothing else would notice, since the
+/// publisher fills the gap with silence.
+const CAPTURE_STALL: Duration = Duration::from_secs(3);
+/// How often a microphone that would not open is tried again, for one plugged back in.
+const CAPTURE_RETRY: Duration = Duration::from_secs(10);
+
 fn device_thread(rx: mpsc::Receiver<Command>, mixer: Arc<Mixer>, mic: Arc<Mic>, near: Arc<(Mutex<VecDeque<f32>>, Condvar)>) {
     let mut output: Option<cpal::Stream> = None;
     let mut input: Option<cpal::Stream> = None;
-    while let Ok(cmd) = rx.recv() {
-        match cmd {
-            Command::Output(id) => {
+    // The microphone wanted, while one is; and the frame count last seen, and when it moved.
+    let mut wanted: Option<String> = None;
+    let mut seen = (0, Instant::now());
+    loop {
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(Command::Output(id)) => {
                 output = None;
                 match open_output(&id, mixer.clone()) {
                     Ok(s) => output = Some(s),
                     Err(e) => log::warn!("speakers did not open: {e}"),
                 }
             }
-            Command::Input(id) => {
-                mic.capturing.store(false, Ordering::Relaxed);
-                input = None;
-                near.0.lock().clear();
-                if let Some(id) = id {
-                    match open_input(&id, near.clone()) {
-                        Ok(s) => {
-                            input = Some(s);
-                            mic.capturing.store(true, Ordering::Relaxed);
-                        }
-                        Err(e) => log::warn!("microphone did not open: {e}"),
+            Ok(Command::Input(id)) => {
+                wanted = id;
+                // Closed before opening again: some devices take one capture at a time.
+                drop(input.take());
+                input = open_capture(wanted.as_deref(), &mic, &near);
+                seen = (mic.frames.load(Ordering::Relaxed), Instant::now());
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if wanted.is_none() {
+                    continue;
+                }
+                let frames = mic.frames.load(Ordering::Relaxed);
+                if frames != seen.0 {
+                    seen = (frames, Instant::now());
+                    continue;
+                }
+                if seen.1.elapsed() >= if input.is_some() { CAPTURE_STALL } else { CAPTURE_RETRY } {
+                    if input.is_some() {
+                        log::warn!("the microphone stopped delivering sound; opening it again");
                     }
+                    drop(input.take());
+                    input = open_capture(wanted.as_deref(), &mic, &near);
+                    seen = (mic.frames.load(Ordering::Relaxed), Instant::now());
                 }
             }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
     drop((output, input));
+}
+
+/// Opens the capture for `id`; none for `None`, or for a microphone that will not open.
+fn open_capture(id: Option<&str>, mic: &Arc<Mic>, near: &Arc<(Mutex<VecDeque<f32>>, Condvar)>) -> Option<cpal::Stream> {
+    mic.capturing.store(false, Ordering::Relaxed);
+    near.0.lock().clear();
+    match open_input(id?, near.clone(), mic.clone()) {
+        Ok(s) => {
+            mic.capturing.store(true, Ordering::Relaxed);
+            Some(s)
+        }
+        Err(e) => {
+            log::warn!("microphone did not open: {e}");
+            None
+        }
+    }
 }
 
 fn open_output(id: &str, mixer: Arc<Mixer>) -> anyhow::Result<cpal::Stream> {
@@ -521,7 +562,7 @@ fn open_output(id: &str, mixer: Arc<Mixer>) -> anyhow::Result<cpal::Stream> {
     Ok(stream)
 }
 
-fn open_input(id: &str, near: Arc<(Mutex<VecDeque<f32>>, Condvar)>) -> anyhow::Result<cpal::Stream> {
+fn open_input(id: &str, near: Arc<(Mutex<VecDeque<f32>>, Condvar)>, mic: Arc<Mic>) -> anyhow::Result<cpal::Stream> {
     let device = find(id, true).ok_or_else(|| anyhow::anyhow!("no microphone"))?;
     let config = device.default_input_config()?;
     let (rate, channels) = (config.sample_rate(), config.channels() as usize);
@@ -529,6 +570,7 @@ fn open_input(id: &str, near: Arc<(Mutex<VecDeque<f32>>, Condvar)>) -> anyhow::R
     let mut mono = Vec::new();
     let mut out = Vec::new();
     let mut take = move |input: &[f32]| {
+        mic.frames.fetch_add(1, Ordering::Relaxed);
         mono.clear();
         mono.extend(input.chunks_exact(channels).map(|f| f.iter().sum::<f32>() / channels as f32));
         out.clear();
@@ -685,6 +727,8 @@ pub enum Cue {
     Deafen,
     Undeafen,
     Mention,
+    /// A message somewhere you are not looking: lower and softer than a mention, which is for you.
+    Message,
 }
 
 const C5: f32 = 523.25;
@@ -714,6 +758,7 @@ impl Cue {
             Cue::Deafen => (&[(A4, 0.), (D4, 0.07)], 0.28, 0.9),
             Cue::Undeafen => (&[(D4, 0.), (A4, 0.07)], 0.28, 0.9),
             Cue::Mention => (&[(A5, 0.), (D6, 0.08), (F6, 0.16)], 0.3, 0.9),
+            Cue::Message => (&[(E5, 0.), (A5, 0.06)], 0.22, 0.6),
         }
     }
 }

@@ -116,6 +116,8 @@ pub struct Link {
     /// The session's URL on the media server, until it is hung up.
     resource: parking_lot::Mutex<Option<String>>,
     closed: std::sync::atomic::AtomicBool,
+    /// Since when the connection has been `Disconnected`, as last looked at by `is_stuck`.
+    down_since: parking_lot::Mutex<Option<std::time::Instant>>,
     api: Api,
 }
 
@@ -127,6 +129,21 @@ impl Link {
     /// Whether the connection is gone for good.
     pub fn is_dead(&self) -> bool {
         matches!(self.state(), PeerConnectionState::Failed | PeerConnectionState::Closed)
+    }
+
+    /// Gone for good, or `Disconnected` for longer than `limit`. ICE comes back from a short
+    /// disconnect by itself, but one that lasts can sit there without ever reaching `Failed`, and a
+    /// publish stuck in it reaches nobody. Only as accurate as how often it is asked.
+    pub fn is_stuck(&self, limit: Duration) -> bool {
+        let mut since = self.down_since.lock();
+        match self.state() {
+            PeerConnectionState::Failed | PeerConnectionState::Closed => true,
+            PeerConnectionState::Disconnected => since.get_or_insert_with(std::time::Instant::now).elapsed() >= limit,
+            _ => {
+                *since = None;
+                false
+            }
+        }
     }
 
     /// Waits for ICE and DTLS to finish, up to `limit`. False if it failed or never came up.
@@ -439,7 +456,13 @@ async fn negotiate(api: &Api, pc: PeerConnection, url: &str, gathering: Gatherin
         }
         return Err(fail(e.message));
     }
-    Ok(Link { pc, resource: parking_lot::Mutex::new(resource), closed: Default::default(), api: api.clone() })
+    Ok(Link {
+        pc,
+        resource: parking_lot::Mutex::new(resource),
+        closed: Default::default(),
+        down_since: Default::default(),
+        api: api.clone(),
+    })
 }
 
 fn new_pc(ice: &[IceServer]) -> Result<(PeerConnection, Gathering), ApiError> {

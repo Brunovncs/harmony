@@ -304,6 +304,16 @@ app.post('/api/accounts/register', async (req, res) => {
 
   const user = accounts.find(result.user.nickname);
   const token = accounts.startSession(user.id);
+  /*
+   * Everybody else learns there is somebody new.
+   *
+   * The member list is drawn from the accounts each client already holds,
+   * crossed with who is online -- so a new account appeared in nobody's
+   * list until they restarted, even once its owner was online. user:updated
+   * is what every client already handles by adding to that map; a new
+   * account is just one nobody had yet.
+   */
+  realtime?.broadcast({ type: 'user:updated', user: publicUser(user) });
   return res.status(201).json({
     user: publicUser(user),
     token,

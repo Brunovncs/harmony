@@ -3,6 +3,7 @@
 
 use super::{Center, ServerView};
 use crate::core::types::*;
+use crate::prefs::{prefs, set_prefs};
 use crate::session::Session;
 use crate::theme::{Theme, px, radius};
 use crate::ui::overlay::{self, Ask, Dismiss, Field, menu_card, menu_item};
@@ -22,6 +23,17 @@ impl ServerView {
         for (group, channels) in layout {
             if let Some(g) = &group {
                 let folded = self.folded.contains(&g.id);
+                // Folding hides the channels and their counts with them, so the heading carries
+                // the total of those it hides.
+                let hidden: Vec<ChannelId> = if folded {
+                    channels.iter().filter(|c| !(c.kind == ChannelKind::Voice && self.has_people(c.id, cx))).map(|c| c.id).collect()
+                } else {
+                    Vec::new()
+                };
+                let s = self.session.read(cx);
+                let hidden_mentions: u32 = hidden.iter().filter_map(|id| s.mentioned.get(id)).sum();
+                let server = s.api.base();
+                let hidden_unread = hidden.iter().any(|id| s.unread.contains(id) && !prefs(cx).channel_muted(&server, *id));
                 let gid = g.id;
                 let name = g.name.clone();
                 list = list.child(
@@ -36,6 +48,10 @@ impl ServerView {
                         .cursor_pointer()
                         .child(icon(if folded { "chevron-right" } else { "chevron-down" }, 12., t.text3))
                         .child(label(g.name.clone(), t))
+                        .when(hidden_mentions > 0, |d| {
+                            d.child(div().flex_1()).child(badge_text(mention_count(hidden_mentions), t.on_accent, t.accent))
+                        })
+                        .when(hidden_mentions == 0 && hidden_unread, |d| d.child(div().flex_1()).child(unread_dot(t).mr(px(2.))))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !this.folded.remove(&gid) {
                                 this.folded.insert(gid);
@@ -130,12 +146,21 @@ impl ServerView {
             Center::Text(id) => id == c.id,
             Center::Stage => in_call,
         };
-        let mentioned = s.mentioned.contains(&c.id);
+        let mentions = s.mentioned.get(&c.id).copied().unwrap_or(0);
+        let mentioned = mentions > 0;
+        let muted = !voice && prefs(cx).channel_muted(&s.api.base(), c.id);
+        let unread = !open && !muted && s.unread.contains(&c.id);
         let locked = c.locked && !s.unlocked.contains(&c.id);
         let roster: Vec<Member> = if voice { s.rosters.get(&c.id).cloned().unwrap_or_default() } else { Vec::new() };
         let (id, name) = (c.id, c.name.clone());
         let kind = c.kind;
-        let fg = if open { t.text } else { t.text2 };
+        let fg = if open || unread {
+            t.text
+        } else if muted {
+            t.text3
+        } else {
+            t.text2
+        };
         let hover = t.layer_hover;
         let row = div()
             .id(("channel", c.id as u64))
@@ -151,6 +176,8 @@ impl ServerView {
             .when(!open, |d| d.hover(move |s| s.bg(hover)))
             // The accent pill OpenController's nav rail uses for the place you are.
             .when(open, |d| d.child(div().absolute().left(px(-8.)).top(px(8.)).w(px(3.)).h(px(16.)).rounded(px(2.)).bg(t.accent)))
+            // Unread is the same pill, small: opening the channel grows it into the one above.
+            .when(unread, |d| d.child(unread_dot(t).absolute().left(px(-9.)).top(px(13.5))))
             .child(icon(if voice { "volume" } else { "hash" }, 15., if in_call { t.success } else { t.text3 }))
             .child(
                 div()
@@ -159,29 +186,30 @@ impl ServerView {
                     .truncate()
                     .text_size(px(14.))
                     .text_color(fg)
-                    .when(open || mentioned, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                    .when(open || mentioned || unread, |d| d.font_weight(gpui::FontWeight::MEDIUM))
                     .child(c.name.clone()),
             )
             .when(c.locked, |d| d.child(icon("lock", 12., if locked { t.text3 } else { t.success })))
             .when(c.mic_locked, |d| d.child(icon("mic-off", 12., t.text3)))
-            .when(mentioned, |d| d.child(badge_text("@", t.on_accent, t.accent)))
+            .when(muted, |d| d.child(icon("bell-off", 12., t.text3)))
+            .when(mentioned, |d| d.child(badge_text(mention_count(mentions), t.on_accent, t.accent)))
             .on_click(cx.listener(move |this, _, window, cx| match kind {
                 ChannelKind::Text => this.open_text(id, window, cx),
                 ChannelKind::Voice => this.ask_join_voice(id, window, cx),
             }))
+            .on_mouse_down(MouseButton::Right, {
+                let name = name.clone();
+                cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                    this.channel_menu(id, name.clone(), kind, e.position, window, cx);
+                })
+            })
             .when(admin, |d| {
                 let accent = t.accent;
                 let dragged = DraggedChannel { id, name: name.clone(), kind };
-                d.on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                        this.channel_menu(id, name.clone(), kind, e.position, window, cx);
-                    }),
-                )
-                .on_drag(dragged, |d, _, _, cx| cx.new(|_| d.clone()))
-                // A line above the row shows where the channel will land.
-                .drag_over::<DraggedChannel>(move |s, _, _, _| s.border_t_2().border_color(accent))
-                .on_drop(cx.listener(move |this, d: &DraggedChannel, _, cx| this.move_channel(d.id, Drop::Before(id), cx)))
+                d.on_drag(dragged, |d, _, _, cx| cx.new(|_| d.clone()))
+                    // A line above the row shows where the channel will land.
+                    .drag_over::<DraggedChannel>(move |s, _, _, _| s.border_t_2().border_color(accent))
+                    .on_drop(cx.listener(move |this, d: &DraggedChannel, _, cx| this.move_channel(d.id, Drop::Before(id), cx)))
             });
         let mut block = div().id(("channel-block", c.id as u64)).flex().flex_col().rounded(px(radius::INNER + 1.)).child(row);
         // Admins move people by dropping them on another voice channel, its row or its people.
@@ -310,7 +338,10 @@ impl ServerView {
         cx: &mut Context<Self>,
     ) {
         let session = self.session.clone();
+        let admin = self.session.read(cx).me.role.is_admin();
         let owner = self.session.read(cx).me.role == Role::Owner;
+        let server = self.session.read(cx).api.base();
+        let muted = prefs(cx).channel_muted(&server, id);
         let mic_locked = self.session.read(cx).channel(id).is_some_and(|c| c.mic_locked);
         let mut items = vec![
             MenuEntry::item("edit", tr!("Rename or set a password", "Renomear ou definir senha"), false, {
@@ -409,7 +440,30 @@ impl ServerView {
                 ),
             );
         }
-        let menu = cx.new(|_| Menu { items });
+        // Silencing is anyone's, and only for themselves.
+        let mut entries = Vec::new();
+        if kind == ChannelKind::Text {
+            entries.push(MenuEntry::item(
+                if muted { "bell" } else { "bell-off" },
+                if muted {
+                    tr!("Unmute channel", "Reativar canal")
+                } else {
+                    tr!("Mute channel (just for you)", "Silenciar canal (só para você)")
+                },
+                false,
+                move |_, cx| set_prefs(cx, |p| p.set_channel_muted(&server, id, !muted)),
+            ));
+        }
+        if admin {
+            if !entries.is_empty() {
+                entries.push(MenuEntry::rule());
+            }
+            entries.extend(items);
+        }
+        if entries.is_empty() {
+            return;
+        }
+        let menu = cx.new(|_| Menu { items: entries });
         overlay::open_menu(menu, at, cx);
     }
 
@@ -568,7 +622,17 @@ impl ServerView {
     }
 }
 
-pub fn badge_text(s: &'static str, fg: gpui::Hsla, bg: gpui::Hsla) -> gpui::Div {
+/// New messages you have not seen: the accent pill of the channel you are in, small.
+fn unread_dot(t: &Theme) -> gpui::Div {
+    div().flex_none().size(px(5.)).rounded_full().bg(t.accent)
+}
+
+/// "@ 3", for the mentions waiting in a channel or a folded group.
+fn mention_count(n: u32) -> String {
+    if n > 99 { "@ 99+".into() } else { format!("@ {n}") }
+}
+
+pub fn badge_text(s: impl Into<gpui::SharedString>, fg: gpui::Hsla, bg: gpui::Hsla) -> gpui::Div {
     div()
         .flex()
         .flex_none()
@@ -582,7 +646,7 @@ pub fn badge_text(s: &'static str, fg: gpui::Hsla, bg: gpui::Hsla) -> gpui::Div 
         .text_size(px(10.))
         .font_weight(gpui::FontWeight::BOLD)
         .text_color(fg)
-        .child(s)
+        .child(s.into())
 }
 
 /// The red LIVE chip on someone sharing their screen. Over video it sits on a dark backdrop
@@ -653,3 +717,15 @@ impl Render for Menu {
 }
 
 pub fn _unused(_: &Entity<Session>) {}
+
+#[cfg(test)]
+mod tests {
+    use super::mention_count;
+
+    #[test]
+    fn mention_counts_stop_at_99() {
+        assert_eq!(mention_count(1), "@ 1");
+        assert_eq!(mention_count(99), "@ 99");
+        assert_eq!(mention_count(100), "@ 99+");
+    }
+}

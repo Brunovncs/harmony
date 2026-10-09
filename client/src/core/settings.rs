@@ -54,6 +54,11 @@ pub struct Settings {
     /// the server that gave it.
     pub clip_hotkeys: BTreeMap<String, BTreeMap<String, String>>,
     pub clips_enabled: bool,
+    /// Text channels you silenced, by server address: no unread mark and no sound for them. Yours
+    /// alone and on this computer only; a channel id only means something on its server.
+    pub muted_channels: BTreeMap<String, Vec<i64>>,
+    /// A short tone when a message arrives in a channel you are not looking at.
+    pub message_sound: bool,
     pub hardware_encoding: String,
     pub gpu_preference: String,
     pub window_audio_fallback: String,
@@ -319,6 +324,29 @@ impl Settings {
         .map_or("", String::as_str)
     }
 
+    /// Whether you silenced this channel on `server`.
+    pub fn channel_muted(&self, server: &str, channel: i64) -> bool {
+        self.muted_channels.iter().any(|(url, ids)| same_server(url, server) && ids.contains(&channel))
+    }
+
+    pub fn set_channel_muted(&mut self, server: &str, channel: i64, muted: bool) {
+        let url = self
+            .muted_channels
+            .keys()
+            .find(|url| same_server(url, server))
+            .cloned()
+            .or_else(|| self.saved_server(server).map(|s| s.url.clone()))
+            .unwrap_or_else(|| server.to_string());
+        let ids = self.muted_channels.entry(url.clone()).or_default();
+        ids.retain(|&id| id != channel);
+        if muted {
+            ids.push(channel);
+        }
+        if ids.is_empty() {
+            self.muted_channels.remove(&url);
+        }
+    }
+
     /// A server's soundboard hotkeys, by clip id.
     pub fn server_clip_hotkeys(&self, server: &str) -> Option<&BTreeMap<String, String>> {
         self.clip_hotkeys.iter().find(|(url, _)| same_server(url, server)).map(|(_, m)| m)
@@ -429,6 +457,8 @@ impl Default for Settings {
             hotkeys: BTreeMap::new(),
             clip_hotkeys: BTreeMap::new(),
             clips_enabled: false,
+            muted_channels: BTreeMap::new(),
+            message_sound: true,
             hardware_encoding: "auto".into(),
             gpu_preference: "auto".into(),
             window_audio_fallback: "silent".into(),
@@ -917,5 +947,17 @@ mod tests {
         let s = serde_json::to_string(&b).unwrap();
         assert_eq!(s, r#"{"kind":"blur","strength":12}"#);
         assert_eq!(serde_json::from_str::<Background>(&s).unwrap(), b);
+    }
+
+    #[test]
+    fn a_muted_channel_belongs_to_its_server() {
+        let mut s = Settings::default();
+        s.set_channel_muted("https://a.example:8444", 3, true);
+        assert!(s.channel_muted("https://A.example:8444/", 3), "however the address was typed");
+        assert!(!s.channel_muted("https://b.example", 3), "channel 3 elsewhere is another channel");
+        s.set_channel_muted("https://a.example:8444", 3, true);
+        assert_eq!(s.muted_channels.values().flatten().count(), 1, "muting twice is once");
+        s.set_channel_muted("https://a.example:8444", 3, false);
+        assert!(s.muted_channels.is_empty(), "nothing left behind for a server with none");
     }
 }

@@ -372,9 +372,13 @@ impl Api {
         self.file(&format!("/api/uploads/{hash}")).await
     }
 
-    /// The server's picture, which needs no account: the sign-in screen shows it.
+    /// The server's picture, which needs no account: the sign-in screen shows it. A server of the
+    /// Electron line keeps its one picture at `/api/server/logo` instead.
     pub async fn server_icon(&self, hash: &str) -> Result<(Vec<u8>, String)> {
-        self.file(&format!("/api/server/icon/{hash}")).await
+        match self.file(&format!("/api/server/icon/{hash}")).await {
+            Err(e) if e.status == 404 => self.file("/api/server/logo").await,
+            got => got,
+        }
     }
 
     async fn file(&self, path: &str) -> Result<(Vec<u8>, String)> {

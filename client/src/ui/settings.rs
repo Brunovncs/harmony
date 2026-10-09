@@ -648,6 +648,18 @@ impl Settings {
                 cx,
                 |cx| set_prefs(cx, |p| p.mention_sound = !p.mention_sound),
             ))
+            .child(toggle_row(
+                "message",
+                tr!("New message sound", "Som de nova mensagem"),
+                tr!(
+                    "A soft tone when someone writes in a channel you aren't looking at. Channels you muted stay quiet.",
+                    "Um toque suave quando alguém escreve num canal que você não está vendo. Canais silenciados ficam quietos."
+                ),
+                p.message_sound,
+                t,
+                cx,
+                |cx| set_prefs(cx, |p| p.message_sound = !p.message_sound),
+            ))
             .child(
                 div()
                     .flex()
