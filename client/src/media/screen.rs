@@ -478,7 +478,9 @@ mod tests {
         let bgra = [40u8, 120, 200, 0].repeat((w * h) as usize);
         let frame = preview_frame(&bgra, w, h, w * 4, 5, &mut video::Scratch::default());
         assert_eq!((frame.id(), frame.width(), frame.height()), (5, 640, 360));
-        let sent = encoder_frame(&bgra, w * 4, (w, h), (640, 360), &mut Scratch::default());
+        let EncoderFrame::I420(sent) = encoder_frame(&bgra, w * 4, (w, h), (640, 360), false, &mut Scratch::default()) else {
+            panic!("a scaled frame is I420");
+        };
         let (y, u, v) = sent.data();
         for (plane, want) in [(0, y[0]), (1, u[0]), (2, v[0])] {
             let (bytes, _) = frame.plane(plane);
