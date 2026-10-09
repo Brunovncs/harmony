@@ -473,7 +473,7 @@ impl Voice {
         let me = self.session.read(cx).me.id;
         self.roster = roster.to_vec();
         if let Some(mine) = roster.iter().find(|m| m.user_id == me) {
-            self.force_muted = mine.force_muted;
+            self.force_muted = mine.silenced();
         }
         let wanted: HashMap<i64, UserId> =
             roster.iter().filter(|m| m.user_id != me && m.publishes("v")).map(|m| (m.mid, m.user_id)).collect();

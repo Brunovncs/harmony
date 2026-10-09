@@ -186,6 +186,9 @@ pub struct Channel {
     pub group_id: Option<i64>,
     #[serde(default)]
     pub locked: bool,
+    /// Voice only: nobody but the owner may speak in it.
+    #[serde(default)]
+    pub mic_locked: bool,
     /// Only on the REST list; pushes leave it out.
     #[serde(default)]
     pub unlocked: Option<bool>,
@@ -290,12 +293,20 @@ pub struct Member {
     pub deafened: bool,
     #[serde(default)]
     pub force_muted: bool,
+    /// The channel's microphone lock applies to them (everyone but the owner).
+    #[serde(default)]
+    pub mic_locked: bool,
     /// Which of their paths are live: `v` voice, `c` camera, `s` screen.
     #[serde(default)]
     pub publishing: Vec<String>,
 }
 
 impl Member {
+    /// Kept off the microphone by someone else: an admin's mute, or the channel's lock.
+    pub fn silenced(&self) -> bool {
+        self.force_muted || self.mic_locked
+    }
+
     pub fn publishes(&self, kind: &str) -> bool {
         self.publishing.iter().any(|k| k == kind)
     }

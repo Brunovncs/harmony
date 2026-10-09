@@ -296,6 +296,19 @@ const MIGRATIONS = [
   (db) => {
     db.exec('ALTER TABLE messages ADD COLUMN edited_at INTEGER');
   },
+
+  /*
+   * v11 -- a voice channel where only the owner speaks.
+   *
+   * On the channel and durable, unlike force-mute, which is on a member's
+   * slot and lives only as long as they are in the room. A lock is a
+   * property of the ROOM -- "this is where the owner talks and everyone
+   * listens" -- and has to hold for whoever walks in tomorrow, including
+   * people who were not there when it was set.
+   */
+  (db) => {
+    db.exec('ALTER TABLE channels ADD COLUMN mic_locked INTEGER NOT NULL DEFAULT 0');
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

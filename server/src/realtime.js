@@ -119,7 +119,7 @@ export class Realtime {
     if (stillOnline) return;
 
     for (const { channelId } of this.#deps.voice.leaveAll(client.user.id)) {
-      this.#broadcastRoster(channelId);
+      this.broadcastRoster(channelId);
     }
     // After leaveAll, so a client redrawing on this gets a roster that has
     // already lost them rather than one that still has them in a channel.
@@ -254,7 +254,7 @@ export class Realtime {
     // Leaving the previous channel first keeps "one voice channel at a time"
     // true without the client having to sequence two requests.
     for (const { channelId: left } of this.#deps.voice.leaveAll(user.id)) {
-      if (left !== channelId) this.#broadcastRoster(left);
+      if (left !== channelId) this.broadcastRoster(left);
     }
 
     const joined = this.#deps.voice.join(channelId, user);
@@ -262,7 +262,7 @@ export class Realtime {
       return { type: 'voice:error', error: joined.error, cap: VOICE_HARD_CAP };
     }
 
-    this.#broadcastRoster(channelId);
+    this.broadcastRoster(channelId);
     return {
       type: 'voice:joined',
       channelId,
@@ -276,7 +276,7 @@ export class Realtime {
     const channelId = Number(msg.channelId);
     const mid = this.#deps.voice.leave(channelId, user.id);
     if (mid === false) return { type: 'voice:error', error: 'not_in_channel' };
-    this.#broadcastRoster(channelId);
+    this.broadcastRoster(channelId);
     return { type: 'voice:left', channelId };
   }
 
@@ -285,7 +285,7 @@ export class Realtime {
     if (!this.#deps.voice.setMuted(channelId, user.id, msg.muted, msg.deafened)) {
       return { type: 'voice:error', error: 'not_in_channel' };
     }
-    this.#broadcastRoster(channelId);
+    this.broadcastRoster(channelId);
     return { type: 'voice:ok' };
   }
 
@@ -295,7 +295,7 @@ export class Realtime {
     const found = this.#deps.voice.find(channelId, user.id);
     if (!found) return { type: 'voice:error', error: 'not_in_channel' };
     this.#deps.voice.trackPublish(channelId, found.mid, String(msg.kind), Boolean(msg.on));
-    this.#broadcastRoster(channelId);
+    this.broadcastRoster(channelId);
     return { type: 'voice:ok' };
   }
 
@@ -364,7 +364,7 @@ export class Realtime {
     // not notice the dropped session for about nine seconds (measured), so this
     // event is the only thing that tells them -- and if it arrived after the
     // kick they would read the whole thing as a network error instead.
-    this.#broadcastRoster(channelId);
+    this.broadcastRoster(channelId);
 
     if (msg.muted) await this.#deps.kickMember(channelId, mid);
     return { type: 'voice:ok' };
@@ -379,7 +379,7 @@ export class Realtime {
     const toId = msg.toChannelId == null ? null : Number(msg.toChannelId);
 
     const left = this.#deps.voice.leaveAll(targetId);
-    for (const { channelId } of left) this.#broadcastRoster(channelId);
+    for (const { channelId } of left) this.broadcastRoster(channelId);
 
     if (toId != null) {
       const channel = this.#deps.channels.get(toId);
@@ -446,7 +446,7 @@ export class Realtime {
     }
   }
 
-  #broadcastRoster(channelId) {
+  broadcastRoster(channelId) {
     this.broadcast({
       type: 'voice:roster',
       channelId,

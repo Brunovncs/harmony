@@ -197,6 +197,7 @@ export class Channels {
       nextPosition: db.prepare('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM channels'),
       rename: db.prepare('UPDATE channels SET name = ? WHERE id = ?'),
       setPassword: db.prepare('UPDATE channels SET password_hash = ? WHERE id = ?'),
+      setMicLocked: db.prepare('UPDATE channels SET mic_locked = ? WHERE id = ?'),
       setPosition: db.prepare('UPDATE channels SET position = ? WHERE id = ?'),
       remove: db.prepare('DELETE FROM channels WHERE id = ?'),
 
@@ -230,9 +231,12 @@ export class Channels {
     return { ok: true, channel: this.#q.all.all().find((c) => c.position === position) };
   }
 
-  async update(id, { name, password }) {
+  async update(id, { name, password, micLocked }) {
     const channel = this.get(id);
     if (!channel) return { ok: false, error: 'no_such_channel' };
+    // Before anything is written, so a refused lock does not leave a rename
+    // half-applied behind it.
+    if (micLocked !== undefined && channel.kind !== 'voice') return { ok: false, error: 'not_voice' };
 
     if (name !== undefined) {
       const clean = cleanChannelName(name);
@@ -246,6 +250,9 @@ export class Channels {
       const hash = password ? await hashPassword(password) : null;
       this.#q.setPassword.run(hash, id);
       this.#q.clearGrants.run(id);
+    }
+    if (micLocked !== undefined) {
+      this.#q.setMicLocked.run(micLocked ? 1 : 0, id);
     }
     return { ok: true, channel: this.get(id) };
   }
@@ -394,6 +401,7 @@ export const publicChannel = (c) => (c ? {
   position: c.position,
   groupId: c.group_id ?? null,
   locked: Boolean(c.password_hash),
+  micLocked: Boolean(c.mic_locked),
 } : null);
 
 export const publicGroup = (g) => (g ? {
@@ -420,6 +428,19 @@ export const VOICE_HARD_CAP = 16;
 export class VoiceRooms {
   /** @type {Map<number, Map<number, {userId: number, nickname: string, muted: boolean, forceMuted: boolean, publishing: Set<string>}>>} */
   #rooms = new Map();
+
+  #micLocked;
+
+  /**
+   * `micLocked(channelId, userId)` says whether a channel's microphone lock
+   * silences this person. It is asked, never cached: the lock lives on the
+   * durable channel row and the exemption on the account's role, and copying
+   * either onto the slot at join would leave a member speaking in a room that
+   * was locked after they walked in.
+   */
+  constructor({ micLocked = () => false } = {}) {
+    this.#micLocked = micLocked;
+  }
 
   #room(channelId) {
     let room = this.#rooms.get(channelId);
@@ -518,6 +539,11 @@ export class VoiceRooms {
         muted: m.muted,
         deafened: m.deafened,
         forceMuted: m.forceMuted,
+        // Apart from forceMuted on purpose: an admin can lift a force-mute
+        // from the member menu, and a lock is lifted only on the channel. One
+        // flag for both would offer "Let them speak" for a member it cannot
+        // un-silence.
+        micLocked: this.#micLocked(channelId, m.userId),
         publishing: [...m.publishing],
       }))
       .sort((a, b) => a.mid - b.mid);
@@ -579,8 +605,11 @@ export class VoiceRooms {
     return true;
   }
 
+  /** Force-muted, or silenced by the channel's lock: either refuses the publish. */
   isForceMuted(channelId, mid) {
-    return Boolean(this.slot(channelId, mid)?.forceMuted);
+    const member = this.slot(channelId, mid);
+    if (!member) return false;
+    return member.forceMuted || this.#micLocked(channelId, member.userId);
   }
 
   trackPublish(channelId, mid, kind, on) {

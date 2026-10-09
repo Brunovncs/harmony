@@ -209,10 +209,20 @@ impl Call {
         let me = self.session.read(cx).me.id;
         if let Some(mine) = roster.iter().find(|m| m.user_id == me) {
             self.mid = Some(mine.mid);
-            if mine.force_muted && !self.muted {
+            if mine.silenced() && !self.muted {
                 self.muted = true;
                 voice_cue(Cue::Mute, cx);
-                crate::ui::overlay::toast(tr!("An admin muted your microphone.", "Um admin silenciou seu microfone."), cx);
+                crate::ui::overlay::toast(
+                    if mine.force_muted {
+                        tr!("An admin muted your microphone.", "Um admin silenciou seu microfone.")
+                    } else {
+                        tr!(
+                            "Microphones are locked in this channel: only the owner speaks.",
+                            "Os microfones estão bloqueados neste canal: só o dono fala."
+                        )
+                    },
+                    cx,
+                );
                 if let Some(v) = &self.voice {
                     v.update(cx, |v, cx| v.set_muted(true, cx));
                 }
@@ -235,19 +245,20 @@ impl Call {
 
     pub fn set_muted(&mut self, muted: bool, cx: &mut Context<Self>) {
         let me = self.session.read(cx).me.id;
-        let forced = self
-            .session
-            .read(cx)
-            .rosters
-            .get(&self.channel)
-            .and_then(|r| r.iter().find(|m| m.user_id == me))
-            .is_some_and(|m| m.force_muted);
-        if !muted && forced {
+        let mine = self.session.read(cx).rosters.get(&self.channel).and_then(|r| r.iter().find(|m| m.user_id == me)).cloned();
+        if !muted && let Some(mine) = mine.filter(|m| m.silenced()) {
             crate::ui::overlay::toast(
-                tr!(
-                    "An admin muted you. Only an admin can unmute you.",
-                    "Um admin silenciou você. Só um admin pode reativar seu microfone."
-                ),
+                if mine.force_muted {
+                    tr!(
+                        "An admin muted you. Only an admin can unmute you.",
+                        "Um admin silenciou você. Só um admin pode reativar seu microfone."
+                    )
+                } else {
+                    tr!(
+                        "Microphones are locked in this channel. Only the owner can speak.",
+                        "Os microfones estão bloqueados neste canal. Só o dono pode falar."
+                    )
+                },
                 cx,
             );
             return;

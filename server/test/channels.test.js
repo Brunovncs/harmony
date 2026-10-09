@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import WebSocket from 'ws';
 
 import { normalizeName, normalizeUsername, normalizePath } from '../src/rooms.js';
 import { normalizeNickname } from '../src/accounts.js';
@@ -494,5 +495,122 @@ describe('the username namespace cannot reach channels', () => {
     // A logged-in caller streams under their own nickname, so this is simply
     // ignored -- which is itself the proof that the body cannot steer the path.
     assert.equal(res.body.username, 'member');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+/** A socket that has said hello, kept open: closing it is leaving voice. */
+async function connect(token) {
+  const ws = new WebSocket(`ws://127.0.0.1:${HARMONY_PORT}/ws`);
+  const replies = new Map();
+  ws.on('message', (data) => {
+    const msg = JSON.parse(String(data));
+    replies.get(msg.rid)?.(msg);
+  });
+  await new Promise((done, fail) => { ws.once('open', done); ws.once('error', fail); });
+  const ask = (body) => new Promise((done) => {
+    const rid = Math.random().toString(36).slice(2);
+    replies.set(rid, done);
+    ws.send(JSON.stringify({ ...body, rid }));
+  });
+  assert.equal((await ask({ type: 'hello', token })).type, 'hello-ok');
+  return { ask, close: () => ws.close() };
+}
+
+const publish = (path, token) => api('/mediamtx/auth', {
+  method: 'POST', body: { action: 'publish', path, query: `token=${encodeURIComponent(token)}` },
+});
+
+describe('the microphone lock', () => {
+  let voiceId;
+  let textId;
+  let ownerSocket;
+  let memberSocket;
+  let ownerJoin;
+  let memberJoin;
+
+  before(async () => {
+    const { channels } = (await api('/api/channels', { token: adminToken })).body;
+    voiceId = (await api('/api/channels', {
+      method: 'POST', body: { kind: 'voice', name: 'Stage' }, token: adminToken,
+    })).body.channel.id;
+    textId = channels.find((c) => c.kind === 'text').id;
+
+    ownerSocket = await connect(adminToken);
+    memberSocket = await connect(memberToken);
+    ownerJoin = await ownerSocket.ask({ type: 'voice:join', channelId: voiceId });
+    memberJoin = await memberSocket.ask({ type: 'voice:join', channelId: voiceId });
+    assert.equal(memberJoin.type, 'voice:joined');
+  });
+
+  after(() => {
+    ownerSocket?.close();
+    memberSocket?.close();
+  });
+
+  const voicePath = (join) => channelPath(voiceId, join.mid, 'voice');
+
+  it('starts off, and is reported on every channel', async () => {
+    const listed = (await api('/api/channels', { token: memberToken })).body.channels;
+    assert.equal(listed.find((c) => c.id === voiceId).micLocked, false);
+    assert.equal((await publish(voicePath(memberJoin), memberJoin.token)).status, 204);
+  });
+
+  it('is not a member\'s to set', async () => {
+    const res = await api(`/api/channels/${voiceId}`, {
+      method: 'POST', body: { micLocked: true }, token: memberToken,
+    });
+    assert.equal(res.status, 403);
+  });
+
+  it('is only for voice channels', async () => {
+    const res = await api(`/api/channels/${textId}`, {
+      method: 'POST', body: { micLocked: true }, token: adminToken,
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'not_voice');
+  });
+
+  it('REFUSES EVERYONE BUT THE OWNER A MICROPHONE once set', async () => {
+    const res = await api(`/api/channels/${voiceId}`, {
+      method: 'POST', body: { micLocked: true }, token: adminToken,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.channel.micLocked, true);
+
+    assert.equal((await publish(voicePath(memberJoin), memberJoin.token)).status, 401,
+      'the auth hook is the enforcement, not the client');
+    assert.equal((await publish(voicePath(ownerJoin), ownerJoin.token)).status, 204);
+  });
+
+  it('leaves cameras and screens alone', async () => {
+    const cam = channelPath(voiceId, memberJoin.mid, 'cam');
+    assert.equal((await publish(cam, memberJoin.token)).status, 204);
+  });
+
+  it('marks who it silences in the roster, apart from force-mute', async () => {
+    const { rosters } = (await api('/api/channels', { token: memberToken })).body;
+    const roster = rosters[voiceId];
+    const member = roster.find((m) => m.mid === memberJoin.mid);
+    const owner = roster.find((m) => m.mid === ownerJoin.mid);
+    assert.equal(member.micLocked, true);
+    assert.equal(member.forceMuted, false);
+    assert.equal(owner.micLocked, false);
+  });
+
+  it('holds for somebody who walks in afterwards', async () => {
+    memberSocket.close();
+    await new Promise((done) => { setTimeout(done, 100); });
+    memberSocket = await connect(memberToken);
+    memberJoin = await memberSocket.ask({ type: 'voice:join', channelId: voiceId });
+    assert.equal((await publish(voicePath(memberJoin), memberJoin.token)).status, 401);
+  });
+
+  it('gives the microphone back when lifted', async () => {
+    await api(`/api/channels/${voiceId}`, {
+      method: 'POST', body: { micLocked: false }, token: adminToken,
+    });
+    assert.equal((await publish(voicePath(memberJoin), memberJoin.token)).status, 204);
   });
 });

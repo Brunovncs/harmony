@@ -187,7 +187,7 @@ impl ServerView {
                         } else {
                             name
                         }))
-                        .when(m.muted || m.force_muted, |d| d.child(icon("mic-off", 14., if m.force_muted { t.critical } else { t.text3 })))
+                        .when(m.muted || m.silenced(), |d| d.child(icon("mic-off", 14., if m.force_muted { t.critical } else { t.text3 })))
                         .when(m.deafened, |d| d.child(icon("headphones-off", 14., t.text3)))
                         .when(m.publishes("s"), |d| d.child(live_chip(t, false))),
                 )

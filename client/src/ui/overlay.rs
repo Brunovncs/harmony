@@ -256,6 +256,11 @@ pub enum Field {
         placeholder: &'static str,
         max: usize,
     },
+    /// A checkbox; its value is "1" when ticked and empty when not.
+    Check {
+        label: &'static str,
+        on: bool,
+    },
 }
 
 type OnOk = Rc<dyn Fn(Vec<String>, &mut Window, &mut App) -> Option<String>>;
@@ -274,6 +279,7 @@ pub struct Ask {
 enum AskField {
     Text { label: &'static str, field: Entity<TextField>, required: bool },
     Choice { label: &'static str, options: Vec<(String, String)>, picked: usize },
+    Check { label: &'static str, on: bool },
 }
 
 impl EventEmitter<Dismiss> for Ask {}
@@ -329,6 +335,7 @@ impl Ask {
                         AskField::Text { label, field, required: !secret }
                     }
                     Field::Choice { label, options, picked } => AskField::Choice { label, options, picked },
+                    Field::Check { label, on } => AskField::Check { label, on },
                     Field::Optional { label, value, placeholder, max } => {
                         let field = cx.new(|cx| {
                             let mut f = TextField::new(cx, false, max).placeholder(placeholder);
@@ -371,6 +378,7 @@ impl Ask {
             .map(|f| match f {
                 AskField::Text { field, .. } => field.read(cx).text(),
                 AskField::Choice { options, picked, .. } => options.get(*picked).map(|o| o.0.clone()).unwrap_or_default(),
+                AskField::Check { on, .. } => if *on { "1" } else { "" }.into(),
             })
             .collect()
     }
@@ -422,6 +430,26 @@ impl Render for Ask {
                             cx.notify();
                         },
                     ))
+                }
+                AskField::Check { label: l, on } => {
+                    let id: &'static str = ["ask-check-0", "ask-check-1", "ask-check-2", "ask-check-3"][i.min(3)];
+                    let on = *on;
+                    div().child(
+                        div()
+                            .id(id)
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .cursor_pointer()
+                            .child(checkbox(on, &t))
+                            .child(body(*l, t.text2))
+                            .on_click(cx.listener(move |this: &mut Ask, _, _, cx| {
+                                if let Some(AskField::Check { on, .. }) = this.fields.get_mut(i) {
+                                    *on = !*on;
+                                }
+                                cx.notify();
+                            })),
+                    )
                 }
             });
         }

@@ -56,7 +56,16 @@ const accounts = new Accounts(db);
 ensureOwnerToken(accounts, metaStore);
 
 const channels = new Channels(db);
-const voice = new VoiceRooms();
+/*
+ * A locked channel silences everyone but the owner. Admins included: the
+ * lock is the owner's stage, and an admin who needs to speak can ask for it
+ * to be lifted -- an exemption by role would quietly turn "only the owner"
+ * into "only staff".
+ */
+const voice = new VoiceRooms({
+  micLocked: (channelId, userId) => Boolean(channels.get(channelId)?.mic_locked)
+    && accounts.byId(userId)?.role !== 'owner',
+});
 const mediaSecret = channelSecret(metaStore);
 const chat = new Chat(db, { dataDir: config.dataDir, maxDiskBytes: config.maxDiskBytes });
 const soundpad = new Soundpad(db);
@@ -864,12 +873,35 @@ app.post('/api/channels/reorder', requireAdmin, (req, res) => {
 });
 
 app.post('/api/channels/:id', requireAdmin, async (req, res) => {
-  const result = await channels.update(Number.parseInt(req.params.id, 10), {
+  const id = Number.parseInt(req.params.id, 10);
+  const micLocked = req.body?.micLocked;
+  // The rest of the channel is any admin's to edit; the lock is the owner's,
+  // since it is the owner it leaves speaking.
+  if (micLocked !== undefined && req.user.role !== 'owner') {
+    return res.status(403).json({
+      error: 'owner_only',
+      message: 'Only the owner can lock the microphones in a channel.',
+    });
+  }
+  const result = await channels.update(id, {
     ...(req.body?.name !== undefined ? { name: req.body.name } : {}),
     ...(req.body?.password !== undefined ? { password: req.body.password } : {}),
+    ...(micLocked !== undefined ? { micLocked: Boolean(micLocked) } : {}),
   });
   if (!result.ok) return res.status(400).json({ error: result.error });
   realtime?.broadcastChannels();
+  if (micLocked !== undefined) {
+    // Same order as a force-mute, for the same reason: the roster tells the
+    // people being silenced before the kick drops their session, or they
+    // would read it as a network error. The auth hook is what keeps them
+    // silent after that -- the kick only ends what is already in flight.
+    realtime?.broadcastRoster(id);
+    if (micLocked) {
+      await Promise.all(voice.roster(id)
+        .filter((m) => m.micLocked)
+        .map((m) => monitor.kickPath(channelPath(id, m.mid, 'voice'))));
+    }
+  }
   return res.json({ channel: publicChannel(result.channel) });
 });
 

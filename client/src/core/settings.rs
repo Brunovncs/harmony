@@ -70,6 +70,8 @@ pub struct Settings {
     pub close_to_tray: bool,
     /// The notice saying so has been shown, the first time the window closed to it.
     pub tray_notice_seen: bool,
+    /// Clicking a voice channel asks before joining it.
+    pub confirm_voice_join: bool,
 }
 
 /// A server in the rail: where it is, who you are there, and its name and picture as last seen,
@@ -438,6 +440,7 @@ impl Default for Settings {
             language: String::new(),
             close_to_tray: true,
             tray_notice_seen: false,
+            confirm_voice_join: true,
         }
     }
 }

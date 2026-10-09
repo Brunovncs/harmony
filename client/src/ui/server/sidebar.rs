@@ -163,10 +163,11 @@ impl ServerView {
                     .child(c.name.clone()),
             )
             .when(c.locked, |d| d.child(icon("lock", 12., if locked { t.text3 } else { t.success })))
+            .when(c.mic_locked, |d| d.child(icon("mic-off", 12., t.text3)))
             .when(mentioned, |d| d.child(badge_text("@", t.on_accent, t.accent)))
             .on_click(cx.listener(move |this, _, window, cx| match kind {
                 ChannelKind::Text => this.open_text(id, window, cx),
-                ChannelKind::Voice => this.join_voice(id, None, window, cx),
+                ChannelKind::Voice => this.ask_join_voice(id, window, cx),
             }))
             .when(admin, |d| {
                 let accent = t.accent;
@@ -225,7 +226,7 @@ impl ServerView {
             )
             .when(m.publishes("s"), |d| d.child(live_chip(t, false)))
             .when(m.publishes("c"), |d| d.child(icon("camera", 13., t.text3)))
-            .when(m.muted || m.force_muted, |d| d.child(icon("mic-off", 13., if m.force_muted { t.critical } else { t.text3 })))
+            .when(m.muted || m.silenced(), |d| d.child(icon("mic-off", 13., if m.force_muted { t.critical } else { t.text3 })))
             .when(m.deafened, |d| d.child(icon("headphones-off", 13., t.text3)))
             .when(!me, |d| {
                 d.on_mouse_down(
@@ -309,85 +310,106 @@ impl ServerView {
         cx: &mut Context<Self>,
     ) {
         let session = self.session.clone();
-        let menu = cx.new(|_| Menu {
-            items: vec![
-                MenuEntry::item("edit", tr!("Rename or set a password", "Renomear ou definir senha"), false, {
-                    let (session, name) = (session.clone(), name.clone());
-                    move |window, cx| {
-                        let session = session.clone();
-                        Ask::open(
-                            tr!("Edit channel", "Editar canal"),
-                            Some(
-                                if kind == ChannelKind::Voice {
-                                    tr!("Voice channel", "Canal de voz")
-                                } else {
-                                    tr!("Text channel", "Canal de texto")
-                                }
-                                .into(),
-                            ),
-                            tr!("Save", "Salvar"),
-                            false,
-                            vec![
-                                Field::Text {
-                                    label: tr!("Name", "Nome"),
-                                    value: name.clone(),
-                                    placeholder: "",
-                                    secret: false,
-                                    multiline: false,
-                                    max: 32,
-                                },
-                                Field::Text {
-                                    label: tr!("New password", "Nova senha"),
-                                    value: String::new(),
-                                    placeholder: tr!("Empty keeps it as it is", "Vazio mantém como está"),
-                                    secret: true,
-                                    multiline: false,
-                                    max: 64,
-                                },
-                                Field::Choice {
-                                    label: tr!("Password", "Senha"),
-                                    options: vec![
-                                        ("keep".into(), tr!("Keep or set", "Manter ou definir").into()),
-                                        ("remove".into(), tr!("Remove it", "Remover").into()),
-                                    ],
-                                    picked: 0,
-                                },
-                            ],
-                            window,
-                            cx,
-                            move |v, _, cx| {
-                                let name = v[0].trim().to_string();
-                                let password =
-                                    if v[2] == "remove" { Some(String::new()) } else { (!v[1].is_empty()).then(|| v[1].clone()) };
-                                session.update(cx, |s, cx| {
-                                    s.call(
-                                        cx,
-                                        move |api| Box::pin(async move { api.update_channel(id, &name, password.as_deref()).await }),
-                                        |_, _, _| {},
-                                    )
-                                });
-                                None
-                            },
-                        );
-                    }
-                }),
-                MenuEntry::item("delete", tr!("Delete this channel", "Apagar este canal"), true, move |window, cx| {
+        let owner = self.session.read(cx).me.role == Role::Owner;
+        let mic_locked = self.session.read(cx).channel(id).is_some_and(|c| c.mic_locked);
+        let mut items = vec![
+            MenuEntry::item("edit", tr!("Rename or set a password", "Renomear ou definir senha"), false, {
+                let (session, name) = (session.clone(), name.clone());
+                move |window, cx| {
                     let session = session.clone();
-                    Ask::confirm_action(
-                        trf!("Delete #{}?", "Apagar #{}?", name),
-                        tr!("Its messages go with it. This can't be undone.", "As mensagens vão junto. Não dá para desfazer."),
-                        tr!("Delete", "Apagar"),
+                    Ask::open(
+                        tr!("Edit channel", "Editar canal"),
+                        Some(
+                            if kind == ChannelKind::Voice {
+                                tr!("Voice channel", "Canal de voz")
+                            } else {
+                                tr!("Text channel", "Canal de texto")
+                            }
+                            .into(),
+                        ),
+                        tr!("Save", "Salvar"),
+                        false,
+                        vec![
+                            Field::Text {
+                                label: tr!("Name", "Nome"),
+                                value: name.clone(),
+                                placeholder: "",
+                                secret: false,
+                                multiline: false,
+                                max: 32,
+                            },
+                            Field::Text {
+                                label: tr!("New password", "Nova senha"),
+                                value: String::new(),
+                                placeholder: tr!("Empty keeps it as it is", "Vazio mantém como está"),
+                                secret: true,
+                                multiline: false,
+                                max: 64,
+                            },
+                            Field::Choice {
+                                label: tr!("Password", "Senha"),
+                                options: vec![
+                                    ("keep".into(), tr!("Keep or set", "Manter ou definir").into()),
+                                    ("remove".into(), tr!("Remove it", "Remover").into()),
+                                ],
+                                picked: 0,
+                            },
+                        ],
                         window,
                         cx,
-                        move |_, cx| {
+                        move |v, _, cx| {
+                            let name = v[0].trim().to_string();
+                            let password = if v[2] == "remove" { Some(String::new()) } else { (!v[1].is_empty()).then(|| v[1].clone()) };
                             session.update(cx, |s, cx| {
-                                s.call(cx, move |api| Box::pin(async move { api.delete_channel(id).await }), |_, _, _| {})
-                            })
+                                s.call(
+                                    cx,
+                                    move |api| Box::pin(async move { api.update_channel(id, &name, password.as_deref()).await }),
+                                    |_, _, _| {},
+                                )
+                            });
+                            None
                         },
                     );
-                }),
-            ],
-        });
+                }
+            }),
+            MenuEntry::item("delete", tr!("Delete this channel", "Apagar este canal"), true, move |window, cx| {
+                let session = session.clone();
+                Ask::confirm_action(
+                    trf!("Delete #{}?", "Apagar #{}?", name),
+                    tr!("Its messages go with it. This can't be undone.", "As mensagens vão junto. Não dá para desfazer."),
+                    tr!("Delete", "Apagar"),
+                    window,
+                    cx,
+                    move |_, cx| {
+                        session
+                            .update(cx, |s, cx| s.call(cx, move |api| Box::pin(async move { api.delete_channel(id).await }), |_, _, _| {}))
+                    },
+                );
+            }),
+        ];
+        // The owner's alone: it leaves the owner the only one speaking.
+        if kind == ChannelKind::Voice && owner {
+            let session = self.session.clone();
+            items.insert(
+                1,
+                MenuEntry::item(
+                    if mic_locked { "mic" } else { "mic-off" },
+                    if mic_locked {
+                        tr!("Unlock microphones", "Desbloquear microfones")
+                    } else {
+                        tr!("Lock microphones (only you speak)", "Bloquear microfones (só você fala)")
+                    },
+                    false,
+                    move |_, cx| {
+                        let locked = !mic_locked;
+                        session.update(cx, |s, cx| {
+                            s.call(cx, move |api| Box::pin(async move { api.set_channel_mic_locked(id, locked).await }), |_, _, _| {})
+                        })
+                    },
+                ),
+            );
+        }
+        let menu = cx.new(|_| Menu { items });
         overlay::open_menu(menu, at, cx);
     }
 

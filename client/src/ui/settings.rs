@@ -427,6 +427,18 @@ impl Settings {
                     apply_mic_prefs(cx);
                 },
             ))
+            .child(toggle_row(
+                "confirm-join",
+                tr!("Ask before joining a voice channel", "Perguntar antes de entrar num canal de voz"),
+                tr!(
+                    "A click on a voice channel asks first, so a stray one doesn't put you on the air.",
+                    "Um clique num canal de voz pergunta antes, para um clique sem querer não te colocar no ar."
+                ),
+                p.confirm_voice_join,
+                t,
+                cx,
+                |cx| set_prefs(cx, |p| p.confirm_voice_join = !p.confirm_voice_join),
+            ))
             .into_any_element()
     }
 

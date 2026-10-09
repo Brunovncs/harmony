@@ -214,6 +214,46 @@ impl ServerView {
         self.call.as_ref().is_some_and(|c| c.read(cx).channel == channel && c.read(cx).is_speaking(user, cx))
     }
 
+    /// A click on a voice channel: asks first, unless that was turned off or you are already in
+    /// it. Being moved, or answering a password, joins without asking; that was not a click.
+    pub fn ask_join_voice(&mut self, id: ChannelId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.call_channel(cx) == Some(id) || !prefs(cx).confirm_voice_join {
+            return self.join_voice(id, None, window, cx);
+        }
+        let Some(channel) = self.session.read(cx).channel(id).cloned() else { return };
+        let owner = self.session.read(cx).me.role == Role::Owner;
+        let mut text = match self.call_channel(cx).and_then(|c| self.session.read(cx).channel(c)) {
+            Some(now) => trf!("You will leave {} and join this one.", "Você vai sair de {} e entrar neste.", now.name),
+            None => tr!("Everyone in it will be able to hear you.", "Todos que estão nele vão poder te ouvir.").into(),
+        };
+        if channel.mic_locked && !owner {
+            text = trf!(
+                "{} Microphones are locked here: only the owner speaks.",
+                "{} Os microfones estão bloqueados aqui: só o dono fala.",
+                text
+            );
+        }
+        let this = cx.entity().downgrade();
+        Ask::open(
+            trf!("Join {}?", "Entrar em {}?", channel.name),
+            Some(text),
+            tr!("Join", "Entrar"),
+            false,
+            vec![Field::Check { label: tr!("Don't ask again", "Não perguntar de novo"), on: false }],
+            window,
+            cx,
+            move |v, window, cx| {
+                if !v[0].is_empty() {
+                    set_prefs(cx, |p| p.confirm_voice_join = false);
+                }
+                if let Some(this) = this.upgrade() {
+                    this.update(cx, |this, cx| this.join_voice(id, None, window, cx));
+                }
+                None
+            },
+        );
+    }
+
     pub fn join_voice(&mut self, id: ChannelId, password: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         if self.call_channel(cx) == Some(id) {
             self.center = Center::Stage;

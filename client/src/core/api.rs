@@ -294,6 +294,10 @@ impl Api {
         Ok(self.post::<ChannelReply>(&format!("/api/channels/{id}"), body).await?.channel)
     }
 
+    pub async fn set_channel_mic_locked(&self, id: ChannelId, locked: bool) -> Result<Channel> {
+        Ok(self.post::<ChannelReply>(&format!("/api/channels/{id}"), json!({ "micLocked": locked })).await?.channel)
+    }
+
     pub async fn delete_channel(&self, id: ChannelId) -> Result<Value> {
         self.post(&format!("/api/channels/{id}/delete"), json!({})).await
     }

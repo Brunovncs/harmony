@@ -213,6 +213,19 @@ pub fn switch(on: bool, t: &Theme) -> Div {
         .child(div().size(px(14.)).rounded_full().bg(if on { t.on_accent } else { t.text2 }))
 }
 
+/// A tick box.
+pub fn checkbox(on: bool, t: &Theme) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(18.))
+        .rounded(px(5.))
+        .when(on, |d| d.bg(t.accent).child(icon("check", 13., t.on_accent)))
+        .when(!on, |d| d.bg(t.well).border_1().border_color(t.stroke_strong))
+}
+
 /// A row of choices, one of them picked: the segmented control from Texel.
 pub fn segmented<T: Copy + PartialEq + 'static, V: 'static>(
     id: &'static str,
