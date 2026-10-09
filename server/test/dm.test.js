@@ -500,6 +500,16 @@ describe('sealed files', () => {
     }
   });
 
+  it('NOR BY MEDIA KEY, not even to the two people in it', async () => {
+    // A media key opens what /api/uploads opens. The conversation's own route
+    // checks who is asking; a key in a URL would check nothing of the sort.
+    for (const who of ['alice', 'bob', 'boss']) {
+      const key = (await api('/api/media-key', { token: tokens[who] })).body.key;
+      const res = await fetch(`${BASE}/api/media/${hash}?k=${encodeURIComponent(key)}`);
+      assert.equal(res.status, 404);
+    }
+  });
+
   it('cannot be fetched through another conversation, even by somebody in both', async () => {
     const other = await open('alice', 'eve');
     assert.equal((await api(`/api/dms/${other}/uploads/${hash}`, { token: tokens.alice })).status, 404);

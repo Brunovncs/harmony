@@ -1,11 +1,15 @@
-//! Your camera: frames from the device (as RGBA), the background replaced if you asked for it,
-//! then into a WebRTC video source (I420, by libyuv) and, mirrored, into your own preview.
+//! Your camera: frames from the device, centre-cropped and scaled to the size sent in I420 (by
+//! libyuv, in one pass where it can), the background replaced if you asked for it (the one step
+//! that works in RGBA), then into a WebRTC video source and into your own preview, which the GPU
+//! draws mirrored.
 
 use super::background::{Backdrop, Compositor, Segmenter};
-use super::video::FrameSlot;
+use super::video::{self, FrameSlot};
+use super::yuv::{self, Packed};
 use crate::core::settings::Background;
-use gpui::RenderImage;
+use gpui::SurfaceFrame;
 use libwebrtc::native::yuv_helper;
+use libwebrtc::prelude::VideoBuffer;
 use libwebrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
 use libwebrtc::video_source::VideoResolution;
 use libwebrtc::video_source::native::NativeVideoSource;
@@ -13,10 +17,9 @@ use nokhwa::Camera;
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{ApiBackend, CameraFormat, FrameFormat, RequestedFormat, RequestedFormatType};
 use parking_lot::Mutex;
-use smallvec::SmallVec;
 use std::cmp::Reverse;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -28,9 +31,9 @@ pub const FPS: u32 = 30;
 pub const BITRATE: u64 = 800_000;
 /// Bad frames in a row before the camera counts as gone.
 const MAX_BAD_FRAMES: u32 = 30;
-/// The person-finding model at most this often (15 to 20 times a second); the mask is smoothed
-/// in between.
-const MASK_EVERY: Duration = Duration::from_millis(50);
+/// The person-finding model at most this often (12 times a second): a run takes about 20 ms of a
+/// core, and the mask is reused and smoothed in between.
+const MASK_EVERY: Duration = Duration::from_millis(80);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Device {
@@ -129,14 +132,15 @@ impl Drop for Capture {
 }
 
 /// The camera's mode to use: its full frame rate (up to `FPS`) first, then the smallest picture
-/// that still covers the frame sent (or else the largest), then the format cheapest to carry
-/// and decode.
+/// that still covers the frame sent (or else the largest), then the format cheapest to turn into
+/// it. NV12 and YUY2 crop and convert in one libyuv pass; MJPEG needs a JPEG decode first, so it
+/// wins only when it is the one way to get the size or the rate.
 fn best_format(formats: &[CameraFormat]) -> Option<CameraFormat> {
     let covers = |f: &CameraFormat| f.width() >= WIDTH && f.height() >= HEIGHT;
     let format = |f: &CameraFormat| match f.format() {
-        FrameFormat::MJPEG => 0,
-        FrameFormat::NV12 => 1,
-        FrameFormat::YUYV => 2,
+        FrameFormat::NV12 => 0,
+        FrameFormat::YUYV => 1,
+        FrameFormat::MJPEG => 2,
         _ => 3,
     };
     formats
@@ -170,31 +174,6 @@ fn open(device: &str) -> anyhow::Result<Camera> {
     Ok(cam)
 }
 
-/// The frame as tightly packed RGBA.
-fn decode(frame: &nokhwa::Buffer) -> anyhow::Result<(Vec<u8>, u32, u32)> {
-    let res = frame.resolution();
-    let (w, h) = (res.width(), res.height());
-    let data = frame.buffer();
-    let rgb = |rgb: &[u8]| rgb.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect::<Vec<u8>>();
-    let rgba = match frame.source_frame_format() {
-        FrameFormat::MJPEG => image::load_from_memory_with_format(data, image::ImageFormat::Jpeg)?.to_rgba8().into_raw(),
-        FrameFormat::NV12 => {
-            let (y, uv) = data.split_at_checked((w * h) as usize).ok_or_else(|| anyhow::anyhow!("short frame"))?;
-            anyhow::ensure!(uv.len() >= (w * h / 2) as usize, "short frame");
-            let mut out = vec![0u8; (w * h * 4) as usize];
-            // libyuv's ABGR is R, G, B, A in memory.
-            yuv_helper::nv12_to_abgr(y, w, uv, w, &mut out, w * 4, w as i32, h as i32);
-            out
-        }
-        FrameFormat::YUYV => rgb(&nokhwa::utils::yuyv422_to_rgb(data, false)?),
-        FrameFormat::RAWRGB => rgb(data),
-        FrameFormat::RAWBGR => data.chunks_exact(3).flat_map(|p| [p[2], p[1], p[0], 255]).collect(),
-        FrameFormat::GRAY => data.iter().flat_map(|&g| [g, g, g, 255]).collect(),
-    };
-    anyhow::ensure!(rgba.len() == (w * h * 4) as usize, "bad frame");
-    Ok((rgba, w, h))
-}
-
 /// The centre of a w × h picture in the shape of the frame sent, as (x, y, width, height), on
 /// even pixels.
 fn crop_rect(w: u32, h: u32) -> (u32, u32, u32, u32) {
@@ -207,27 +186,76 @@ fn crop_rect(w: u32, h: u32) -> (u32, u32, u32, u32) {
     }
 }
 
-/// To 640 × 360: centre-cropped to 16:9, then scaled (by libyuv, through I420) if need be.
-fn to_size(rgba: Vec<u8>, w: u32, h: u32) -> anyhow::Result<Vec<u8>> {
-    anyhow::ensure!(rgba.len() == (w * h * 4) as usize, "bad frame");
-    if (w, h) == (WIDTH, HEIGHT) {
-        return Ok(rgba);
+/// Turns the device's frames into the frame sent, keeping its buffers from frame to frame.
+#[derive(Default)]
+struct Converter {
+    /// A whole MJPEG frame: libyuv decodes JPEG only whole, so it is cropped after.
+    full: Option<I420Buffer>,
+    /// The crop of an uncompressed frame, when it still has to be scaled.
+    crop: Option<I420Buffer>,
+    /// A JPEG's crop at the size sent, still in JPEG's full range.
+    wide: Option<I420Buffer>,
+}
+
+impl Converter {
+    /// The frame centre-cropped to 16:9 and scaled to `WIDTH` × `HEIGHT`, as I420.
+    fn convert(&mut self, frame: &nokhwa::Buffer) -> anyhow::Result<I420Buffer> {
+        let res = frame.resolution();
+        let (w, h) = (res.width(), res.height());
+        let rect = crop_rect(w, h);
+        let (_, _, cw, ch) = rect;
+        anyhow::ensure!(cw >= 2 && ch >= 2, "{w}x{h} frame");
+        let data = frame.buffer();
+        // A new buffer every frame: the encoder reads it after it is sent.
+        let mut out = I420Buffer::new(WIDTH, HEIGHT);
+        let packed = match frame.source_frame_format() {
+            FrameFormat::MJPEG => {
+                let full = yuv::pooled(&mut self.full, w, h);
+                if !decode_jpeg(data, full)? {
+                    yuv::scale_rect(full, rect, &mut out);
+                    return Ok(out);
+                }
+                let wide = if (w, h) == (WIDTH, HEIGHT) {
+                    full
+                } else {
+                    let wide = yuv::pooled(&mut self.wide, WIDTH, HEIGHT);
+                    yuv::scale_rect(full, rect, wide);
+                    wide
+                };
+                yuv::narrow_range(wide, &mut out);
+                return Ok(out);
+            }
+            FrameFormat::NV12 => Packed::Nv12,
+            FrameFormat::YUYV => Packed::Yuy2,
+            FrameFormat::RAWRGB => Packed::Raw,
+            FrameFormat::RAWBGR => Packed::Rgb24,
+            FrameFormat::GRAY => Packed::Gray,
+        };
+        if (cw, ch) == (WIDTH, HEIGHT) {
+            yuv::convert(data, packed, w, h, rect, &mut out)?;
+        } else {
+            let crop = yuv::pooled(&mut self.crop, cw, ch);
+            yuv::convert(data, packed, w, h, rect, crop)?;
+            yuv::scale(crop, &mut out);
+        }
+        Ok(out)
     }
-    let (x, y, cw, ch) = crop_rect(w, h);
-    let (row, x, cw4) = ((w * 4) as usize, (x * 4) as usize, (cw * 4) as usize);
-    let mut crop = Vec::with_capacity(cw4 * ch as usize);
-    for line in rgba.chunks_exact(row).skip(y as usize).take(ch as usize) {
-        crop.extend_from_slice(&line[x..x + cw4]);
+}
+
+/// A whole MJPEG frame into `dst`, its size; whether it came out in JPEG's full range.
+fn decode_jpeg(data: &[u8], dst: &mut I420Buffer) -> anyhow::Result<bool> {
+    let (w, h) = (dst.width(), dst.height());
+    match yuv::mjpeg(data, w, h, dst) {
+        Ok(()) => Ok(true),
+        Err(e) => {
+            // The slower decoder takes a few JPEGs libjpeg-turbo turns down.
+            log::debug!("camera: {e}; decoding it with image");
+            let rgba = image::load_from_memory_with_format(data, image::ImageFormat::Jpeg)?.to_rgba8();
+            anyhow::ensure!(rgba.dimensions() == (w, h), "bad frame");
+            rgba_into(&rgba, dst);
+            Ok(false)
+        }
     }
-    if (cw, ch) == (WIDTH, HEIGHT) {
-        return Ok(crop);
-    }
-    let scaled = rgba_to_i420(&crop, cw, ch).scale(WIDTH as i32, HEIGHT as i32);
-    let (sy, su, sv) = scaled.strides();
-    let (py, pu, pv) = scaled.data();
-    let mut out = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
-    yuv_helper::i420_to_abgr(py, sy, pu, su, pv, sv, &mut out, WIDTH * 4, WIDTH as i32, HEIGHT as i32);
-    Ok(out)
 }
 
 /// Counts a bad frame: fine now and then, the end of the camera when they keep coming.
@@ -274,6 +302,10 @@ impl Pacer {
 /// is handed a frame when it is free, and leaves the newest mask behind with the time it took.
 struct Masker {
     frames: SyncSender<Vec<u8>>,
+    /// The model is waiting for a frame, so one offered now is taken.
+    idle: Arc<AtomicBool>,
+    /// The last frame the model was handed, back for the next to be copied into.
+    spare: Arc<Mutex<Option<Vec<u8>>>>,
     mask: Arc<Mutex<Option<Timed>>>,
 }
 
@@ -284,23 +316,42 @@ impl Masker {
     fn start(seg: &'static Segmenter) -> std::io::Result<Masker> {
         // No room for a frame: one is only taken while the model is waiting for it.
         let (frames, rx) = sync_channel::<Vec<u8>>(0);
+        let idle = Arc::new(AtomicBool::new(false));
+        let spare = Arc::new(Mutex::new(None));
         let mask = Arc::new(Mutex::new(None));
-        let out = mask.clone();
+        let (out, waiting, returned) = (mask.clone(), idle.clone(), spare.clone());
         std::thread::Builder::new().name("harmony-segment".into()).spawn(move || {
-            for rgba in rx {
+            loop {
+                waiting.store(true, Ordering::Release);
+                let Ok(rgba) = rx.recv() else { break };
+                waiting.store(false, Ordering::Relaxed);
                 let t = Instant::now();
                 match seg.mask(&rgba, WIDTH as usize, HEIGHT as usize) {
                     Ok(m) => *out.lock() = Some((m, t.elapsed())),
                     Err(e) => log::debug!("segmentation: {e}"),
                 }
+                *returned.lock() = Some(rgba);
             }
         })?;
-        Ok(Masker { frames, mask })
+        Ok(Masker { frames, idle, spare, mask })
     }
 
-    /// Hands the model a frame unless it is still busy with the last one.
+    /// Hands the model a frame unless it is still busy with the last one, copying it only then.
     fn offer(&self, rgba: &[u8]) -> bool {
-        self.frames.try_send(rgba.to_vec()).is_ok()
+        if !self.idle.load(Ordering::Acquire) {
+            return false;
+        }
+        let mut frame = self.spare.lock().take().unwrap_or_default();
+        frame.clear();
+        frame.extend_from_slice(rgba);
+        match self.frames.try_send(frame) {
+            Ok(()) => true,
+            // Not quite back at its wait yet.
+            Err(TrySendError::Full(frame) | TrySendError::Disconnected(frame)) => {
+                *self.spare.lock() = Some(frame);
+                false
+            }
+        }
     }
 
     fn take(&self) -> Option<Timed> {
@@ -317,7 +368,7 @@ struct Meter {
     stages: [(Duration, u32); STAGES.len()],
 }
 
-const STAGES: [&str; 4] = ["decode", "segment", "composite", "convert"];
+const STAGES: [&str; 5] = ["decode", "segment", "composite", "convert", "preview"];
 
 impl Meter {
     fn new() -> Meter {
@@ -373,10 +424,14 @@ fn run(
         return Ok(());
     }
     let mut cam = open(device)?;
+    let mut converter = Converter::default();
     let mut compositor = Compositor::new();
     let mut masker: Option<Masker> = None;
     let mut offered = Instant::now() - MASK_EVERY;
     let mut picture_for: Option<(Background, Vec<u8>)> = None;
+    // Only filled while a background is replaced.
+    let mut rgba = Vec::new();
+    let mut frames = video::Scratch::default();
     let mut pacer = Pacer::new(FPS);
     let mut meter = Meter::new();
     let started = Instant::now();
@@ -395,8 +450,8 @@ fn run(
         if !pacer.admit(started.elapsed()) {
             continue;
         }
-        let mut rgba = match meter.time(0, || decode(&frame).and_then(|(px, w, h)| to_size(px, w, h))) {
-            Ok(px) => px,
+        let mut i420 = match meter.time(0, || converter.convert(&frame)) {
+            Ok(b) => b,
             Err(e) => {
                 strike(&mut bad, e)?;
                 continue;
@@ -407,6 +462,8 @@ fn run(
         let bg = background.lock().clone();
         let seg = segmenter().filter(|_| !matches!(bg, Background::None));
         if let Some(seg) = seg {
+            // The model and the blend work in RGBA; the frame goes there and back only now.
+            meter.time(3, || i420_to_rgba(&i420, &mut rgba));
             let (mw, mh) = seg.input_size();
             if !compositor.has_mask() {
                 // The first frame waits for its mask, so the room never shows unreplaced.
@@ -436,44 +493,51 @@ fn run(
             };
             if let Some(b) = backdrop {
                 meter.time(2, || compositor.apply(&mut rgba, WIDTH as usize, HEIGHT as usize, &b));
+                // Not sent yet, so it is still this loop's to write.
+                meter.time(3, || rgba_into(&rgba, &mut i420));
             }
         } else if compositor.has_mask() {
             // A mask kept from before would show the wrong outline when a background comes back.
             compositor = Compositor::new();
             masker = None;
+            rgba = Vec::new();
         }
 
-        let mut vf = VideoFrame::new(VideoRotation::VideoRotation0, meter.time(3, || rgba_to_i420(&rgba, WIDTH, HEIGHT)));
+        let mut vf = VideoFrame::new(VideoRotation::VideoRotation0, i420);
         vf.timestamp_us = started.elapsed().as_micros() as i64;
         source.capture_frame(&vf);
         meter.sent += 1;
-        preview.put(mirrored_bgra(&rgba, WIDTH, HEIGHT), WIDTH, HEIGHT);
+        // The encoder only reads the frame, so the preview can be made from it meanwhile.
+        if !video::window_hidden() {
+            let frame = meter.time(4, || preview_frame(&vf.buffer, preview.id, &mut frames));
+            preview.put(frame);
+        }
     }
     Ok(())
 }
 
-/// RGBA to I420 (BT.601, limited range), as encoders expect.
-pub fn rgba_to_i420(rgba: &[u8], w: u32, h: u32) -> I420Buffer {
-    let mut buf = I420Buffer::new(w, h);
-    let (sy, su, sv) = buf.strides();
-    let (y, u, v) = buf.data_mut();
+/// RGBA of `dst`'s size into it, as I420 (BT.601, limited range), as encoders expect.
+fn rgba_into(rgba: &[u8], dst: &mut I420Buffer) {
+    let (w, h) = (dst.width(), dst.height());
+    let (sy, su, sv) = dst.strides();
+    let (y, u, v) = dst.data_mut();
     // libyuv's ABGR is R, G, B, A in memory.
     yuv_helper::abgr_to_i420(rgba, w * 4, y, sy, u, su, v, sv, w as i32, h as i32);
-    buf
 }
 
-/// Your own view, mirrored as a mirror is, in GPUI's BGRA.
-fn mirrored_bgra(rgba: &[u8], w: u32, h: u32) -> Arc<RenderImage> {
-    let row = w as usize * 4;
-    let mut out = vec![0u8; rgba.len()];
-    for (src, dst) in rgba.chunks_exact(row).zip(out.chunks_exact_mut(row)) {
-        for (s, d) in src.chunks_exact(4).rev().zip(dst.chunks_exact_mut(4)) {
-            d.copy_from_slice(&[s[2], s[1], s[0], 255]);
-        }
-    }
-    let img = image::RgbaImage::from_raw(w, h, out).expect("frame size");
-    Arc::new(RenderImage::new(SmallVec::from_elem(image::Frame::new(img), 1)))
+fn i420_to_rgba(src: &I420Buffer, rgba: &mut Vec<u8>) {
+    let (w, h) = (src.width(), src.height());
+    rgba.resize((w * h * 4) as usize, 0);
+    let (sy, su, sv) = src.strides();
+    let (y, u, v) = src.data();
+    yuv_helper::i420_to_abgr(y, sy, u, su, v, sv, rgba, w * 4, w as i32, h as i32);
 }
+
+/// Your own view, as stream `id` of the window, which draws it mirrored as a mirror is.
+fn preview_frame(src: &I420Buffer, id: u64, frames: &mut video::Scratch) -> SurfaceFrame {
+    frames.of_i420(id, src).mirrored(true)
+}
+
 /// A still of a background, for the picker.
 pub fn thumbnail(bg: &Background) -> Option<Arc<gpui::Image>> {
     let bytes = match bg {
@@ -488,6 +552,12 @@ pub fn thumbnail(bg: &Background) -> Option<Arc<gpui::Image>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rgba_to_i420(rgba: &[u8], w: u32, h: u32) -> I420Buffer {
+        let mut buf = I420Buffer::new(w, h);
+        rgba_into(rgba, &mut buf);
+        buf
+    }
 
     #[test]
     fn grey_converts_to_grey() {
@@ -520,7 +590,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(best_format(&modes), Some(mode(FrameFormat::MJPEG, 640, 480, 30)));
+        assert_eq!(best_format(&modes), Some(mode(FrameFormat::NV12, 640, 480, 30)));
         // The frame rate counts before the size: 720p at 30 beats 480p at 15.
         let modes = [mode(FrameFormat::YUYV, 640, 480, 15), mode(FrameFormat::MJPEG, 1280, 720, 30)];
         assert_eq!(best_format(&modes), Some(mode(FrameFormat::MJPEG, 1280, 720, 30)));
@@ -543,22 +613,67 @@ mod tests {
 
     #[test]
     fn a_4_by_3_frame_keeps_its_middle_rows() {
+        // NV12 whose every row is lit by its own number: the frame sent starts 60 rows down.
         let (w, h) = (640u32, 480u32);
-        let rgba: Vec<u8> = (0..h).flat_map(|y| (0..w).flat_map(move |_| [y as u8, 0, 0, 255])).collect();
-        let out = to_size(rgba, w, h).unwrap();
-        assert_eq!(out.len(), (WIDTH * HEIGHT * 4) as usize);
-        assert_eq!(out[0], 60);
-        assert_eq!(out[out.len() - 4], (60 + HEIGHT - 1) as u8);
+        let mut nv12: Vec<u8> = (0..h).flat_map(|y| std::iter::repeat_n(y as u8, w as usize)).collect();
+        nv12.resize(Packed::Nv12.size(w, h), 128);
+        let out = Converter::default().convert(&frame(w, h, &nv12, FrameFormat::NV12)).unwrap();
+        assert_eq!((out.width(), out.height()), (WIDTH, HEIGHT));
+        let (y, _, _) = out.data();
+        assert_eq!(y[0], 60);
+        assert_eq!(y[(HEIGHT - 1) as usize * out.strides().0 as usize], (60 + HEIGHT - 1) as u8);
+    }
+
+    fn frame(w: u32, h: u32, data: &[u8], format: FrameFormat) -> nokhwa::Buffer {
+        nokhwa::Buffer::new(nokhwa::utils::Resolution::new(w, h), data, format)
     }
 
     #[test]
-    fn a_big_frame_is_scaled_down_with_its_colour() {
-        let (w, h) = (1280u32, 720u32);
-        let rgba = [200u8, 120, 40, 255].repeat((w * h) as usize);
-        let out = to_size(rgba, w, h).unwrap();
-        assert_eq!(out.len(), (WIDTH * HEIGHT * 4) as usize);
-        let p = &out[(WIDTH * 100 + 300) as usize * 4..][..4];
-        assert!(p[0].abs_diff(200) <= 3 && p[1].abs_diff(120) <= 3 && p[2].abs_diff(40) <= 3 && p[3] == 255, "{p:?}");
+    fn every_format_is_cropped_and_scaled_with_its_colour() {
+        let (w, h) = (1280u32, 960u32);
+        let colour = [200u8, 120, 40];
+        let i420 = rgba_to_i420(&[colour[0], colour[1], colour[2], 255].repeat((w * h) as usize), w, h);
+        let (y, u, v) = (i420.data().0[0], i420.data().1[0], i420.data().2[0]);
+        let mut nv12 = vec![y; (w * h) as usize];
+        nv12.extend([u, v].repeat((w * h / 4) as usize));
+        let rgb = colour.repeat((w * h) as usize);
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95).encode(&rgb, w, h, image::ExtendedColorType::Rgb8).unwrap();
+        let frames = [
+            (FrameFormat::NV12, nv12),
+            (FrameFormat::YUYV, [y, u, y, v].repeat((w * h / 2) as usize)),
+            (FrameFormat::RAWRGB, rgb.clone()),
+            (FrameFormat::RAWBGR, [colour[2], colour[1], colour[0]].repeat((w * h) as usize)),
+            (FrameFormat::MJPEG, jpeg),
+        ];
+        let mut converter = Converter::default();
+        for (format, data) in frames {
+            // Twice, so the second runs on kept buffers.
+            for _ in 0..2 {
+                let out = converter.convert(&frame(w, h, &data, format)).unwrap();
+                assert_eq!((out.width(), out.height()), (WIDTH, HEIGHT), "{format:?}");
+                let mut px = Vec::new();
+                i420_to_rgba(&out, &mut px);
+                let p = &px[(WIDTH * 100 + 300) as usize * 4..][..4];
+                let near = p.iter().zip(colour).all(|(a, b)| a.abs_diff(b) <= 4) && p[3] == 255;
+                assert!(near, "{format:?}: {p:?}");
+            }
+        }
+        let short = frame(w, h, &[0; 100], FrameFormat::NV12);
+        assert!(converter.convert(&short).is_err());
+    }
+
+    #[test]
+    fn the_preview_is_the_frame_sent_drawn_mirrored() {
+        // White on the left of the frame sent: the preview holds it as sent, for the GPU to flip.
+        let rgba: Vec<u8> = (0..WIDTH * HEIGHT).flat_map(|i| if i % WIDTH < WIDTH / 2 { [255; 4] } else { [0, 0, 0, 255] }).collect();
+        let sent = rgba_to_i420(&rgba, WIDTH, HEIGHT);
+        let frame = preview_frame(&sent, 7, &mut video::Scratch::default());
+        assert!(frame.is_mirrored());
+        assert_eq!((frame.id(), frame.width(), frame.height()), (7, WIDTH, HEIGHT));
+        let (y, stride) = frame.plane(0);
+        let at = |x: usize| y[stride * 10 + x];
+        assert!(at(10) > 225 && at(WIDTH as usize - 10) < 30, "{} {}", at(10), at(WIDTH as usize - 10));
     }
 
     /// Frames at `fps` with a few milliseconds of jitter, through a pacer at `FPS`, for 10 s.

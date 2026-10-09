@@ -293,7 +293,7 @@ fn note_health(server: &str, h: &Health, cx: &mut App) {
         return;
     }
     let name = h.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| "Harmony".into());
-    let icon = h.icon_hash.clone().unwrap_or_default();
+    let icon = h.icon_hash().cloned().unwrap_or_default();
     if !prefs(cx).knows_server(server, &name, &icon) {
         set_prefs(cx, |p| {
             p.note_server(server, &name, &icon);
@@ -398,7 +398,7 @@ async fn sign_in(api: &Api, mode: Mode, nickname: &str, password: &str, owner_ke
         _ => api.streams().await.map(|(_, ice)| ice).unwrap_or_default(),
     };
     let server_name = health.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| "Harmony".into());
-    Ok(Done { user, token, server_name, server_icon: health.icon_hash, ice_servers, notes })
+    Ok(Done { user, token, server_name, server_icon: health.icon_hash().cloned(), ice_servers, notes })
 }
 
 /// Said wherever a password is about to cross the internet over plain HTTP.

@@ -1,12 +1,11 @@
 //! The interface's icons, drawn as line art on a 24 by 24 grid with one light stroke, so they
 //! look the same on every system. The shapes are Lucide's (ISC licence), except the brand mark,
-//! the soundboard and the blur. Each is turned into an SVG image in the colour asked for, once,
-//! and kept.
+//! the soundboard and the blur. GPUI draws them as masks in whatever colour is asked for.
 
-use gpui::{Hsla, Image, ImageFormat};
+use gpui::{AssetSource, SharedString};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 fn shapes(name: &str) -> &'static str {
     match name {
@@ -147,34 +146,36 @@ fn shapes(name: &str) -> &'static str {
     }
 }
 
-fn svg(name: &str, color: Hsla) -> String {
-    let c = color.to_rgb();
-    let hex = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+fn svg(name: &str) -> String {
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="#{:02x}{:02x}{:02x}" stroke-opacity="{:.3}" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">{}</svg>"##,
-        hex(c.r),
-        hex(c.g),
-        hex(c.b),
-        c.a,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#000" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">{}</svg>"##,
         shapes(name)
     )
 }
 
-thread_local! {
-    static CACHE: RefCell<HashMap<(&'static str, u32), Arc<Image>>> = RefCell::new(HashMap::new());
+const PREFIX: &str = "icons/";
+
+/// Serves `icons/<name>.svg` to GPUI, which keeps each icon as one mask per drawn size and tints
+/// it as it paints: one copy for every colour, rasterised at the size it is shown.
+pub struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        Ok(path.strip_prefix(PREFIX).and_then(|p| p.strip_suffix(".svg")).map(|name| Cow::Owned(svg(name).into_bytes())))
+    }
+
+    fn list(&self, _: &str) -> anyhow::Result<Vec<SharedString>> {
+        Ok(Vec::new())
+    }
 }
 
-/// The icon in that colour, as an image to draw at any size.
-pub fn image(name: &'static str, color: Hsla) -> Arc<Image> {
-    let c = color.to_rgb();
-    let key = u32::from_be_bytes([c.r, c.g, c.b, c.a].map(|v| (v.clamp(0., 1.) * 255.).round() as u8));
-    CACHE.with(|cache| {
-        cache
-            .borrow_mut()
-            .entry((name, key))
-            .or_insert_with(|| Arc::new(Image::from_bytes(ImageFormat::Svg, svg(name, color).into_bytes())))
-            .clone()
-    })
+thread_local! {
+    static PATHS: RefCell<HashMap<&'static str, SharedString>> = RefCell::new(HashMap::new());
+}
+
+/// Where `Assets` serves the icon, for `svg().path(..)`.
+pub fn path(name: &'static str) -> SharedString {
+    PATHS.with(|paths| paths.borrow_mut().entry(name).or_insert_with(|| format!("{PREFIX}{name}.svg").into()).clone())
 }
 
 #[cfg(test)]
@@ -184,6 +185,9 @@ mod tests {
     #[test]
     fn unknown_names_fall_back_to_a_dot() {
         assert_eq!(shapes("nope"), r#"<circle cx="12" cy="12" r="2"/>"#);
-        assert!(svg("check", gpui::hsla(0., 0., 1., 1.)).contains("stroke=\"#ffffff\""));
+        assert_eq!(path("check"), "icons/check.svg");
+        let served = Assets.load(&path("check")).unwrap().unwrap();
+        assert!(std::str::from_utf8(&served).unwrap().contains(shapes("check")));
+        assert!(Assets.load("fonts/x.ttf").unwrap().is_none());
     }
 }

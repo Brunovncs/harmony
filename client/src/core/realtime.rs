@@ -151,7 +151,10 @@ async fn run(url: String, api: Api, mut commands: mpsc::UnboundedReceiver<Comman
                                         }
                                         continue;
                                     }
-                                    if let Some(tx) = rid.and_then(|r| pending.remove(&r)) {
+                                    // A reply nobody waits for any more (the ping's `pong`, a request
+                                    // that timed out) is not news.
+                                    if let Some(rid) = rid {
+                                        let Some(tx) = pending.remove(&rid) else { continue };
                                         let failed = matches!(kind, "error" | "voice:error" | "call:error" | "hello-failed");
                                         let _ = tx.send(if failed {
                                             let code = v.get("error").and_then(Value::as_str).map(ErrorCode::parse).unwrap_or(ErrorCode::Unknown);
@@ -201,6 +204,7 @@ async fn run(url: String, api: Api, mut commands: mpsc::UnboundedReceiver<Comman
                             if last_in.elapsed() > WATCHDOG {
                                 break Outcome::Lost;
                             }
+                            pending.retain(|_, tx| !tx.is_closed());
                             if up {
                                 next_rid += 1;
                                 let ping = json!({ "type": "ping", "rid": next_rid.to_string() }).to_string();

@@ -11,3 +11,4 @@ pub mod screen;
 pub mod share;
 pub mod video;
 pub mod voice;
+pub mod yuv;

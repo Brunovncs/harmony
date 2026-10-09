@@ -12,7 +12,7 @@ use crate::widgets::*;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, AppContext, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
-    PathPromptOptions, Render, SharedString, StatefulInteractiveElement, Styled, StyledImage, Window, div, img,
+    PathPromptOptions, Render, SharedString, StatefulInteractiveElement, Styled, StyledImage, Window, div, img, surface,
 };
 use std::rc::Rc;
 use std::sync::Arc;
@@ -62,7 +62,7 @@ impl Preview {
 
     /// The picture, or why there is none, filling a rounded frame the caller sizes.
     pub fn frame(&self, t: &Theme, cx: &App) -> Div {
-        let image = self.tile.as_ref().and_then(|t| t.read(cx).image.clone());
+        let frame = self.tile.as_ref().and_then(|t| t.read(cx).frame.clone());
         let error = self.capture.as_ref().and_then(|c| c.error.lock().clone());
         div()
             .rounded(px(radius::CARD + 2.))
@@ -73,8 +73,10 @@ impl Preview {
             .flex()
             .items_center()
             .justify_center()
-            .child(match (image, error) {
-                (Some(i), _) => img(i).size_full().rounded(px(radius::CARD + 1.)).object_fit(gpui::ObjectFit::Contain).into_any_element(),
+            .child(match (frame, error) {
+                (Some(f), _) => {
+                    surface(f).size_full().rounded(px(radius::CARD + 1.)).object_fit(gpui::ObjectFit::Contain).into_any_element()
+                }
                 (None, Some(e)) => div()
                     .flex()
                     .flex_col()

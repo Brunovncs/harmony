@@ -58,8 +58,15 @@ actions!(
         Enter,
         Newline,
         Submit,
+        Undo,
+        Redo,
     ]
 );
+
+/// How many steps back Ctrl+Z goes.
+const UNDO_DEPTH: usize = 100;
+/// Typing or deleting within this of the last keystroke undoes together with it.
+const UNDO_JOIN: Duration = Duration::from_millis(1000);
 
 /// The keys every text field answers to, as Windows text boxes do. Bound once, at startup.
 pub fn bind_keys(cx: &mut App) {
@@ -100,7 +107,56 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", Enter, c),
         KeyBinding::new("shift-enter", Newline, c),
         KeyBinding::new("ctrl-enter", Submit, c),
+        KeyBinding::new("ctrl-z", Undo, c),
+        KeyBinding::new("ctrl-y", Redo, c),
+        KeyBinding::new("ctrl-shift-z", Redo, c),
     ]);
+}
+
+/// The text and selection before an edit, for Ctrl+Z.
+#[derive(Clone, Debug, PartialEq)]
+struct Snapshot {
+    text: String,
+    selected: Range<usize>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum EditKind {
+    Typing,
+    Deleting,
+    Other,
+}
+
+/// Ctrl+Z and Ctrl+Y. Typing undoes a word at a time and deleting a run of keystrokes at a time,
+/// as a Windows text box does; a paste or a moved caret starts a step of its own.
+#[derive(Default)]
+struct History {
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+    last: Option<(EditKind, std::time::Instant)>,
+}
+
+impl History {
+    /// Notes the state about to be edited, unless this edit carries on the one before.
+    fn record(&mut self, before: Snapshot, kind: EditKind, new: &str) {
+        let now = std::time::Instant::now();
+        let word_break = kind == EditKind::Typing && new.chars().all(char::is_whitespace);
+        let joins =
+            kind != EditKind::Other && !word_break && self.last.is_some_and(|(k, at)| k == kind && now.duration_since(at) < UNDO_JOIN);
+        self.last = Some((kind, now));
+        self.redo.clear();
+        if !joins {
+            self.undo.push(before);
+            if self.undo.len() > UNDO_DEPTH {
+                self.undo.remove(0);
+            }
+        }
+    }
+
+    /// Ends the current run, so the next edit is a step of its own.
+    fn cut_run(&mut self) {
+        self.last = None;
+    }
 }
 
 pub enum TextFieldEvent {
@@ -137,6 +193,7 @@ pub struct TextField {
     /// Drawn since the last blink, so a field taken off the screen while focused stops blinking.
     drawn: bool,
     blink: Task<()>,
+    history: History,
 }
 
 impl EventEmitter<TextFieldEvent> for TextField {}
@@ -162,6 +219,7 @@ impl TextField {
             blinking: false,
             drawn: false,
             blink: Task::ready(()),
+            history: History::default(),
         }
     }
 
@@ -213,7 +271,13 @@ impl TextField {
         let len = self.buf.text.len();
         self.buf.replace(0..len, text);
         self.scroll = Point::default();
+        self.history = History::default();
         self.moved(cx);
+    }
+
+    /// Nothing but spaces, without copying the text.
+    pub fn is_blank(&self) -> bool {
+        self.buf.text.trim().is_empty()
     }
 
     #[allow(dead_code)]
@@ -234,12 +298,50 @@ impl TextField {
         if range.is_empty() && new.is_empty() {
             return;
         }
+        // A composition being committed was noted when it began.
+        if self.buf.marked.is_none() {
+            let kind = match (range.is_empty(), new.chars().count()) {
+                (_, 0) => EditKind::Deleting,
+                (true, 1) => EditKind::Typing,
+                _ => EditKind::Other,
+            };
+            self.history.record(self.snapshot(), kind, new);
+        }
         self.buf.replace(range, new);
         self.moved(cx);
         cx.emit(TextFieldEvent::Changed);
     }
 
+    fn snapshot(&self) -> Snapshot {
+        Snapshot { text: self.buf.text.clone(), selected: self.buf.selected.clone() }
+    }
+
+    fn restore(&mut self, s: Snapshot, cx: &mut Context<Self>) {
+        self.buf.text = s.text;
+        self.buf.selected = s.selected;
+        self.buf.reversed = false;
+        self.buf.marked = None;
+        self.history.cut_run();
+        self.moved(cx);
+        cx.emit(TextFieldEvent::Changed);
+    }
+
+    fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(s) = self.history.undo.pop() {
+            self.history.redo.push(self.snapshot());
+            self.restore(s, cx);
+        }
+    }
+
+    fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(s) = self.history.redo.pop() {
+            self.history.undo.push(self.snapshot());
+            self.restore(s, cx);
+        }
+    }
+
     fn go(&mut self, to: usize, select: bool, cx: &mut Context<Self>) {
+        self.history.cut_run();
         let to = self.buf.snap(to);
         if select {
             self.buf.select_to(to)
@@ -473,6 +575,7 @@ impl TextField {
             _ => self.buf.move_to(to),
         }
         self.selecting = true;
+        self.history.cut_run();
         self.moved(cx);
         self.downstream = downstream;
     }
@@ -589,6 +692,8 @@ impl Render for TextField {
             .on_action(cx.listener(Self::enter))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
@@ -655,6 +760,9 @@ impl EntityInputHandler for TextField {
         cx: &mut Context<Self>,
     ) {
         let range = self.buf.range_from_utf16(range_utf16).or_else(|| self.buf.marked.clone()).unwrap_or_else(|| self.buf.selected.clone());
+        if self.buf.marked.is_none() {
+            self.history.record(self.snapshot(), EditKind::Other, new);
+        }
         self.buf.compose(range, new, new_selected_range_utf16);
         self.moved(cx);
         cx.emit(TextFieldEvent::Changed);
@@ -1160,6 +1268,36 @@ mod tests {
         let mut b = Buffer { multiline, max_chars, ..Default::default() };
         b.replace(0..0, text);
         b
+    }
+
+    fn snap(text: &str) -> Snapshot {
+        Snapshot { text: text.into(), selected: text.len()..text.len() }
+    }
+
+    #[test]
+    fn typing_undoes_a_word_at_a_time() {
+        let mut h = History::default();
+        let mut text = String::new();
+        for c in "hello world".chars() {
+            h.record(snap(&text), EditKind::Typing, &c.to_string());
+            text.push(c);
+        }
+        assert_eq!(h.undo, vec![snap(""), snap("hello")]);
+        h.record(snap(&text), EditKind::Deleting, "");
+        h.record(snap("hello worl"), EditKind::Deleting, "");
+        h.record(snap("hello wor"), EditKind::Other, "pasted");
+        assert_eq!(h.undo, vec![snap(""), snap("hello"), snap("hello world"), snap("hello wor")]);
+        h.cut_run();
+        h.record(snap("hello worpasted"), EditKind::Typing, "x");
+        assert_eq!(h.undo.len(), 5);
+    }
+
+    #[test]
+    fn a_new_edit_forgets_what_was_undone() {
+        let mut h = History::default();
+        h.redo.push(snap("later"));
+        h.record(snap(""), EditKind::Typing, "a");
+        assert!(h.redo.is_empty());
     }
 
     #[test]

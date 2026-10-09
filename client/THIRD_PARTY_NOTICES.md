@@ -9,7 +9,8 @@ Everything here ships inside `harmony.exe`.
 | MediaPipe selfie segmentation, by Google, as converted to ONNX by onnx-community | `assets/models/selfie_segmentation.onnx` | Apache 2.0 |
 | Lucide icons, by the Lucide contributors (path data, every icon but `soundboard` and `blur`) | `src/icons.rs` | ISC, below |
 | The text field, the theme's Windows accent reader and the widget patterns, from OpenController by Brunovncs | `src/text_field.rs`, `src/theme.rs`, `src/widgets.rs` | MIT |
-| libwebrtc, by the WebRTC project, through LiveKit's `libwebrtc` and `webrtc-sys` crates | linked in | BSD 3-Clause (libwebrtc), Apache 2.0 (bindings) |
+| libwebrtc, by the WebRTC project, through LiveKit's `libwebrtc` and `webrtc-sys` crates | linked in; `webrtc-sys` vendored in `vendor/webrtc-sys` with a Media Foundation encoder added | BSD 3-Clause (libwebrtc), Apache 2.0 (bindings) |
+| GPUI, by Zed Industries, as published by the gpui-kit maintainers (`gpui-pre`, `gpui-pre-windows`) | vendored in `vendor/` with video surfaces added on Windows (see `vendor/GPUI_VENDORED.md`) | Apache 2.0 |
 
 Harmony's own icon (`assets/icon.ico` and `assets/icon.png`) is drawn in code by `examples/icon.rs`,
 and the camera backgrounds in `assets/backgrounds/` by `examples/backgrounds.rs`. They, and the

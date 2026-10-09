@@ -8,7 +8,7 @@ use super::secret;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -144,6 +144,18 @@ pub fn same_server(a: &str, b: &str) -> bool {
 }
 
 impl Settings {
+    /// Whether the two differ in at most the levels a slider drags through. Nothing kept drawn
+    /// shows those, so such a change needs no window-wide redraw.
+    pub fn same_but_levels(&self, other: &Settings) -> bool {
+        let mut a = self.clone();
+        a.mic_gain = other.mic_gain;
+        a.mic_sensitivity = other.mic_sensitivity;
+        a.sound_volume = other.sound_volume;
+        a.soundpad_volume = other.soundpad_volume;
+        a.media_cache_mb = other.media_cache_mb;
+        a == *other
+    }
+
     /// That server, as any of your accounts saved it.
     pub fn saved_server(&self, url: &str) -> Option<&SavedServer> {
         self.saved_servers.iter().find(|s| same_server(&s.url, url))
@@ -308,7 +320,7 @@ impl Settings {
 
     /// Carries changes made through the top-level keys (signing out, a new server password)
     /// into the saved server they describe.
-    fn sync_active(&mut self) {
+    pub fn sync_active(&mut self) {
         let Some(i) = self.active_server() else { return };
         let s = &mut self.saved_servers[i];
         s.password = self.password.clone();
@@ -602,8 +614,18 @@ impl Store {
     }
 
     pub fn save(&mut self) {
+        let text = self.snapshot();
+        write_file(&self.path, &text);
+    }
+
+    /// The file's next contents, with the values merged into what was read; writing it is
+    /// `write_file`'s, which may happen off the UI thread.
+    pub fn snapshot(&mut self) -> String {
         self.values.sync_active();
-        let Value::Object(fresh) = serde_json::to_value(&self.values).unwrap_or(Value::Null) else { return };
+        let fresh = match serde_json::to_value(&self.values) {
+            Ok(Value::Object(fresh)) => fresh,
+            _ => Map::new(),
+        };
         // Compared with `unread` as it is, in the clear, and written sealed.
         let mut stored = fresh.clone();
         let sealed = &mut self.sealed;
@@ -621,20 +643,28 @@ impl Store {
                 self.raw.insert(k, v);
             }
         }
-        if let Some(dir) = self.path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let text = serde_json::to_string_pretty(&Value::Object(self.raw.clone())).unwrap_or_default();
-        // Write beside it and rename, so a crash mid-write never leaves half a file.
-        let tmp = self.path.with_extension("json.part");
-        if std::fs::write(&tmp, text).is_ok() {
-            let _ = std::fs::rename(&tmp, &self.path);
-        }
+        serde_json::to_string_pretty(&Value::Object(self.raw.clone())).unwrap_or_default()
     }
 
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[cfg(test)]
     pub fn update(&mut self, f: impl FnOnce(&mut Settings)) {
         f(&mut self.values);
         self.save();
+    }
+}
+
+/// Writes beside the file and renames, so a crash mid-write never leaves half a file.
+pub fn write_file(path: &Path, text: &str) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("json.part");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
     }
 }
 

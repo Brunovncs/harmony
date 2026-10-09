@@ -117,10 +117,31 @@ The installer is safe to re-run. It:
 - creates the system user `harmony`;
 - writes `/etc/harmony/mediamtx.yml` and, on first run only,
   `/etc/harmony/harmony.env` from `.env.example`;
-- registers `harmony-server`, `mediamtx` and `harmony-ip-watch.timer`.
+- registers `harmony-server`, `mediamtx` and `harmony-ip-watch.timer`;
+- **then, on a fresh install, walks you through the rest** -- the steps in
+  sections 2 to 4 below, done for you:
+  - asks for the **domain** clients will use, and checks it resolves to this
+    machine (and warns if it is behind Cloudflare's proxy, which must be off);
+  - asks how to do **HTTPS**:
+    1. **Caddy, automatic certificate** -- this machine is reachable on ports 80
+       and 443 (a cloud VM, a rented server);
+    2. **certbot over Cloudflare DNS** -- ports 80/443 are blocked (a home
+       connection); asks for the HTTPS port (default 8444), an email and a
+       Cloudflare API token, and installs the renewal hook;
+    3. **none** -- you run your own reverse proxy;
+  - asks for the optional **server password**;
+  - writes `harmony.env`, opens the ports in `ufw` if it is active, starts
+    everything, checks the HTTPS address answers, and prints the **owner key**
+    and the ports your router or cloud firewall still has to let in.
 
-An existing `harmony.env` is never overwritten, so upgrading is just
-`git pull && sudo ./install.sh`.
+  Leave the domain empty to skip it and configure by hand. `--setup` runs it
+  again on a configured server, `--no-setup` never runs it, and every answer
+  can be given as an environment variable for an unattended install -- see
+  `./install.sh --help`.
+
+An existing `harmony.env` is only changed by the setup, and only when you run
+it, so upgrading is just `git pull && sudo ./install.sh` -- which restarts the
+services onto the new code and leaves the configuration alone.
 
 ## 2. Configure
 
@@ -389,7 +410,9 @@ one step at a time, with the candidate pair that won.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/health` | Status, and whether a password is required. The only endpoint outside the password gate |
+| `GET` | `/api/health` | Status, and whether a password is required. Outside the password gate |
+| `GET` | `/api/media/:hash?k=` | An upload by media key (`GET /api/media-key`), for browser and Android clients that cannot send headers. Outside the password gate: the key, issued behind it, stands in for it. Never a private conversation's file |
+| `GET` | `/api/server/logo` | The server's picture, behind the password gate but not a login; the same one as `/api/server/icon/:hash` |
 | `GET` | `/api/streams` | Who is live, viewer counts, watch URLs, ICE servers |
 | `POST` | `/api/session` | Claim a username; returns a broadcaster token or a watch URL |
 | `POST` | `/api/session/heartbeat` | Hold a claim while setting up |
@@ -408,6 +431,15 @@ one step at a time, with the candidate pair that won.
 | `/var/lib/harmony/advertised-ip` | Last public IP it saw |
 | `/etc/systemd/system/{harmony-server,mediamtx,harmony-ip-watch}.*` | Units |
 
+The setup, when you let it run, also writes:
+
+| Path | What |
+| --- | --- |
+| `/etc/caddy/Caddyfile` | Marked "Managed by Harmony"; one it did not write is kept as `Caddyfile.bak-*` |
+| `/etc/caddy/tls/{fullchain,privkey}.pem` | Certbot route: the certificate, copied where Caddy can read it |
+| `/etc/letsencrypt/cloudflare.ini` | Certbot route: the Cloudflare token, `0600` |
+| `/etc/letsencrypt/renewal-hooks/deploy/harmony-caddy.sh` | Certbot route: hands each renewal to Caddy |
+
 ### Uninstall
 
 ```bash
@@ -418,6 +450,10 @@ sudo rm -rf /opt/harmony /etc/harmony /var/lib/harmony /usr/local/bin/mediamtx \
 sudo systemctl daemon-reload
 sudo userdel harmony
 ```
+
+Caddy and certbot, if the setup installed them, are ordinary packages: remove
+them with `apt-get remove caddy certbot`, and the renewal hook and token with
+`sudo rm /etc/letsencrypt/renewal-hooks/deploy/harmony-caddy.sh /etc/letsencrypt/cloudflare.ini`.
 
 ---
 
@@ -490,6 +526,9 @@ servers. With "Remember me" on, later launches go straight in.
 npm --prefix server test                       # reservation, accounts, channels, chat, soundpad
 cargo test --manifest-path client/Cargo.toml   # protocol types, settings, markdown, emoji, audio, video
 ```
+
+CI (`.github/workflows/ci.yml`) runs both on every push and pull request: the
+server's on Ubuntu, the client's on Windows.
 
 `cargo run --manifest-path client/Cargo.toml -- --smoke` opens the window, waits
 a moment and exits 0, for a check that the GPU and the window come up on a given

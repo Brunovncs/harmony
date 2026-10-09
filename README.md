@@ -23,11 +23,16 @@ may do shows with a lock instead of hiding. Turning the camera on opens a
 preview where you pick the camera and the background first. Your profile has its
 own page, the app speaks English and Portuguese, and an Update button shows up
 when a new release is out. The voice code reconnects cameras and screen shares
-by itself after a network blip.
+by itself after a network blip. Video stays YUV from the decoder to the screen:
+the GPU uploads, converts and scales it, and screen shares are encoded by the
+graphics card's H.264 encoder through Media Foundation (NVIDIA, AMD or Intel),
+falling back to software when there is none.
 
 On the server side, `HARMONY_SIGNALING_URL=auto` hands each client the address it
 actually used, so people on the LAN and on a VPN can share one server, and the
-owner can give the server a picture.
+owner can give the server a picture. Pedro's browser and Android clients work
+against it too: they load uploads with a weekly media key (`/api/media`) and
+find the picture under the name they know (`logo`).
 
 ## Features
 

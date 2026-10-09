@@ -78,7 +78,9 @@ pub fn set_hardware_encoding(on: bool) {
     HARDWARE.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The encoder to ask for: the GPU's (NVENC, or whatever the build supports) unless turned off.
+/// The encoder to ask for: the GPU's unless turned off. On Windows that is H.264 through Media
+/// Foundation (the vendored webrtc-sys), which hands over to OpenH264 by itself if the hardware
+/// fails; `watch_encoder` logs which one runs.
 fn encoder_backend() -> libwebrtc::rtp_sender::VideoEncoderBackend {
     use libwebrtc::rtp_sender::VideoEncoderBackend as B;
     static AVAILABLE: OnceLock<Vec<B>> = OnceLock::new();
@@ -91,6 +93,14 @@ fn encoder_backend() -> libwebrtc::rtp_sender::VideoEncoderBackend {
         return B::Software;
     }
     [B::Nvenc, B::Hardware].into_iter().find(|b| available.contains(b)).unwrap_or(B::Auto)
+}
+
+static HARDWARE_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the video encoder last seen running is the graphics card's, which takes NV12 frames
+/// without converting them (OpenH264 converts NV12 to I420 first).
+pub fn hardware_encoder_running() -> bool {
+    HARDWARE_RUNNING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Whether to log video frame rates and timings (`HARMONY_VIDEO_STATS`).
@@ -292,11 +302,12 @@ impl Link {
                 RtcStats::InboundRtp(i) if i.stream.kind == "video" => {
                     let d = &i.inbound;
                     log::info!(
-                        "video in: {}x{} {} fps, {} decoded, {} dropped, {} freezes, {} bytes, {}",
+                        "video in: {}x{} {} fps, {} decoded ({:.2} ms each), {} dropped, {} freezes, {} bytes, {}",
                         d.frame_width,
                         d.frame_height,
                         d.frames_per_second,
                         d.frames_decoded,
+                        d.total_decode_time * 1000. / d.frames_decoded.max(1) as f64,
                         d.frames_dropped,
                         d.freeze_count,
                         d.bytes_received,
@@ -401,8 +412,10 @@ fn apply_params(sender: &libwebrtc::rtp_sender::RtpSender, p: VideoParams) {
 }
 
 /// H.264 first, in the order hardware encoders and decoders like: High, then Main, then
-/// Constrained Baseline; packetization mode 1 before 0; higher levels first. NVIDIA's encoder
-/// refuses baseline, and level 3.1 caps a stream at about 720p30.
+/// Constrained Baseline; packetization mode 1 before 0; higher levels first. (Chromium's NVIDIA
+/// path refused baseline, and level 3.1 caps a stream at about 720p30.) MediaMTX's WHIP answer
+/// takes Baseline whatever comes first, which the Media Foundation encoders on NVIDIA and AMD
+/// both encode.
 pub fn prefer_h264(codecs: Vec<RtpCodecCapability>) -> Vec<RtpCodecCapability> {
     fn fmtp(c: &RtpCodecCapability, key: &str) -> Option<String> {
         c.sdp_fmtp_line.as_deref()?.split(';').find_map(|kv| {
@@ -584,6 +597,9 @@ pub async fn publish(
         video_params = Some(params);
     }
     let link = negotiate(api, pc, url, gathered, false, cryptors).await?;
+    if video_params.is_some() {
+        watch_encoder(link.pc.clone());
+    }
     // Encoder limits go on after the answer, once the sender has its encodings.
     for sender in link.pc.senders() {
         match sender.track() {
@@ -605,6 +621,40 @@ pub async fn publish(
         }
     }
     Ok(link)
+}
+
+/// Logs the video encoder that actually runs once it is known, and again whenever it changes: the
+/// graphics card's giving way to the software one shows up here. Ends with the connection.
+fn watch_encoder(pc: PeerConnection) {
+    crate::core::runtime().spawn(async move {
+        let mut last = String::new();
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if matches!(pc.connection_state(), PeerConnectionState::Failed | PeerConnectionState::Closed) {
+                return;
+            }
+            let Ok(stats) = pc.get_stats().await else { return };
+            for s in stats {
+                if let RtcStats::OutboundRtp(o) = s
+                    && o.stream.kind == "video"
+                    && !o.outbound.encoder_implementation.is_empty()
+                    && o.outbound.encoder_implementation != last
+                {
+                    let e = &o.outbound;
+                    let kind = if e.power_efficient_encoder { "hardware" } else { "software" };
+                    log::info!(
+                        "video encoder: {} ({kind}, {}x{} at {} fps)",
+                        e.encoder_implementation,
+                        e.frame_width,
+                        e.frame_height,
+                        e.frames_per_second
+                    );
+                    HARDWARE_RUNNING.store(e.power_efficient_encoder, std::sync::atomic::Ordering::Relaxed);
+                    last = e.encoder_implementation.clone();
+                }
+            }
+        }
+    });
 }
 
 /// The kinds of ICE candidate this machine can offer (host, srflx, relay), by gathering for a
@@ -682,9 +732,145 @@ pub async fn watch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use libwebrtc::rtp_sender::VideoEncoderBackend as Backend;
 
     fn cap(mime: &str, fmtp: &str) -> RtpCodecCapability {
         RtpCodecCapability { channels: None, clock_rate: Some(90000), mime_type: mime.into(), sdp_fmtp_line: Some(fmtp.into()) }
+    }
+
+    /// CI's Windows runners have no graphics card, so no hardware encoder to find.
+    fn no_gpu_here() -> bool {
+        std::env::var_os("CI").is_some()
+    }
+
+    fn hardware_listed() -> bool {
+        let _ = factory();
+        Backend::list_available().into_iter().any(|b| b == Backend::Hardware)
+    }
+
+    #[test]
+    fn hardware_encoder_is_listed() {
+        if no_gpu_here() {
+            return;
+        }
+        assert!(hardware_listed(), "no hardware H.264 encoder found: {:?}", Backend::list_available().into_iter().collect::<Vec<_>>());
+    }
+
+    /// A sender asking for the hardware encoder and a receiver, in this process: the stream has
+    /// to arrive decoded, and from the Media Foundation encoder rather than OpenH264.
+    #[test]
+    fn hardware_encoder_streams() {
+        use libwebrtc::peer_connection_factory::native::PeerConnectionFactoryExt;
+        use libwebrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
+        use libwebrtc::video_source::VideoResolution;
+        use libwebrtc::video_source::native::NativeVideoSource;
+        let _ = env_logger::builder().is_test(true).try_init();
+        if no_gpu_here() || !hardware_listed() {
+            return;
+        }
+        let (w, h) = (1280u32, 720u32);
+        let _rt = crate::core::runtime().enter();
+        let source = NativeVideoSource::new(VideoResolution { width: w, height: h }, true);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let feeder = {
+            let (source, stop) = (source.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                for n in 0u32.. {
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let mut buffer = I420Buffer::new(w, h);
+                    let (sy, _, _) = buffer.strides();
+                    let (y, u, v) = buffer.data_mut();
+                    for (row, line) in y.chunks_mut(sy as usize).enumerate() {
+                        for (col, p) in line.iter_mut().enumerate() {
+                            *p = ((col as u32 + n * 8) ^ row as u32) as u8;
+                        }
+                    }
+                    u.fill(90);
+                    v.fill(160);
+                    let mut frame = VideoFrame::new(VideoRotation::VideoRotation0, buffer);
+                    frame.timestamp_us = start.elapsed().as_micros() as i64;
+                    source.capture_frame(&frame);
+                    std::thread::sleep(Duration::from_millis(33));
+                }
+            })
+        };
+
+        let (sent, bitrate, received) = crate::core::runtime().block_on(async {
+            let (tx, tx_ice) = new_pc(&[]).unwrap();
+            let (rx, rx_ice) = new_pc(&[]).unwrap();
+            let track = factory().create_video_track("loopback", source.clone());
+            let init = RtpTransceiverInit {
+                direction: RtpTransceiverDirection::SendOnly,
+                stream_ids: vec!["t".into()],
+                send_encodings: Vec::new(),
+            };
+            let t = tx.add_transceiver(MediaStreamTrack::Video(track), init).unwrap();
+            t.sender().set_video_encoder_backend(Backend::Hardware);
+            // Baseline, which is all MediaMTX's WHIP takes, and the profile hardware encoders
+            // are fussiest about.
+            let baseline = factory()
+                .get_rtp_sender_capabilities(MediaType::Video)
+                .codecs
+                .into_iter()
+                .filter(|c| c.sdp_fmtp_line.as_deref().is_some_and(|f| f.contains("packetization-mode=1;profile-level-id=42")))
+                .collect();
+            t.set_codec_preferences(baseline).unwrap();
+
+            let offer = tx.create_offer(OfferOptions::default()).await.unwrap();
+            let offer_sdp = offer.to_string();
+            tx.set_local_description(offer).await.unwrap();
+            wait_for_ice(&tx, &tx_ice).await;
+            let offer = SessionDescription::parse(&with_candidates(&offer_sdp, &tx_ice.candidates.lock()), SdpType::Offer).unwrap();
+            rx.set_remote_description(offer).await.unwrap();
+            let answer = rx.create_answer(Default::default()).await.unwrap();
+            let answer_sdp = answer.to_string();
+            rx.set_local_description(answer).await.unwrap();
+            wait_for_ice(&rx, &rx_ice).await;
+            let answer = SessionDescription::parse(&with_candidates(&answer_sdp, &rx_ice.candidates.lock()), SdpType::Answer).unwrap();
+            tx.set_remote_description(answer).await.unwrap();
+            // A cap the busy test picture would blow through if the rates did not reach the
+            // transform.
+            apply_params(&t.sender(), VideoParams { max_bitrate: 1_000_000, max_fps: 30., sharp: true });
+
+            let outbound = async || {
+                tx.get_stats().await.unwrap().into_iter().find_map(|s| match s {
+                    RtcStats::OutboundRtp(o) if o.stream.kind == "video" => Some(o),
+                    _ => None,
+                })
+            };
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            let before = outbound().await.expect("no outbound video").sent.bytes_sent;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let sent = outbound().await.expect("no outbound video");
+            let bitrate = (sent.sent.bytes_sent - before) * 8 / 3;
+            let received = rx.get_stats().await.unwrap().into_iter().find_map(|s| match s {
+                RtcStats::InboundRtp(i) if i.stream.kind == "video" => Some(i.inbound),
+                _ => None,
+            });
+            tx.close();
+            rx.close();
+            (sent.outbound, bitrate, received.expect("no inbound video"))
+        });
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        feeder.join().unwrap();
+
+        eprintln!(
+            "{}: {bitrate} bps, {} key frames; {} frames decoded by {} at {:.2} ms each",
+            sent.encoder_implementation,
+            sent.key_frames_encoded,
+            received.frames_decoded,
+            received.decoder_implementation,
+            received.total_decode_time * 1000. / received.frames_decoded.max(1) as f64
+        );
+        assert!(sent.encoder_implementation.starts_with("MediaFoundation"), "encoded by {}", sent.encoder_implementation);
+        assert!(sent.power_efficient_encoder);
+        assert!(sent.key_frames_encoded >= 1);
+        assert!(received.frames_decoded >= 120, "{} frames decoded", received.frames_decoded);
+        assert!((200_000..1_300_000).contains(&bitrate), "{bitrate} bps against a 1 Mbps cap");
+        assert_eq!((received.frame_width, received.frame_height), (w, h));
     }
 
     #[test]

@@ -17,6 +17,10 @@ import { dirname, resolve } from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
+import { DatabaseSync } from 'node:sqlite';
+
+import { ServerSettings } from '../src/server-settings.js';
+
 const here = dirname(fileURLToPath(import.meta.url));
 const serverEntry = resolve(here, '..', 'src', 'index.js');
 
@@ -264,7 +268,7 @@ describe('the server picture', () => {
 
   it('starts as none', async () => {
     const res = await api('/api/server', { token: memberToken });
-    assert.equal(res.body.server.iconHash, null);
+    assert.equal(res.body.server.logo, null);
   });
 
   it('is the owner\'s to set, like the name', async () => {
@@ -292,13 +296,13 @@ describe('the server picture', () => {
     const socket = await listen(memberToken);
     const res = await api('/api/server', { method: 'POST', body: { iconHash: picture }, token: ownerToken });
     assert.equal(res.status, 200);
-    assert.equal(res.body.server.iconHash, picture);
+    assert.equal(res.body.server.logo, picture);
     const push = await socket.next((m) => m.type === 'server');
-    assert.equal(push.server.iconHash, picture);
+    assert.equal(push.server.logo, picture);
     socket.close();
 
     const health = await api('/api/health');
-    assert.equal(health.body.iconHash, picture);
+    assert.equal(health.body.logo, picture);
   });
 
   it('can be downloaded before signing in, and nothing else can', async () => {
@@ -315,13 +319,13 @@ describe('the server picture', () => {
   it('is left alone by a rename', async () => {
     // Empty, so the settings below still start from the default name.
     const res = await api('/api/server', { method: 'POST', body: { name: '' }, token: ownerToken });
-    assert.equal(res.body.server.iconHash, picture);
+    assert.equal(res.body.server.logo, picture);
   });
 
   it('can be removed, and is then not served', async () => {
     const res = await api('/api/server', { method: 'POST', body: { iconHash: null }, token: ownerToken });
     assert.equal(res.status, 200);
-    assert.equal(res.body.server.iconHash, null);
+    assert.equal(res.body.server.logo, null);
     assert.equal((await fetch(`${BASE}/api/server/icon/${picture}`)).status, 404);
   });
 
@@ -329,7 +333,7 @@ describe('the server picture', () => {
     await api('/api/server', { method: 'POST', body: { iconHash: picture }, token: ownerToken });
     await stopHarmony();
     await startHarmony();
-    assert.equal((await api('/api/health')).body.iconHash, picture);
+    assert.equal((await api('/api/health')).body.logo, picture);
   });
 });
 
@@ -407,9 +411,9 @@ describe('server settings', () => {
   });
 
   it('keep the server picture behind the door too', async () => {
-    const hash = (await api('/api/health', { password: 'letmeinplease' })).body.iconHash;
+    const hash = (await api('/api/health', { password: 'letmeinplease' })).body.logo;
     assert.ok(hash, 'the picture section left one set');
-    assert.equal((await api('/api/health')).body.iconHash, undefined);
+    assert.equal((await api('/api/health')).body.logo, undefined);
     assert.equal((await fetch(`${BASE}/api/server/icon/${hash}`)).status, 401);
     const opened = await fetch(`${BASE}/api/server/icon/${hash}`, {
       headers: { 'x-harmony-password': 'letmeinplease' },
@@ -450,5 +454,191 @@ describe('server settings', () => {
     const res = await api('/api/health');
     assert.equal(res.body.name, 'Still Here');
     assert.equal(res.body.passwordRequired, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+/*
+ * The other clients call the server picture its `logo` and fetch it from a
+ * path with no hash in it. Here that is a second name for the same picture,
+ * not a second picture: these run against what the sections above left.
+ */
+/** server_meta as the settings see it, without a database. */
+const memoryMeta = (initial = {}) => {
+  const map = new Map(Object.entries(initial));
+  return {
+    get: (key) => map.get(key) ?? null,
+    set: (key, value) => { map.set(key, String(value)); },
+    delete: (key) => { map.delete(key); },
+  };
+};
+
+/** How many references the server holds on an upload, read straight from its database. */
+const refsOf = (hash) => {
+  const db = new DatabaseSync(resolve(dataDir, 'harmony.db'), { readOnly: true });
+  try {
+    return db.prepare('SELECT refs FROM uploads WHERE hash = ?').get(hash)?.refs;
+  } finally {
+    db.close();
+  }
+};
+
+describe('the server logo', () => {
+  // A real 1x1 PNG, so the content type and the bytes are both honest.
+  const PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  let hash;
+
+  before(async () => {
+    hash = await upload(PNG, 'image/png', ownerToken);
+    // The picture section leaves one set; this starts from none.
+    await api('/api/server', { method: 'POST', body: { iconHash: null }, token: ownerToken });
+  });
+
+  it('starts as none, and there is nothing to fetch', async () => {
+    assert.equal((await api('/api/health')).body.logo, null);
+    assert.equal((await api('/api/server/logo')).status, 404);
+  });
+
+  it('is the owner\'s to set, not an admin\'s or a member\'s', async () => {
+    for (const token of [memberToken, adminToken]) {
+      const res = await api('/api/server', { method: 'POST', body: { logo: hash }, token });
+      assert.equal(res.status, 403);
+    }
+  });
+
+  it('refuses something that is not an upload', async () => {
+    const bad = await api('/api/server', { method: 'POST', body: { logo: 'nope' }, token: ownerToken });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.error, 'bad_hash');
+    const missing = await api('/api/server', {
+      method: 'POST', body: { logo: 'a'.repeat(64) }, token: ownerToken,
+    });
+    assert.equal(missing.status, 400);
+    assert.equal(missing.body.error, 'no_such_upload');
+  });
+
+  it('is set by the owner and reported by health as its hash', async () => {
+    const res = await api('/api/server', { method: 'POST', body: { logo: hash }, token: ownerToken });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.server.logo, hash);
+    assert.equal((await api('/api/health')).body.logo, hash);
+  });
+
+  it('IS THE SERVER PICTURE, under another name', async () => {
+    const view = (await api('/api/server', { token: ownerToken })).body.server;
+    assert.equal(view.logo, hash);
+    assert.equal((await api('/api/health')).body.logo, hash);
+    assert.equal((await fetch(`${BASE}/api/server/icon/${hash}`)).status, 200);
+  });
+
+  it('NEVER GOES OUT UNDER BOTH NAMES: clients from 4.0.8 refuse that', async () => {
+    const view = (await api('/api/server', { token: ownerToken })).body.server;
+    const health = (await api('/api/health')).body;
+    for (const reply of [view, health]) {
+      assert.ok('logo' in reply);
+      assert.ok(!('iconHash' in reply));
+    }
+  });
+
+  it('SETTING IT DOES NOT TOUCH THE NAME OR THE PASSWORD', async () => {
+    const res = await api('/api/server', { token: ownerToken });
+    assert.equal(res.body.server.name, 'Still Here');
+    assert.equal(res.body.server.passwordRequired, false);
+  });
+
+  it('is served with no login at all -- the server list asks without a session', async () => {
+    const res = await fetch(`${BASE}/api/server/logo`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'image/png');
+    assert.equal(res.headers.get('x-harmony-hash'), hash);
+    assert.deepEqual(Buffer.from(await res.arrayBuffer()), PNG);
+  });
+
+  it('is not cached as if it could never change -- the path stays put when it does', async () => {
+    const res = await fetch(`${BASE}/api/server/logo`);
+    assert.doesNotMatch(res.headers.get('cache-control'), /immutable/);
+  });
+
+  it('BUT STILL BEHIND THE DOOR PASSWORD', async () => {
+    await api('/api/server', { method: 'POST', body: { password: 'logodoor' }, token: ownerToken });
+    try {
+      assert.equal((await fetch(`${BASE}/api/server/logo`)).status, 401);
+      // Nor does health hand out the hash to somebody without the key.
+      assert.equal((await api('/api/health')).body.logo, undefined);
+      const res = await fetch(`${BASE}/api/server/logo`, { headers: { 'x-harmony-password': 'logodoor' } });
+      assert.equal(res.status, 200);
+      assert.equal((await api('/api/health', { password: 'logodoor' })).body.logo, hash);
+    } finally {
+      await api('/api/server', {
+        method: 'POST', body: { password: '' }, token: ownerToken, password: 'logodoor',
+      });
+    }
+  });
+
+  it('SURVIVES A RESTART', async () => {
+    await stopHarmony();
+    await startHarmony();
+    assert.equal((await api('/api/health')).body.logo, hash);
+    assert.equal((await fetch(`${BASE}/api/server/logo`)).status, 200);
+  });
+
+  it('is picked up from a database the other line wrote', () => {
+    // That line stored it as server_logo. Moved across at boot, not mirrored.
+    const store = memoryMeta({ server_logo: hash });
+    const settings = new ServerSettings(store);
+    assert.equal(settings.iconHash, hash);
+    assert.equal(settings.publicView().logo, hash);
+    assert.equal(store.get('server_logo'), null, 'one name for it, not two');
+
+    // Both set: the picture this line chose stays.
+    const both = memoryMeta({ server_logo: hash, server_icon: 'b'.repeat(64) });
+    assert.equal(new ServerSettings(both).iconHash, 'b'.repeat(64));
+  });
+
+  it('TAKES BOTH NAMES IN ONE REQUEST AS ONE FIELD, iconHash first', async () => {
+    // The native client sends both, so it works against either line's server.
+    const other = await upload(Buffer.from('a second logo'), 'image/png', ownerToken);
+
+    let res = await api('/api/server', {
+      method: 'POST', body: { iconHash: other, logo: hash }, token: ownerToken,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.server.logo, other);
+    assert.equal(res.body.server.logo, other);
+
+    // A bad `logo` beside a good `iconHash` is ignored, not refused.
+    res = await api('/api/server', {
+      method: 'POST', body: { iconHash: hash, logo: 'nope' }, token: ownerToken,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.server.logo, hash);
+
+    // Set under both names, again and again, it holds ONE reference -- and the
+    // one it replaced holds none. Read beside the running server: WAL lets a
+    // second connection look without stopping it.
+    for (let i = 0; i < 3; i += 1) {
+      await api('/api/server', { method: 'POST', body: { iconHash: hash, logo: hash }, token: ownerToken });
+    }
+    assert.equal(refsOf(hash), 1);
+    assert.equal(refsOf(other), 0);
+
+    await api('/api/server', { method: 'POST', body: { iconHash: null, logo: null }, token: ownerToken });
+    assert.equal(refsOf(hash), 0);
+
+    await api('/api/server', { method: 'POST', body: { logo: hash }, token: ownerToken });
+    assert.equal(refsOf(hash), 1);
+  });
+
+  it('can be taken away again', async () => {
+    const res = await api('/api/server', { method: 'POST', body: { logo: null }, token: ownerToken });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.server.logo, null);
+    assert.equal(res.body.server.logo, null);
+    assert.equal((await api('/api/health')).body.logo, null);
+    assert.equal((await api('/api/server/logo')).status, 404);
   });
 });

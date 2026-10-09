@@ -1,16 +1,17 @@
 //! Your screen or a window, captured by WebRTC's desktop capturer, scaled to the resolution
-//! picked, turned into NV12 for the encoder, and previewed small. Its sound comes from
-//! `loopback`.
+//! picked, turned into I420 (or NV12) for the encoder, and previewed small (drawn by the GPU). Its
+//! sound comes from `loopback`.
 
 use super::loopback::{self, Loopback};
 use super::rtc::VideoParams;
-use super::video::FrameSlot;
-use gpui::RenderImage;
-use libwebrtc::desktop_capturer::{DesktopCaptureSourceType, DesktopCapturer, DesktopCapturerOptions};
+use super::video::{self, FrameSlot};
+use super::yuv;
+use gpui::{RenderImage, SurfaceFrame};
+use libwebrtc::desktop_capturer::{DesktopCaptureSourceType, DesktopCapturer, DesktopCapturerOptions, DesktopFrame};
 use libwebrtc::native::yuv_helper;
 use libwebrtc::peer_connection_factory::native::PeerConnectionFactoryExt;
 use libwebrtc::prelude::VideoBuffer;
-use libwebrtc::video_frame::{NV12Buffer, VideoFrame, VideoRotation};
+use libwebrtc::video_frame::{I420Buffer, NV12Buffer, VideoFrame, VideoRotation};
 use libwebrtc::video_source::VideoResolution;
 use libwebrtc::video_source::native::NativeVideoSource;
 use parking_lot::Mutex;
@@ -195,38 +196,95 @@ fn still(kind: SourceKind, id: u64) -> Option<Still> {
         }
     }
 }
-/// The newest captured frame, converted to NV12 inside the capturer's callback (no copy of the
-/// BGRA), and the preview when one was asked for.
+/// The newest captured frame, made into the encoder's frame inside the capturer's callback (no
+/// copy of the BGRA), and the preview when one was asked for.
 #[derive(Default)]
 struct Staging {
-    /// Full size; reused frame to frame unless it went to the encoder as it is.
-    nv12: Option<NV12Buffer>,
-    size: (u32, u32),
-    fresh: bool,
+    /// What the capture is sent at; set by the capture loop.
+    resolution: Option<Resolution>,
+    /// Whether the encoder takes NV12 as it is; set by the capture loop.
+    nv12: bool,
+    frame: Option<EncoderFrame>,
+    scratch: Scratch,
     want_preview: bool,
-    preview: Option<(Arc<RenderImage>, u32, u32)>,
+    /// The preview's stream, for the window: its slot's id.
+    preview_id: u64,
+    preview_frames: video::Scratch,
+    preview: Option<SurfaceFrame>,
+}
+
+/// Kept between frames so scaling doesn't allocate.
+#[derive(Default)]
+struct Scratch {
+    bgra: Vec<u8>,
+    full: Option<I420Buffer>,
 }
 
 impl Staging {
-    fn take(&mut self, f: &libwebrtc::desktop_capturer::DesktopFrame) {
+    fn take(&mut self, f: &DesktopFrame) {
         let (w, h) = (f.width() as u32, f.height() as u32);
         let (ew, eh) = (w & !1, h & !1);
+        let Some(resolution) = self.resolution else { return };
         if ew == 0 || eh == 0 {
             return;
         }
-        let nv12 = match &mut self.nv12 {
-            Some(b) if (b.width(), b.height()) == (ew, eh) => b,
-            slot => slot.insert(NV12Buffer::new(ew, eh)),
-        };
-        let (sy, suv) = nv12.strides();
-        let (y, uv) = nv12.data_mut();
-        yuv_helper::argb_to_nv12(f.data(), f.stride(), y, sy, uv, suv, ew as i32, eh as i32);
-        self.size = (ew, eh);
-        self.fresh = true;
+        self.frame = Some(encoder_frame(f.data(), f.stride(), (ew, eh), fit(ew, eh, resolution), self.nv12, &mut self.scratch));
         if std::mem::take(&mut self.want_preview) {
-            self.preview = Some((bgra_preview(f.data(), w, h, f.stride(), 640), w, h));
+            self.preview = Some(preview_frame(f.data(), w, h, f.stride(), self.preview_id, &mut self.preview_frames));
         }
     }
+}
+
+/// A frame for the encoder in the format that costs it least.
+enum EncoderFrame {
+    I420(I420Buffer),
+    Nv12(NV12Buffer),
+}
+
+impl AsRef<dyn VideoBuffer> for EncoderFrame {
+    fn as_ref(&self) -> &(dyn VideoBuffer + 'static) {
+        match self {
+            EncoderFrame::I420(b) => b,
+            EncoderFrame::Nv12(b) => b,
+        }
+    }
+}
+
+/// The encoder's frame from `w` × `h` (even-sided) of a captured BGRA one, at the size sent,
+/// converted once. Scaling goes first, in BGRA, except at 3/4 (1440p sent as 1080p), which libyuv
+/// scales about twice as fast in I420 planes. OpenH264 works in I420. The graphics card's encoder
+/// (`nv12`) works in NV12 and borrows an NV12 frame without copying it, so a frame sent at the
+/// captured size is made NV12 for it, at the same cost as I420; a scaled one stays I420, since
+/// libyuv scales NV12 slower than I420 plus the encoder's conversion (1.9 against 1.6 ms a frame
+/// from 1440p to 1080p).
+fn encoder_frame(bgra: &[u8], stride: u32, (w, h): (u32, u32), (tw, th): (u32, u32), nv12: bool, scratch: &mut Scratch) -> EncoderFrame {
+    // Always a new buffer: the encoder reads it after `capture_frame` returns.
+    if nv12 && (tw, th) == (w, h) {
+        let mut out = NV12Buffer::new(tw, th);
+        let (sy, suv) = out.strides();
+        let (y, uv) = out.data_mut();
+        yuv_helper::argb_to_nv12(bgra, stride, y, sy, uv, suv, w as i32, h as i32);
+        return EncoderFrame::Nv12(out);
+    }
+    let mut out = I420Buffer::new(tw, th);
+    let to_i420 = |src: &[u8], stride: u32, dst: &mut I420Buffer| {
+        let (dw, dh) = (dst.width(), dst.height());
+        let (sy, su, sv) = dst.strides();
+        let (y, u, v) = dst.data_mut();
+        yuv_helper::argb_to_i420(src, stride, y, sy, u, su, v, sv, dw as i32, dh as i32);
+    };
+    if (tw, th) == (w, h) {
+        to_i420(bgra, stride, &mut out);
+    } else if tw * 4 == w * 3 && th * 4 == h * 3 {
+        let full = yuv::pooled(&mut scratch.full, w, h);
+        to_i420(bgra, stride, full);
+        yuv::scale(full, &mut out);
+    } else {
+        scratch.bgra.resize((tw * th * 4) as usize, 0);
+        yuv::scale_bgra(bgra, stride, w, h, &mut scratch.bgra, tw, th);
+        to_i420(&scratch.bgra, tw * 4, &mut out);
+    }
+    EncoderFrame::I420(out)
 }
 
 enum Control {
@@ -345,31 +403,26 @@ fn run(
                     continue 'outer;
                 }
             }
-            // Your own preview at a few frames a second is enough.
-            if preview_at.elapsed() > Duration::from_millis(200) {
-                preview_at = Instant::now();
-                staging.lock().want_preview = true;
+            {
+                let mut st = staging.lock();
+                st.resolution = Some(choice.resolution);
+                st.preview_id = preview.id;
+                st.nv12 = super::rtc::hardware_encoder_running();
+                // Your own preview at a few frames a second is enough, and none while nobody sees it.
+                if !video::window_hidden() && preview_at.elapsed() > Duration::from_millis(200) {
+                    preview_at = Instant::now();
+                    st.want_preview = true;
+                }
             }
             c.capture_frame();
             let mut st = staging.lock();
-            if std::mem::take(&mut st.fresh) {
-                let (w, h) = st.size;
-                let (tw, th) = fit(w, h, choice.resolution);
-                // The encoder reads a frame's buffer after this returns, so a buffer handed over
-                // is never written again: a scaled copy goes out and the staging one is reused,
-                // or the staging one itself goes and the next frame gets a new one.
-                let buffer = match st.nv12.as_mut() {
-                    Some(nv12) if (tw, th) != (w, h) => Some(nv12.scale(tw as i32, th as i32)),
-                    _ => st.nv12.take(),
-                };
-                if let Some(buffer) = buffer {
-                    let mut vf = VideoFrame::new(VideoRotation::VideoRotation0, buffer);
-                    vf.timestamp_us = started.elapsed().as_micros() as i64;
-                    source.capture_frame(&vf);
-                }
+            if let Some(buffer) = st.frame.take() {
+                let mut vf = VideoFrame::new(VideoRotation::VideoRotation0, buffer);
+                vf.timestamp_us = started.elapsed().as_micros() as i64;
+                source.capture_frame(&vf);
             }
-            if let Some((img, w, h)) = st.preview.take() {
-                preview.put(img, w, h);
+            if let Some(frame) = st.preview.take() {
+                preview.put(frame);
             }
             drop(st);
             let frame = Duration::from_secs_f64(1. / choice.fps.max(1) as f64);
@@ -380,16 +433,30 @@ fn run(
     }
 }
 
-fn bgra_preview(data: &[u8], w: u32, h: u32, stride: u32, max_w: u32) -> Arc<RenderImage> {
+/// `w` and `h` scaled down to `max_w` wide at most, keeping the shape.
+fn preview_size(w: u32, h: u32, max_w: u32) -> (u32, u32) {
     let tw = max_w.min(w).max(1);
-    let th = (h as u64 * tw as u64 / w.max(1) as u64).max(1) as u32;
-    let img = image::RgbaImage::from_fn(tw, th, |x, y| {
-        let sx = (x as u64 * w as u64 / tw as u64) as usize;
-        let sy = (y as u64 * h as u64 / th as u64) as usize;
-        let i = sy * stride as usize + sx * 4;
-        // GPUI wants BGRA, which is what the capturer gives.
-        image::Rgba([data[i], data[i + 1], data[i + 2], 255])
-    });
+    (tw, (h as u64 * tw as u64 / w.max(1) as u64).max(1) as u32)
+}
+
+/// Your own share, small: 640 px wide at most, as stream `id` of the window.
+fn preview_frame(data: &[u8], w: u32, h: u32, stride: u32, id: u64, frames: &mut video::Scratch) -> SurfaceFrame {
+    let (tw, th) = preview_size(w, h, 640);
+    let mut bgra = vec![0u8; (tw * th * 4) as usize];
+    yuv::scale_bgra(data, stride, w, h, &mut bgra, tw, th);
+    let [(_, sy), (_, su), (_, sv)] = yuv::i420_layout(tw, th);
+    frames
+        .i420(id, tw, th, |y, u, v| yuv_helper::argb_to_i420(&bgra, tw * 4, y, sy as u32, u, su as u32, v, sv as u32, tw as i32, th as i32))
+}
+
+fn bgra_preview(data: &[u8], w: u32, h: u32, stride: u32, max_w: u32) -> Arc<RenderImage> {
+    let (tw, th) = preview_size(w, h, max_w);
+    // GPUI wants BGRA, which is what the capturer gives.
+    let mut px = vec![0u8; (tw * th * 4) as usize];
+    yuv::scale_bgra(data, stride, w, h, &mut px, tw, th);
+    // Captures may leave alpha unset.
+    px.chunks_exact_mut(4).for_each(|p| p[3] = 255);
+    let img = image::RgbaImage::from_raw(tw, th, px).expect("preview size");
     Arc::new(RenderImage::new(SmallVec::from_elem(image::Frame::new(img), 1)))
 }
 
@@ -403,5 +470,49 @@ mod tests {
         assert_eq!(fit(1280, 720, Resolution::P1080), (1280, 720));
         assert_eq!(fit(2560, 1600, Resolution::P720), (1152, 720));
         assert_eq!(fit(1366, 768, Resolution::Native), (1366, 768));
+    }
+
+    #[test]
+    fn the_preview_is_small_and_has_the_colours_sent() {
+        let (w, h) = (1920, 1080);
+        let bgra = [40u8, 120, 200, 0].repeat((w * h) as usize);
+        let frame = preview_frame(&bgra, w, h, w * 4, 5, &mut video::Scratch::default());
+        assert_eq!((frame.id(), frame.width(), frame.height()), (5, 640, 360));
+        let sent = encoder_frame(&bgra, w * 4, (w, h), (640, 360), &mut Scratch::default());
+        let (y, u, v) = sent.data();
+        for (plane, want) in [(0, y[0]), (1, u[0]), (2, v[0])] {
+            let (bytes, _) = frame.plane(plane);
+            assert!(bytes.iter().all(|p| p.abs_diff(want) <= 1), "plane {plane}");
+        }
+    }
+
+    #[test]
+    fn every_scaling_path_keeps_the_picture() {
+        // Each of the three ways to the size sent: as it is, at 3/4 in I420, and in BGRA; and the
+        // first as NV12 for the hardware encoder.
+        let mut scratch = Scratch::default();
+        for nv12 in [false, true] {
+            for ((w, h), r) in [((1280, 720), Resolution::P720), ((1280, 960), Resolution::P720), ((1920, 1080), Resolution::P720)] {
+                let bgra = [40u8, 120, 200, 0].repeat((w * h) as usize);
+                let (tw, th) = fit(w, h, r);
+                for _ in 0..2 {
+                    match encoder_frame(&bgra, w * 4, (w, h), (tw, th), nv12, &mut scratch) {
+                        EncoderFrame::I420(out) => {
+                            assert!(!nv12 || (tw, th) != (w, h));
+                            assert_eq!((out.width(), out.height()), (tw, th));
+                            let (y, u, v) = out.data();
+                            let (y0, u0, v0) = (y[0], u[0], v[0]);
+                            assert!(y.iter().all(|&p| p == y0) && u.iter().all(|&p| p == u0) && v.iter().all(|&p| p == v0), "{w}x{h}");
+                        }
+                        EncoderFrame::Nv12(out) => {
+                            assert!(nv12 && (tw, th) == (w, h));
+                            assert_eq!((out.width(), out.height()), (tw, th));
+                            let (y, uv) = out.data();
+                            assert!(y.iter().all(|&p| p == y[0]) && uv.chunks(2).all(|p| p == &uv[..2]), "{w}x{h} NV12");
+                        }
+                    }
+                }
+            }
+        }
     }
 }

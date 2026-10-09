@@ -241,9 +241,10 @@ impl Api {
         Ok(self.post::<ServerReply>("/api/server", body).await?.server)
     }
 
-    /// `None` takes the picture off.
+    /// `None` takes the picture off. Sent under both names: a server of the Electron line calls it
+    /// `logo`, and this line's takes `iconHash` first.
     pub async fn set_server_icon(&self, hash: Option<&str>) -> Result<ServerInfo> {
-        Ok(self.post::<ServerReply>("/api/server", json!({ "iconHash": hash })).await?.server)
+        Ok(self.post::<ServerReply>("/api/server", json!({ "iconHash": hash, "logo": hash })).await?.server)
     }
 
     pub async fn storage(&self) -> Result<Storage> {

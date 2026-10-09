@@ -19,8 +19,8 @@ use crate::widgets::*;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, EventEmitter, Focusable, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
-    ParentElement, Pixels, Point, Render, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, StyledImage, Window, anchored,
-    div, img,
+    ParentElement, Pixels, Point, Render, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window, anchored, div,
+    surface,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -289,7 +289,7 @@ impl ServerView {
         let (user, kind, local) = (tl.user, tl.kind, tl.local);
         let gain = tl.gain();
         let has_sound = tl.sound.is_some();
-        // Ask the decoder for frames no bigger than drawn.
+        // Frames much bigger than drawn are scaled down before they are uploaded.
         let s = window.scale_factor() * crate::theme::scale();
         tl.slot.want_w.store((w * s) as u32, std::sync::atomic::Ordering::Relaxed);
         tl.slot.want_h.store((h * s) as u32, std::sync::atomic::Ordering::Relaxed);
@@ -373,7 +373,7 @@ impl ServerView {
                         d.child(
                             // Room either side for the knob, which sits half past each end.
                             div().px(px(8.)).child(
-                                VolumeSlider::new(gain, move |g, cx| tile.update(cx, |t, cx| t.set_gain(g, cx))).width(px(112.)).render(t, cx),
+                                VolumeSlider::new(("tile-volume", id), gain, move |g, cx| tile.update(cx, |t, cx| t.set_gain(g, cx))).width(px(112.)).render(t, cx),
                             ),
                         )
                     })
@@ -445,8 +445,10 @@ impl ServerView {
 impl Render for Tile {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let t = current();
-        match self.image.clone() {
-            Some(image) => img(image).size_full().rounded(px(radius::CARD + 1.)).object_fit(gpui::ObjectFit::Contain).into_any_element(),
+        match self.frame.clone() {
+            Some(frame) => {
+                surface(frame).size_full().rounded(px(radius::CARD + 1.)).object_fit(gpui::ObjectFit::Contain).into_any_element()
+            }
             None => div()
                 .size_full()
                 .flex()
@@ -542,19 +544,19 @@ impl Soundpad {
                     move |_, _, window, cx| {
                         // Its dialog would open under the soundboard, so the soundboard goes first.
                         cx.emit(Dismiss);
-                        rename_clip(s1.clone(), clip.clone(), window, cx);
+                        super::admin::rename_clip(&s1, &clip, window, cx);
                     },
                 )))
                 .child(menu_item("clip-earlier", Some("arrow-left"), tr!("Move earlier", "Mover para antes"), false, t).on_click(
                     cx.listener(move |this, _, _, cx| {
                         this.menu = None;
-                        reorder_clips(&s2, earlier.clone(), cx);
+                        super::admin::reorder_clips(&s2, earlier.clone(), cx);
                     }),
                 ))
                 .child(menu_item("clip-later", Some("arrow-right"), tr!("Move later", "Mover para depois"), false, t).on_click(
                     cx.listener(move |this, _, _, cx| {
                         this.menu = None;
-                        reorder_clips(&s3, later.clone(), cx);
+                        super::admin::reorder_clips(&s3, later.clone(), cx);
                     }),
                 ))
                 .child(menu_rule(t))
@@ -674,7 +676,7 @@ impl Render for Soundpad {
                 Some(recorder) => d.child(recorder),
                 None => d
                     .child(
-                        VolumeSlider::new(volume, |g, cx| set_prefs(cx, |p| p.soundpad_volume = (g * 100.).round() as u32)).render(&t, cx),
+                        VolumeSlider::new("soundpad-volume", volume, |g, cx| set_prefs(cx, |p| p.soundpad_volume = (g * 100.).round() as u32)).render(&t, cx),
                     )
                     .child(grid)
                     .when(admin, |d| {
@@ -689,51 +691,6 @@ impl Render for Soundpad {
             })
             .children(menu)
     }
-}
-
-fn reorder_clips(session: &Entity<Session>, order: Vec<i64>, cx: &mut App) {
-    session.update(cx, |s, cx| s.call(cx, move |api| Box::pin(async move { api.reorder_clips(&order).await }), |_, _, _| {}));
-}
-
-fn rename_clip(session: Entity<Session>, clip: Clip, window: &mut Window, cx: &mut App) {
-    let id = clip.id;
-    overlay::Ask::open(
-        tr!("Rename the sound", "Renomear o som"),
-        None,
-        tr!("Save", "Salvar"),
-        false,
-        vec![
-            overlay::Field::Text {
-                label: tr!("Name", "Nome"),
-                value: clip.name.clone(),
-                placeholder: "",
-                secret: false,
-                multiline: false,
-                max: 32,
-            },
-            overlay::Field::Text {
-                label: "Emoji",
-                value: clip.emoji.clone().unwrap_or_default(),
-                placeholder: "",
-                secret: false,
-                multiline: false,
-                max: 4,
-            },
-        ],
-        window,
-        cx,
-        move |v, _, cx| {
-            let (name, emoji) = (v[0].trim().to_string(), v[1].trim().to_string());
-            session.update(cx, |s, cx| {
-                s.call(
-                    cx,
-                    move |api| Box::pin(async move { api.rename_clip(id, &name, (!emoji.is_empty()).then_some(emoji.as_str())).await }),
-                    |_, _, _| {},
-                )
-            });
-            None
-        },
-    );
 }
 
 pub(super) fn add_clip(session: Entity<Session>, window: &mut Window, cx: &mut App) {

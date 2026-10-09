@@ -607,18 +607,43 @@ fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D:
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "ServerInfoWire")]
 pub struct ServerInfo {
-    #[serde(default)]
     pub name: String,
     /// The picture's upload hash, None for none (and from servers older than pictures). The
-    /// Electron line's servers call it `logo`.
-    #[serde(default, alias = "logo")]
+    /// Electron line's servers, and this line's from 4.1, call it `logo`.
     pub icon_hash: Option<String>,
-    #[serde(default)]
     pub password_required: bool,
-    #[serde(default)]
     pub restart_required: bool,
+}
+
+/// `ServerInfo` as either line's server sends it. Both names at once must parse: a serde alias
+/// would refuse that as a duplicate, which is how 4.0.8 and 4.0.9 fail against a server that
+/// sends both.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerInfoWire {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    icon_hash: Option<String>,
+    #[serde(default)]
+    logo: Option<String>,
+    #[serde(default)]
+    password_required: bool,
+    #[serde(default)]
+    restart_required: bool,
+}
+
+impl From<ServerInfoWire> for ServerInfo {
+    fn from(w: ServerInfoWire) -> ServerInfo {
+        ServerInfo {
+            name: w.name,
+            icon_hash: w.icon_hash.or(w.logo),
+            password_required: w.password_required,
+            restart_required: w.restart_required,
+        }
+    }
 }
 
 /// `GET /api/health`.
@@ -637,12 +662,22 @@ pub struct Health {
     pub authenticated: bool,
     #[serde(default)]
     pub name: Option<String>,
-    #[serde(default, alias = "logo")]
-    pub icon_hash: Option<String>,
+    #[serde(default)]
+    icon_hash: Option<String>,
+    /// The same, as the Electron line's servers and this line's from 4.1 name it.
+    #[serde(default)]
+    logo: Option<String>,
     #[serde(default)]
     pub has_accounts: Option<bool>,
     #[serde(default)]
     pub needs_owner: bool,
+}
+
+impl Health {
+    /// The server picture's upload hash, under whichever name it came.
+    pub fn icon_hash(&self) -> Option<&String> {
+        self.icon_hash.as_ref().or(self.logo.as_ref())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -865,8 +900,12 @@ mod tests {
         let ours: Health = serde_json::from_str(r#"{"ok":true,"iconHash":"ab"}"#).unwrap();
         let electron: Health = serde_json::from_str(r#"{"ok":true,"logo":"cd"}"#).unwrap();
         let none: ServerInfo = serde_json::from_str(r#"{"name":"x","logo":null}"#).unwrap();
-        assert_eq!(ours.icon_hash.as_deref(), Some("ab"));
-        assert_eq!(electron.icon_hash.as_deref(), Some("cd"));
+        let both: ServerInfo = serde_json::from_str(r#"{"name":"x","iconHash":"ab","logo":"ab"}"#).unwrap();
+        let both_health: Health = serde_json::from_str(r#"{"ok":true,"iconHash":"ab","logo":"ab"}"#).unwrap();
+        assert_eq!(ours.icon_hash().map(String::as_str), Some("ab"));
+        assert_eq!(electron.icon_hash().map(String::as_str), Some("cd"));
         assert_eq!(none.icon_hash, None);
+        assert_eq!(both.icon_hash.as_deref(), Some("ab"));
+        assert_eq!(both_health.icon_hash().map(String::as_str), Some("ab"));
     }
 }

@@ -1,0 +1,49 @@
+name: CI
+
+# Every push and pull request: the server's tests on Linux, where it is deployed, and the
+# client's on Windows, the one platform it builds for. Nothing is built for release or
+# published; that is release.yml, on a tag.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push makes the older run's answer moot.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v5
+      # 24, as install.sh installs: the database is node:sqlite, unflagged only from 22.13.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
+
+  client:
+    # MSVC: libwebrtc ships built against the static CRT, which /.cargo/config.toml asks for.
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+      - run: cargo test

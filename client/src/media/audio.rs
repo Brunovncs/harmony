@@ -10,6 +10,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use libwebrtc::native::apm::AudioProcessingModule;
 use parking_lot::{Condvar, Mutex};
+use rtrb::{Consumer, Producer, RingBuffer};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
@@ -65,52 +66,62 @@ pub enum SourceKind {
 /// Something the speakers play: interleaved stereo at 48 kHz, pushed by whoever produces it.
 pub struct Source {
     pub kind: SourceKind,
-    buf: Mutex<VecDeque<f32>>,
+    feed: Feed,
     pub gain: AtomicF32,
     /// The loudest 10 ms (RMS) since the meter last looked, for speaking rings.
     pub peak: AtomicF32,
     /// Removed from the mix once drained.
     pub one_shot: bool,
-    max_len: usize,
+}
+
+/// How a source's samples reach the mix.
+enum Feed {
+    /// Someone's voice or screen, from the network: a lock-free queue to the output callback,
+    /// played out at a steady fill. Only pushers take `input`'s lock (one task, two while a
+    /// reconnect overlaps) and only the output callback takes `output`'s, so it never waits.
+    /// `overflowed`: a push found the queue full.
+    Stream { input: Mutex<Producer<f32>>, output: Mutex<Playout>, overflowed: AtomicBool },
+    /// Played as it comes (or added onto what is still to play), through the limiter if there
+    /// is one: the cues' bus.
+    Queue { buf: Mutex<VecDeque<f32>>, limiter: Option<Mutex<Limiter>> },
     /// A soundpad clip, played straight from its shared samples (and how far it got) instead of
-    /// being copied into `buf`.
-    clip: Option<(Arc<[i16]>, AtomicUsize)>,
-    /// The cues' bus: what it plays goes through this on its way into the mix.
-    limiter: Option<Mutex<Limiter>>,
+    /// being copied.
+    Clip(Arc<[i16]>, AtomicUsize),
+}
+
+/// `HARMONY_AUDIO_DEBUG` is set; looked up once, since it is asked every 10 ms for each stream.
+fn audio_debug() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("HARMONY_AUDIO_DEBUG").is_some())
 }
 
 impl Source {
     pub fn new(kind: SourceKind, gain: f32, one_shot: bool) -> Arc<Source> {
-        let max_len = if one_shot { usize::MAX } else { MAX_VOICE_MS * RATE as usize / 1000 * 2 };
-        Arc::new(Source {
-            kind,
-            buf: Mutex::new(VecDeque::new()),
-            gain: AtomicF32::new(gain),
-            peak: AtomicF32::default(),
-            one_shot,
-            max_len,
-            clip: None,
-            limiter: None,
-        })
+        let feed = match kind {
+            SourceKind::Voice | SourceKind::Stream if !one_shot => {
+                let (input, output) = Playout::new(kind);
+                Feed::Stream { input: Mutex::new(input), output: Mutex::new(output), overflowed: AtomicBool::new(false) }
+            }
+            _ => Feed::Queue { buf: Mutex::new(VecDeque::new()), limiter: None },
+        };
+        Arc::new(Source { kind, feed, gain: AtomicF32::new(gain), peak: AtomicF32::default(), one_shot })
     }
 
     /// An effect that stays in the mix, through a limiter.
     fn limited() -> Arc<Source> {
         Arc::new(Source {
             kind: SourceKind::Effect,
-            buf: Mutex::new(VecDeque::new()),
+            feed: Feed::Queue { buf: Mutex::new(VecDeque::new()), limiter: Some(Mutex::default()) },
             gain: AtomicF32::new(1.),
             peak: AtomicF32::default(),
             one_shot: false,
-            max_len: usize::MAX,
-            clip: None,
-            limiter: Some(Mutex::default()),
         })
     }
 
     /// Mono samples added onto what is still to play, from now, instead of queued after it.
     fn overlay(&self, samples: &[f32]) {
-        let mut buf = self.buf.lock();
+        let Feed::Queue { buf, .. } = &self.feed else { return };
+        let mut buf = buf.lock();
         let queued = buf.len() / 2;
         for (i, &s) in samples.iter().enumerate() {
             if i < queued {
@@ -124,48 +135,251 @@ impl Source {
     }
 
     /// Mono or stereo samples in -1..1 at 48 kHz.
+    #[cfg(test)]
     pub fn push(&self, samples: &[f32], channels: usize) {
-        let mut sum = 0.;
-        let mut buf = self.buf.lock();
-        if channels == 1 {
-            for &s in samples {
-                buf.push_back(s);
-                buf.push_back(s);
-                sum += s * s;
-            }
-        } else {
-            for f in samples.chunks_exact(channels) {
-                buf.push_back(f[0]);
-                buf.push_back(f[1]);
-                sum += 0.25 * (f[0] + f[1]) * (f[0] + f[1]);
-            }
-        }
-        let over = buf.len().saturating_sub(self.max_len);
-        if over > 0 {
-            buf.drain(..over & !1);
-        }
-        drop(buf);
-        let frames = (samples.len() / channels.max(1)).max(1);
-        self.peak.max((sum / frames as f32).sqrt());
+        self.push_with(samples, channels, |s| s);
     }
 
     pub fn push_i16(&self, samples: &[i16], channels: usize) {
-        let f: Vec<f32> = samples.iter().map(|&s| s as f32 / 32768.).collect();
-        if std::env::var_os("HARMONY_AUDIO_DEBUG").is_some() {
+        if audio_debug() {
             static N: AtomicU64 = AtomicU64::new(0);
             let n = N.fetch_add(1, Ordering::Relaxed);
             if n.is_multiple_of(200) {
-                let rms = (f.iter().map(|x| x * x).sum::<f32>() / f.len().max(1) as f32).sqrt();
+                let sum = samples.iter().map(|&s| (s as f32 / 32768.).powi(2)).sum::<f32>();
+                let rms = (sum / samples.len().max(1) as f32).sqrt();
                 log::info!("remote audio: frame {n}, {} samples x{channels}, rms {rms:.4}", samples.len());
             }
         }
-        self.push(&f, channels);
+        self.push_with(samples, channels, |s| s as f32 / 32768.);
+    }
+
+    fn push_with<T: Copy>(&self, samples: &[T], channels: usize, to_f32: impl Fn(T) -> f32) {
+        let channels = channels.max(1);
+        let mut sum = 0.;
+        let stereo = samples.chunks_exact(channels).map(|f| {
+            let (l, r) = if channels == 1 { (to_f32(f[0]), to_f32(f[0])) } else { (to_f32(f[0]), to_f32(f[1])) };
+            sum += 0.25 * (l + r) * (l + r);
+            [l, r]
+        });
+        match &self.feed {
+            Feed::Stream { input, overflowed, .. } => {
+                let mut input = input.lock();
+                let frames = (input.slots() / 2).min(samples.len() / channels);
+                if frames < samples.len() / channels {
+                    // Only while the speakers are away: when back, they drop what queued meanwhile.
+                    overflowed.store(true, Ordering::Relaxed);
+                }
+                if let Ok(chunk) = input.write_chunk_uninit(frames * 2) {
+                    chunk.fill_from_iter(stereo.flatten());
+                }
+            }
+            Feed::Queue { buf, .. } => buf.lock().extend(stereo.flatten()),
+            Feed::Clip(..) => return,
+        }
+        let frames = (samples.len() / channels).max(1);
+        self.peak.max((sum / frames as f32).sqrt());
     }
 
     fn is_empty(&self) -> bool {
-        match &self.clip {
-            Some((samples, at)) => at.load(Ordering::Relaxed) >= samples.len(),
-            None => self.buf.lock().is_empty(),
+        match &self.feed {
+            Feed::Clip(samples, at) => at.load(Ordering::Relaxed) >= samples.len(),
+            Feed::Queue { buf, .. } => buf.lock().is_empty(),
+            Feed::Stream { output, .. } => output.lock().queue.is_empty(),
+        }
+    }
+}
+
+/// How a stream is played out, in milliseconds: the fill it is held at, how far it may stray
+/// before it is brought back, and the backlog that is dropped outright.
+struct Pace {
+    target: usize,
+    slack: usize,
+    cap: usize,
+}
+
+impl Pace {
+    fn of(kind: SourceKind) -> Pace {
+        match kind {
+            // Enough for the 10 ms bursts and the scheduling jitter on top, and no more.
+            SourceKind::Voice => Pace { target: 30, slack: 8, cap: MAX_VOICE_MS },
+            // A screen's sound goes with its video, which arrives later anyway, and is often
+            // music, where a dropped or repeated frame is easier to hear: more room, fewer fixes.
+            _ => Pace { target: 80, slack: 20, cap: 300 },
+        }
+    }
+}
+
+/// Output frames over which the fill's low point is taken; two windows in a row out of bounds
+/// set a correction.
+const WINDOW: usize = RATE as usize / 2;
+/// 2 ms: starts and stops are faded over this, so they don't click.
+const FADE: usize = RATE as usize / 500;
+/// Below this (about -50 dBFS) a block is silence, and frames are dropped or repeated in bulk.
+const QUIET: f32 = 0.003;
+
+const fn frames(ms: usize) -> usize {
+    ms * RATE as usize / 1000
+}
+
+/// The output callback's end of a stream. LiveKit hands over remote audio on a 10 ms software
+/// timer while the speakers run on their own clock, so a plain queue drifts between running dry
+/// and overflowing. This one starts once `target` is queued (again after running dry, instead
+/// of crackling sample by sample) and holds the fill near it by dropping or repeating single
+/// frames where the sound is quietest.
+struct Playout {
+    queue: Consumer<f32>,
+    /// In frames, a stereo pair each.
+    target: usize,
+    slack: usize,
+    cap: usize,
+    playing: bool,
+    /// Frames played of the fade-in since playing started.
+    faded_in: usize,
+    /// The least queued at a pull this window, how much of the window has played, and the last
+    /// window's least.
+    low: usize,
+    seen: usize,
+    last_low: Option<usize>,
+    /// Frames still to drop (above zero) or repeat (below zero) to get back to target.
+    skew: isize,
+    /// The block being pulled, copied out of the queue.
+    block: Vec<[f32; 2]>,
+}
+
+impl Playout {
+    fn new(kind: SourceKind) -> (Producer<f32>, Playout) {
+        let pace = Pace::of(kind);
+        let (target, slack, cap) = (frames(pace.target), frames(pace.slack), frames(pace.cap));
+        // Twice the cap, so a backlog shows as one before the pusher has to drop anything.
+        let (input, queue) = RingBuffer::new(cap * 4);
+        let playout = Playout {
+            queue,
+            target,
+            slack,
+            cap,
+            playing: false,
+            faded_in: 0,
+            low: usize::MAX,
+            seen: 0,
+            last_low: None,
+            skew: 0,
+            block: Vec::with_capacity(frames(40)),
+        };
+        (input, playout)
+    }
+
+    /// Adds the next `out.len() / 2` frames, at `gain`, into `out`. `stale`: the queue overflowed
+    /// since the last pull, so what it holds is old.
+    fn pull(&mut self, out: &mut [f32], gain: f32, stale: bool) {
+        let want = out.len() / 2;
+        // A long device block needs a burst and the jitter on top of itself queued.
+        let target = self.target.max(want + frames(20));
+        let mut queued = self.queue.slots() / 2;
+        if stale {
+            self.discard(queued);
+            self.playing = false;
+            return;
+        }
+        if queued > self.cap.max(2 * target) {
+            // A backlog (the speakers were away): only the newest of it is worth playing.
+            self.discard(queued - target);
+            queued = target;
+        }
+        if !self.playing {
+            if queued < target {
+                return;
+            }
+            self.playing = true;
+            self.faded_in = 0;
+            (self.low, self.seen, self.last_low, self.skew) = (usize::MAX, 0, None, 0);
+        }
+        self.low = self.low.min(queued);
+
+        // This block and a few frames over, in case some are dropped.
+        let avail = queued.min(want + want / 8 + 1);
+        self.block.clear();
+        if let Ok(chunk) = self.queue.read_chunk(avail * 2) {
+            let (a, b) = chunk.as_slices();
+            self.block.extend(a.chunks_exact(2).chain(b.chunks_exact(2)).map(|f| [f[0], f[1]]));
+        }
+        let peak = self.block.iter().take(want).fold(0f32, |p, f| p.max(f[0].abs()).max(f[1].abs()));
+        let room = if want < 16 { 0 } else if peak < QUIET { want / 8 } else { 1 };
+        let (mut drop, mut repeat) = match self.skew {
+            s if s > 0 => ((s as usize).min(room).min(avail.saturating_sub(want)), 0),
+            s if s < 0 => (0, s.unsigned_abs().min(room)),
+            _ => (0, 0),
+        };
+        let mut take = want + drop - repeat;
+        let dry = take > avail;
+        if dry {
+            (drop, repeat, take) = (0, 0, avail);
+        }
+        self.skew += repeat as isize - drop as isize;
+        let played = if dry { avail } else { want };
+
+        // Where a frame goes or doubles: the quietest one when only one does, else spread out.
+        let marks = drop + repeat;
+        let energy = |f: &[f32; 2]| f[0].abs() + f[1].abs();
+        let quietest = if marks == 1 {
+            (0..take).min_by(|&i, &j| energy(&self.block[i]).total_cmp(&energy(&self.block[j])))
+        } else {
+            None
+        };
+        let mark = |k: usize| quietest.unwrap_or(k * take / (marks + 1));
+        let fade_out = if dry { FADE.min(played) } else { 0 };
+        let (mut o, mut k) = (0, 0);
+        for s in 0..take {
+            let copies = if k < marks && s == mark(k + 1) {
+                k += 1;
+                if drop > 0 { 0 } else { 2 }
+            } else {
+                1
+            };
+            for _ in 0..copies {
+                let mut g = gain;
+                if self.faded_in < FADE {
+                    g *= self.faded_in as f32 / FADE as f32;
+                    self.faded_in += 1;
+                }
+                if played - o <= fade_out {
+                    g *= (played - o) as f32 / fade_out as f32;
+                }
+                let [l, r] = self.block[s];
+                out[2 * o] += l * g;
+                out[2 * o + 1] += r * g;
+                o += 1;
+            }
+        }
+        debug_assert_eq!(o, played);
+        self.discard(take);
+        if dry {
+            self.playing = false;
+            return;
+        }
+        self.seen += want;
+        if self.seen >= WINDOW {
+            self.settle(target);
+        }
+    }
+
+    /// At the end of a window: when it and the one before both sat outside target ± slack, aims
+    /// to bring the fill back by the smaller of their two misses.
+    fn settle(&mut self, target: usize) {
+        let low = std::mem::replace(&mut self.low, usize::MAX);
+        self.seen = 0;
+        if let Some(last) = self.last_low.replace(low) {
+            let (lo, hi) = (low.min(last), low.max(last));
+            if lo > target + self.slack {
+                self.skew = (lo - target) as isize;
+            } else if hi + self.slack < target {
+                self.skew = -((target - hi) as isize);
+            }
+        }
+    }
+
+    fn discard(&mut self, frames: usize) {
+        if let Ok(chunk) = self.queue.read_chunk(frames * 2) {
+            chunk.commit_all();
         }
     }
 }
@@ -198,30 +412,35 @@ impl Mixer {
         let mut sources = self.sources.lock();
         for s in sources.iter() {
             let gain = if deaf && s.kind == SourceKind::Voice { 0. } else { s.gain.get() };
-            if let Some((samples, at)) = &s.clip {
-                let from = at.load(Ordering::Relaxed).min(samples.len());
-                let n = out.len().min(samples.len() - from);
-                for (o, &v) in out.iter_mut().zip(&samples[from..from + n]) {
-                    *o += v as f32 / 32768. * gain;
+            match &s.feed {
+                Feed::Clip(samples, at) => {
+                    let from = at.load(Ordering::Relaxed).min(samples.len());
+                    let n = out.len().min(samples.len() - from);
+                    for (o, &v) in out.iter_mut().zip(&samples[from..from + n]) {
+                        *o += v as f32 / 32768. * gain;
+                    }
+                    at.store(from + n, Ordering::Relaxed);
                 }
-                at.store(from + n, Ordering::Relaxed);
-                continue;
-            }
-            let mut buf = s.buf.lock();
-            let n = out.len().min(buf.len());
-            if let Some(limiter) = &s.limiter {
-                let mut limiter = limiter.lock();
-                let mut queued = buf.drain(..n);
-                for o in out[..n].chunks_exact_mut(2) {
-                    let (l, r) = (queued.next().unwrap_or(0.) * gain, queued.next().unwrap_or(0.) * gain);
-                    let (l, r) = limiter.process(l, r);
-                    o[0] += l;
-                    o[1] += r;
+                Feed::Stream { output, overflowed, .. } => output.lock().pull(out, gain, overflowed.swap(false, Ordering::Relaxed)),
+                Feed::Queue { buf, limiter: Some(limiter) } => {
+                    let mut buf = buf.lock();
+                    let n = out.len().min(buf.len());
+                    let mut limiter = limiter.lock();
+                    let mut queued = buf.drain(..n);
+                    for o in out[..n].chunks_exact_mut(2) {
+                        let (l, r) = (queued.next().unwrap_or(0.) * gain, queued.next().unwrap_or(0.) * gain);
+                        let (l, r) = limiter.process(l, r);
+                        o[0] += l;
+                        o[1] += r;
+                    }
                 }
-                continue;
-            }
-            for (o, v) in out.iter_mut().zip(buf.drain(..n)) {
-                *o += v * gain;
+                Feed::Queue { buf, limiter: None } => {
+                    let mut buf = buf.lock();
+                    let n = out.len().min(buf.len());
+                    for (o, v) in out.iter_mut().zip(buf.drain(..n)) {
+                        *o += v * gain;
+                    }
+                }
             }
         }
         sources.retain(|s| !(s.one_shot && s.is_empty()));
@@ -867,13 +1086,10 @@ impl Limiter {
 pub fn play_shared(samples: Arc<[i16]>, gain: f32) {
     let s = Source {
         kind: SourceKind::Effect,
-        buf: Mutex::new(VecDeque::new()),
+        feed: Feed::Clip(samples, AtomicUsize::new(0)),
         gain: AtomicF32::new(gain),
         peak: AtomicF32::default(),
         one_shot: true,
-        max_len: 0,
-        clip: Some((samples, AtomicUsize::new(0))),
-        limiter: None,
     };
     audio().mixer.add(Arc::new(s));
 }
@@ -926,10 +1142,18 @@ mod tests {
     }
 
     #[test]
-    fn sources_drop_old_audio_rather_than_lag() {
+    fn a_backlog_from_while_the_speakers_were_away_is_dropped() {
+        let m = Mixer::new();
         let s = Source::new(SourceKind::Voice, 1., false);
+        m.add(s.clone());
         s.push(&vec![0.1; RATE as usize], 1);
-        assert!(s.buf.lock().len() <= MAX_VOICE_MS * RATE as usize / 1000 * 2);
+        let mut out = vec![0.; 2 * FRAME];
+        m.mix(&mut out);
+        assert!(out.iter().all(|&x| x == 0.), "the old second is not played");
+        // What comes next plays once there is enough of it.
+        s.push(&vec![0.3; frames(40)], 1);
+        m.mix(&mut out);
+        assert!((out[2 * FADE] - 0.3).abs() < 1e-6, "{}", out[2 * FADE]);
     }
 
     #[test]
@@ -937,18 +1161,137 @@ mod tests {
         let m = Mixer::new();
         let voice = Source::new(SourceKind::Voice, 2., false);
         let fx = Source::new(SourceKind::Effect, 1., true);
-        voice.push(&[0.1; 4], 1);
-        fx.push(&[0.2; 4], 1);
+        voice.push(&[0.1; frames(40)], 1);
+        fx.push(&[0.2; FRAME], 1);
         m.add(voice.clone());
         m.add(fx);
-        let mut out = vec![0.; 8];
+        let mut out = vec![0.; 2 * FRAME];
         m.mix(&mut out);
-        assert!((out[0] - 0.4).abs() < 1e-6);
+        // Past the voice's fade-in.
+        assert!((out[2 * FADE] - 0.4).abs() < 1e-6, "{}", out[2 * FADE]);
         m.deafened.store(true, Ordering::Relaxed);
-        voice.push(&[0.1; 4], 1);
+        voice.push(&[0.1; FRAME], 1);
         m.mix(&mut out);
-        assert_eq!(out[0], 0.);
+        assert!(out.iter().all(|&x| x == 0.));
         assert_eq!(m.sources.lock().len(), 1, "the drained effect is gone");
+    }
+
+    #[test]
+    fn a_stream_waits_for_its_target_before_it_plays_and_after_it_runs_dry() {
+        let (mut input, mut p) = Playout::new(SourceKind::Voice);
+        let mut out = vec![0.; 2 * FRAME];
+        input.push_entire_slice(&[0.5; 2 * FRAME]).unwrap();
+        p.pull(&mut out, 1., false);
+        assert!(out.iter().all(|&x| x == 0.), "10 ms isn't enough to start on");
+        input.push_entire_slice(&vec![0.5; 2 * frames(30)]).unwrap();
+        p.pull(&mut out, 1., false);
+        assert_eq!(out[0], 0., "it fades in");
+        assert_eq!(out[2 * FRAME - 1], 0.5);
+        // 30 ms left: three blocks, then dry, the last of it faded out.
+        for _ in 0..3 {
+            out.fill(0.);
+            p.pull(&mut out, 1., false);
+        }
+        assert!(p.playing);
+        out.fill(0.);
+        p.pull(&mut out, 1., false);
+        assert!(!p.playing && out.iter().all(|&x| x == 0.));
+        input.push_entire_slice(&[0.5; 2 * FRAME]).unwrap();
+        p.pull(&mut out, 1., false);
+        assert!(out.iter().all(|&x| x == 0.), "it fills to target again first");
+    }
+
+    /// How a run of `Playout` went: the fill at each pull from 20 s on, in frames, and how often it
+    /// ran dry after starting.
+    struct Run {
+        fills: Vec<usize>,
+        dry: usize,
+    }
+
+    impl Run {
+        fn mean_ms(&self) -> f64 {
+            self.fills.iter().sum::<usize>() as f64 / self.fills.len() as f64 * 1000. / RATE as f64
+        }
+        fn max_ms(&self) -> f64 {
+            *self.fills.iter().max().unwrap() as f64 * 1000. / RATE as f64
+        }
+    }
+
+    /// A minute of a stream: the far end sends 10 ms every 10 ms of its own clock, each late by
+    /// up to `jitter_ms`, and the speakers take `block` frames at a time on a clock `ppm` fast
+    /// (slow below zero). `sound` is the sample at each frame.
+    fn play(kind: SourceKind, ppm: f64, jitter_ms: f64, block: usize, sound: impl Fn(usize) -> f32) -> Run {
+        let (mut input, mut p) = Playout::new(kind);
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut random = || {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let period = block as f64 / RATE as f64 / (1. + ppm * 1e-6);
+        let (mut sent, mut next_send, mut pulls) = (0usize, 0f64, 0usize);
+        let mut out = vec![0.; 2 * block];
+        let mut run = Run { fills: Vec::new(), dry: 0 };
+        let mut started = false;
+        while pulls as f64 * period < 60. {
+            let pull_at = pulls as f64 * period;
+            if next_send <= pull_at {
+                let chunk: Vec<f32> = (sent..sent + FRAME).flat_map(|i| [sound(i), sound(i)]).collect();
+                input.push_entire_slice(&chunk).unwrap();
+                sent += FRAME;
+                // In order, as one sender's are.
+                next_send = (sent / FRAME) as f64 * 0.01 + random() * jitter_ms / 1000.;
+                next_send = next_send.max(pull_at);
+                continue;
+            }
+            if pull_at >= 20. {
+                run.fills.push(p.queue.slots() / 2);
+            }
+            let was = p.playing;
+            out.fill(0.);
+            p.pull(&mut out, 1., false);
+            started |= p.playing;
+            if started && was && !p.playing {
+                run.dry += 1;
+            }
+            pulls += 1;
+        }
+        run
+    }
+
+    /// Speech-like: a tone that stops for a breath now and then.
+    fn speech(i: usize) -> f32 {
+        if i % 24_000 < 16_000 { 0.3 * (i as f32 * 0.05).sin() } else { 0. }
+    }
+
+    fn music(i: usize) -> f32 {
+        0.3 * (i as f32 * 0.05).sin() + 0.2 * (i as f32 * 0.013).sin()
+    }
+
+    #[test]
+    fn a_voice_stays_near_its_target_however_the_clocks_drift() {
+        let target = Pace::of(SourceKind::Voice).target as f64;
+        for ppm in [-2000., -300., 0., 300., 2000.] {
+            for block in [FRAME, 441, 1024] {
+                let run = play(SourceKind::Voice, ppm, 8., block, speech);
+                let target = target.max(block as f64 * 1000. / RATE as f64 + 20.);
+                println!("voice, {ppm} ppm, {block}-frame blocks: fill {:.1} ms on average, {:.1} at most, dry {}", run.mean_ms(), run.max_ms(), run.dry);
+                assert!((run.mean_ms() - target).abs() < 15., "{ppm} ppm, {block}: {:.1} ms", run.mean_ms());
+                assert!(run.max_ms() < target + 30., "{ppm} ppm, {block}: grew to {:.1} ms", run.max_ms());
+                assert_eq!(run.dry, 0, "{ppm} ppm, {block}");
+            }
+        }
+    }
+
+    #[test]
+    fn music_with_no_pauses_still_keeps_its_fill() {
+        let target = Pace::of(SourceKind::Stream).target as f64;
+        for ppm in [-1000., 0., 1000.] {
+            let run = play(SourceKind::Stream, ppm, 8., FRAME, music);
+            println!("screen sound, {ppm} ppm: fill {:.1} ms on average, {:.1} at most, dry {}", run.mean_ms(), run.max_ms(), run.dry);
+            assert!((run.mean_ms() - target).abs() < 30., "{ppm} ppm: {:.1} ms", run.mean_ms());
+            assert!(run.max_ms() < target + 50., "{ppm} ppm: grew to {:.1} ms", run.max_ms());
+            assert_eq!(run.dry, 0, "{ppm} ppm");
+        }
     }
 
     fn peak(samples: &[f32]) -> f32 {

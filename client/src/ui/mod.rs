@@ -63,13 +63,22 @@ impl Root {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Root {
         // The theme and the interface size can change with either; parts of the window that are
         // cached (the chat, the channel and member lists) would keep the old ones, so everything
-        // draws again.
+        // draws again. A slider's level shows only in what is drawn afresh anyway.
         let mut subs = vec![cx.observe_window_appearance(window, |_, window, _| window.refresh())];
         subs.push(cx.observe_global_in::<crate::prefs::Prefs>(window, |_, window, cx| {
+            if !cx.global::<crate::prefs::Prefs>().redraw {
+                cx.notify();
+                return;
+            }
             hotkeys::sync(cx);
             window.refresh();
         }));
-        let view = cx.new(|cx| ConnectView::new(None, window, cx));
+        // Minimised or in the tray: video keeps flowing to others, but nothing here is turned
+        // into pictures for a window nobody sees.
+        subs.push(cx.observe_window_visibility(window, |_, visibility, _, _| {
+            crate::media::video::set_window_hidden(visibility == gpui::WindowVisibility::Hidden);
+        }));
+        let view =cx.new(|cx| ConnectView::new(None, window, cx));
         let mut root = Root {
             focus: cx.focus_handle(),
             screen: Screen::Connect { view: view.clone() },

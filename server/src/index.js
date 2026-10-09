@@ -31,6 +31,7 @@ import {
   TOKEN_FLAGS,
 } from './channels.js';
 import { Realtime } from './realtime.js';
+import { claimedMediaKeyAccount, mintMediaKey, verifyMediaKey } from './media-keys.js';
 import { DirectMessages, publicConversation, publicDmMessage } from './dms.js';
 import { mountDirectMessages } from './dm-routes.js';
 import { Calls } from './calls.js';
@@ -260,8 +261,11 @@ app.get('/api/health', (req, res) => {
     ...(authed
       ? {
           name: serverSettings.name,
-          // Downloadable from /api/server/icon/:hash without an account.
-          iconHash: serverSettings.iconHash,
+          // The picture's hash, downloadable from /api/server/icon/:hash (or
+          // /api/server/logo) without an account. Under the Electron line's
+          // name only: native clients from 4.0.8 read `logo` as `iconHash` and
+          // refuse a reply that carries both. See publicView.
+          logo: serverSettings.iconHash,
           signalingBase: signalingBase(req.headers.host),
           liveStreams: rooms.listLive().length,
           // Lets the client show "create the first account" rather than a
@@ -271,6 +275,37 @@ app.get('/api/health', (req, res) => {
         }
       : {}),
   });
+});
+
+/*
+ * Media keys are signed with the account's password hash folded in, so a key
+ * dies with the sessions it was issued beside: a password change ends every
+ * session and, through this, every media link -- and so does removing the
+ * account, whose id SQLite may hand to the next person to register (users.id
+ * is a plain INTEGER PRIMARY KEY, and the highest one is reused once
+ * deleted). A new hash has a new salt, so an old key cannot verify against it.
+ */
+const mediaKeySecret = (user) => `${mediaSecret}:${user.password_hash}`;
+
+/**
+ * A stored file, by media key rather than by headers.
+ *
+ * For clients that load uploads straight into <img>/<video>/<audio> -- the
+ * browser and Android builds -- which cannot attach the door password or a
+ * session token to those requests. The key stands in for both: it is only
+ * issued behind the door and a login (GET /api/media-key), and it names the
+ * account, which must still exist. Registered BEFORE the door on purpose;
+ * the key is what was checked at the door. See media-keys.js.
+ *
+ * It opens what /api/uploads opens -- sendUpload is shared -- so a private
+ * conversation's sealed file is not here either.
+ */
+app.get('/api/media/:hash', (req, res) => {
+  const user = accounts.byId(claimedMediaKeyAccount(req.query.k));
+  if (!user || verifyMediaKey(mediaKeySecret(user), req.query.k) !== user.id) {
+    return res.status(401).json({ error: 'bad_media_key', message: 'That media link has expired.' });
+  }
+  return sendUpload(req, res, { scope: 'private' });
 });
 
 app.use('/api', requirePassword);
@@ -637,14 +672,18 @@ function iconProblem(hash) {
  * so renaming cannot clear the password by omission -- and an empty string
  * IS a value here, meaning "take the door off", which is why the two cases
  * have to be told apart rather than both treated as falsy. `iconHash` works
- * the same way: absent leaves the picture, null removes it.
+ * the same way: absent leaves the picture, null removes it. `logo` is the
+ * same field under the name the other clients send. The native client sends
+ * both, to work against either line's server, so they are ONE field: with
+ * `iconHash` present `logo` is not looked at, and the upload is retained
+ * and released once.
  *
  * The picture is checked before anything is applied, so a bad hash does not
  * leave a half-made change behind. Its references are juggled as an avatar's
  * are: the new one retained before the old one is released.
  */
 app.post('/api/server', requireRole('owner'), (req, res) => {
-  const icon = req.body?.iconHash;
+  const icon = req.body?.iconHash !== undefined ? req.body.iconHash : req.body?.logo;
   if (icon !== undefined && icon !== null) {
     const problem = iconProblem(String(icon));
     if (problem) return res.status(400).json(problem);
@@ -678,14 +717,34 @@ app.post('/api/server', requireRole('owner'), (req, res) => {
 app.get('/api/server/icon/:hash', (req, res) => {
   const hash = String(req.params.hash);
   if (!hash || hash !== serverSettings.iconHash) return res.status(404).json({ error: 'no_such_file' });
+  return sendServerIcon(res, hash, { error: 'no_such_file' });
+});
+
+/**
+ * The same picture with no hash in the path: whatever it is now, which is
+ * how the Electron, browser and Android clients ask for it. X-Harmony-Hash
+ * says which one it was, for a client that caches by hash.
+ *
+ * Not cached as immutable, unlike the hashed path: this URL stays put when
+ * the picture changes, and a browser holding last year's copy for a year
+ * would never see the new one. Revalidating costs a 304.
+ */
+app.get('/api/server/logo', (_req, res) => {
+  const hash = serverSettings.iconHash;
+  if (!hash) return res.status(404).json({ error: 'no_logo' });
+  res.set('X-Harmony-Hash', hash);
+  return sendServerIcon(res, hash, { error: 'no_logo' }, 'no-cache');
+});
+
+function sendServerIcon(res, hash, notFound, cache = 'public, max-age=31536000, immutable') {
   const info = chat.fileInfo(hash);
-  if (!info) return res.status(404).json({ error: 'no_such_file' });
+  if (!info) return res.status(404).json(notFound);
   res.set('Content-Type', info.content_type);
   res.set('X-Content-Type-Options', 'nosniff');
   res.set('Content-Security-Policy', "default-src 'none'; sandbox");
-  res.set('Cache-Control', 'public, max-age=31536000, immutable');
+  res.set('Cache-Control', cache);
   return res.sendFile(info.path);
-});
+}
 
 /**
  * How much of the upload quota is used. The upload replies carry this too,
@@ -1259,7 +1318,21 @@ app.post(
  * image/png is served as image/png and cannot execute. X-Content-Type-Options
  * stops a browser sniffing its way to a different conclusion.
  */
-app.get('/api/uploads/:hash', requireLogin, (req, res) => {
+app.get('/api/uploads/:hash', requireLogin, (req, res) => sendUpload(req, res));
+
+/** A key for loading uploads without headers. See GET /api/media/:hash. */
+app.get('/api/media-key', requireLogin, (req, res) => {
+  res.json({ key: mintMediaKey(mediaKeySecret(req.user), req.user.id) });
+});
+
+/**
+ * The body of GET /api/uploads/:hash, and of GET /api/media/:hash.
+ *
+ * `scope` is the Cache-Control audience. A media URL carries its key, and a
+ * shared cache told to ignore query strings would hand the file to anybody
+ * with the bare path -- so that one is `private`: the browser still keeps it.
+ */
+function sendUpload(req, res, { scope = 'public' } = {}) {
   const hash = String(req.params.hash);
   if (!/^[0-9a-f]{64}$/.test(hash)) return res.status(400).json({ error: 'bad_hash' });
 
@@ -1272,9 +1345,9 @@ app.get('/api/uploads/:hash', requireLogin, (req, res) => {
   res.set('X-Content-Type-Options', 'nosniff');
   res.set('Content-Security-Policy', "default-src 'none'; sandbox");
   // Content-addressed, so it can never change: cache it forever.
-  res.set('Cache-Control', 'public, max-age=31536000, immutable');
+  res.set('Cache-Control', `${scope}, max-age=31536000, immutable`);
   return res.sendFile(info.path);
-});
+}
 
 // ---------------------------------------------------------------------------
 // Private conversations: see dm-routes.js

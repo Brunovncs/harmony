@@ -57,6 +57,9 @@ pub struct ChatView {
     /// Parsed bodies by message, until it is edited; dropped when the server's emoji change.
     bodies: HashMap<MessageId, (Option<i64>, Rc<rich::Parsed>)>,
     bodies_emoji: usize,
+    /// When an animated picture on screen next changes frame, and the wake set for it.
+    frame_due: Option<Instant>,
+    frame_timer: Task<()>,
     /// The language the placeholders were written in, so a switch rewrites them.
     lang: crate::i18n::Lang,
     focus: FocusHandle,
@@ -125,6 +128,8 @@ impl ChatView {
             mention: None,
             bodies: HashMap::new(),
             bodies_emoji: 0,
+            frame_due: None,
+            frame_timer: Task::ready(()),
             lang: crate::i18n::lang(),
             focus: cx.focus_handle(),
             _subs: subs,
@@ -645,7 +650,32 @@ impl ChatView {
 
     // Drawing.
 
+    /// A message, and a wake for when an animated picture in it changes frame.
     fn render_message(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.session.update(cx, |s, _| s.take_frame_due());
+        let el = self.render_message_inner(ix, window, cx);
+        if let Some(due) = self.session.update(cx, |s, _| s.take_frame_due()) {
+            self.wake_at(due, cx);
+        }
+        el
+    }
+
+    /// Draws again at `due`, unless a wake no later than that is already set.
+    fn wake_at(&mut self, due: Instant, cx: &mut Context<Self>) {
+        if self.frame_due.is_some_and(|d| d <= due) {
+            return;
+        }
+        self.frame_due = Some(due);
+        self.frame_timer = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(due.saturating_duration_since(Instant::now())).await;
+            let _ = this.update(cx, |this, cx| {
+                this.frame_due = None;
+                cx.notify();
+            });
+        });
+    }
+
+    fn render_message_inner(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = current();
         let messages = self.messages(cx);
         let Some(m) = messages.get(ix).cloned() else { return div().into_any_element() };
@@ -1202,7 +1232,7 @@ impl ChatView {
     }
 
     fn render_composer(&mut self, t: &Theme, cx: &mut Context<Self>) -> gpui::Div {
-        let can_send = !self.composer.read(cx).text().trim().is_empty() || self.pending.is_some();
+        let can_send = !self.composer.read(cx).is_blank() || self.pending.is_some();
         let mention_list = self.mention_matches(cx);
         let picked = self.mention.as_ref().map(|m| m.1).unwrap_or(0);
         let focused_hint = if self.uploading { Some(tr!("Uploading…", "Enviando…")) } else { None };

@@ -25,6 +25,12 @@ mod widgets;
 
 use gpui::{AppContext, Bounds, QuitMode, TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowOptions, size};
 
+/// Every video frame shown is a new picture of several megabytes (GPUI's images own their
+/// pixels). Windows' heap hands blocks that size straight back to the system, so each one costs
+/// fresh pages; mimalloc keeps them, about three times faster per 1080p frame.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// 1180×760, or less on a small screen, so the whole window and its title bar start in view
 /// with room around them.
 fn first_size(cx: &gpui::App) -> gpui::Size<gpui::Pixels> {
@@ -48,12 +54,13 @@ fn main() {
     // Closing the window never closes it (see `ui::tray`): it hides, or Harmony quits with it
     // still open so a call is left properly. Quitting when it is gone covers the platforms
     // where it can be closed some other way.
-    gpui_platform::application().with_quit_mode(QuitMode::LastWindowClosed).run(move |cx: &mut gpui::App| {
+    gpui_platform::application().with_assets(icons::Assets).with_quit_mode(QuitMode::LastWindowClosed).run(move |cx: &mut gpui::App| {
         if let Err(e) = cx.text_system().add_fonts(theme::fonts()) {
             log::warn!("fonts did not load: {e}");
         }
         text_field::bind_keys(cx);
-        cx.set_global(prefs::Prefs(store));
+        cx.set_global(prefs::Prefs::new(store));
+        prefs::init(cx);
         ui::updates::init(cx);
         ui::hotkeys::init(cx);
 

@@ -560,7 +560,7 @@ impl Settings {
 }
 
 fn card(t: &Theme) -> gpui::Div {
-    div().flex().flex_col().rounded(px(radius::CARD)).bg(t.layer).border_1().border_color(t.stroke).overflow_hidden()
+    crate::widgets::card(t).overflow_hidden()
 }
 
 fn group(name: &'static str, content: impl IntoElement, t: &Theme) -> gpui::Div {

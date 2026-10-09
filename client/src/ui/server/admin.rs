@@ -1244,7 +1244,7 @@ struct Act {
 }
 
 fn card(t: &Theme) -> gpui::Div {
-    div().flex().flex_col().gap(px(10.)).p(px(14.)).rounded(px(radius::CARD)).bg(t.layer).border_1().border_color(t.stroke)
+    crate::widgets::card(t).gap(px(10.)).p(px(14.))
 }
 
 fn readonly(value: String, t: &Theme) -> gpui::Div {
@@ -1666,11 +1666,11 @@ fn moved(order: &[i64], i: usize, delta: isize) -> Vec<i64> {
     o
 }
 
-fn reorder_clips(session: &Entity<Session>, order: Vec<i64>, cx: &mut App) {
+pub(super) fn reorder_clips(session: &Entity<Session>, order: Vec<i64>, cx: &mut App) {
     call(session, cx, move |api| Box::pin(async move { api.reorder_clips(&order).await }));
 }
 
-fn rename_clip(session: &Entity<Session>, clip: &Clip, window: &mut Window, cx: &mut App) {
+pub(super) fn rename_clip(session: &Entity<Session>, clip: &Clip, window: &mut Window, cx: &mut App) {
     let (session, id) = (session.clone(), clip.id);
     Ask::open(
         tr!("Rename the sound", "Renomear o som"),

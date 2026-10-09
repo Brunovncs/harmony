@@ -1,7 +1,7 @@
 [package]
 name = "harmony"
 description = "Harmony desktop client: voice, screen sharing and text chat for a group of friends"
-version = "4.0.9"
+version = "4.1.0"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT"
@@ -39,12 +39,15 @@ futures = "0.3"
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 log = "0.4"
+mimalloc = { version = "0.1", default-features = false }
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
 nokhwa = { version = "0.10", default-features = false, features = ["input-msmf"] }
 parking_lot = "0.12"
 # The window's HWND, to hide it to the notification area. Already in the tree through GPUI.
 raw-window-handle = "0.6"
 reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "charset", "http2"] }
+# The speakers' end of each stream's queue: the output callback never waits on a lock for it.
+rtrb = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -85,6 +88,14 @@ windows-core = "0.62"
 
 [build-dependencies]
 embed-resource = "3"
+
+# GPUI with video surfaces on Windows: YUV frames drawn and scaled by the GPU. What changed from
+# the published 0.3.7 is listed in vendor/GPUI_VENDORED.md.
+[patch.crates-io]
+gpui-pre = { path = "vendor/gpui-pre" }
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+# webrtc-sys with a Media Foundation H.264 encoder on Windows (vendor/webrtc-sys/VENDORED.md).
+webrtc-sys = { path = "vendor/webrtc-sys" }
 
 [profile.dev.package."*"]
 # Media code is unusable unoptimised: decoding, scaling and segmentation run every frame.

@@ -21,6 +21,11 @@ pub fn label(s: impl Into<SharedString>, t: &Theme) -> Div {
         .child(s.into().to_uppercase())
 }
 
+/// A raised box for a group of settings or figures inside a dialog.
+pub fn card(t: &Theme) -> Div {
+    div().flex().flex_col().rounded(px(radius::CARD)).bg(t.layer).border_1().border_color(t.stroke)
+}
+
 pub fn caption(s: impl Into<SharedString>, color: Hsla) -> Div {
     div().text_size(px(text::CAPTION.0)).line_height(px(text::CAPTION.1)).text_color(color).child(s.into())
 }
@@ -42,7 +47,7 @@ pub fn mono(s: impl Into<SharedString>, color: Hsla) -> Div {
 }
 
 pub fn icon(name: &'static str, size: f32, color: Hsla) -> Div {
-    div().flex_none().size(px(size)).child(gpui::img(crate::icons::image(name, color)).size(px(size)))
+    div().flex_none().size(px(size)).child(gpui::svg().path(crate::icons::path(name)).size(px(size)).text_color(color))
 }
 
 /// A pane: one of the rounded cards the window is laid out in.
@@ -355,6 +360,14 @@ pub fn slider<V: 'static>(
     cx: &mut Context<V>,
     on_change: impl Fn(&mut V, f32, &mut Context<V>) + 'static,
 ) -> Stateful<Div> {
+    let view = cx.entity().downgrade();
+    track(id, s, t, move |v, cx| {
+        let _ = view.update(cx, |this, cx| on_change(this, v, cx));
+    })
+}
+
+/// A slider for whoever holds no view of their own: `on_change` gets the new value, 0..=1.
+pub fn track(id: impl Into<ElementId>, s: Slider, t: &Theme, on_change: impl Fn(f32, &mut App) + 'static) -> Stateful<Div> {
     let id = id.into();
     let bounds: Rc<Cell<Bounds<Pixels>>> = Rc::new(Cell::new(Bounds::default()));
     let on_change = Rc::new(on_change);
@@ -402,17 +415,14 @@ pub fn slider<V: 'static>(
                 .border_color(s.color)
                 .shadow_sm(),
         )
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                c1(this, fraction(b1.get(), e.position.x), cx);
-                cx.stop_propagation();
-            }),
-        )
+        .on_mouse_down(MouseButton::Left, move |e: &MouseDownEvent, _, cx| {
+            c1(fraction(b1.get(), e.position.x), cx);
+            cx.stop_propagation();
+        })
         .on_drag(SliderDrag(id), |d, _, _, cx| cx.new(|_| SliderDrag(d.0.clone())))
-        .on_drag_move(cx.listener(move |this, e: &DragMoveEvent<SliderDrag>, _, cx| {
+        .on_drag_move(move |e: &DragMoveEvent<SliderDrag>, _, cx| {
             if e.drag(cx).0 == mine {
-                c2(this, fraction(e.bounds, e.event.position.x), cx);
+                c2(fraction(e.bounds, e.event.position.x), cx);
             }
-        }))
+        })
 }

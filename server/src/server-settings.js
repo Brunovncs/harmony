@@ -13,6 +13,7 @@ import { secretsMatch } from './auth.js';
 const NAME_KEY = 'server_name';
 const DOOR_KEY = 'door_password';
 const ICON_KEY = 'server_icon';
+const LEGACY_LOGO_KEY = 'server_logo';
 
 /** What a server with no name of its own is called. */
 export const DEFAULT_NAME = 'Harmony';
@@ -51,6 +52,18 @@ export class ServerSettings {
   constructor(meta, { envPassword = '' } = {}) {
     this.#meta = meta;
     this.#envPassword = envPassword;
+
+    // A server that ran the other line kept its picture as `server_logo`.
+    // Same thing, an upload hash holding one reference, so it moves across
+    // as it is -- reference included -- rather than living under two names.
+    // Should both be set, the icon wins and the logo's file keeps a stray
+    // reference: one small picture that is never evicted, not worth an
+    // uploads module in here to release it.
+    const logo = meta.get(LEGACY_LOGO_KEY);
+    if (logo) {
+      if (!this.iconHash) meta.set(ICON_KEY, logo);
+      meta.delete(LEGACY_LOGO_KEY);
+    }
   }
 
   get name() {
@@ -167,7 +180,11 @@ export class ServerSettings {
   publicView() {
     return {
       name: this.name,
-      iconHash: this.iconHash,
+      // The picture's hash, under the name the Electron, browser and Android
+      // clients know. Never also as `iconHash`: native clients from 4.0.8
+      // take `logo` for `iconHash` and refuse a reply with both, and those
+      // before 4.0.8 only go without the picture until they update.
+      logo: this.iconHash,
       passwordRequired: this.passwordRequired,
       restartRequired: this.restartRequired,
     };

@@ -629,7 +629,7 @@ impl ServerView {
                     div()
                         .px(px(10.))
                         .pb(px(8.))
-                        .child(VolumeSlider::new(gain, move |g, cx| voice.update(cx, |v, cx| v.set_volume(user, g, cx))).render(t, cx))
+                        .child(VolumeSlider::new(("user-volume", user as u64), gain, move |g, cx| voice.update(cx, |v, cx| v.set_volume(user, g, cx))).render(t, cx))
                         .into_any_element()
                 }));
                 let muted_for_me = volume_of(user) == 0.;
@@ -1020,14 +1020,15 @@ fn signal_bars(ping: Option<u32>, t: &Theme) -> gpui::Div {
 
 /// The volume slider used in menus and tiles: 0 to 350%, a mark at 100%, amber past it.
 pub struct VolumeSlider<F: Fn(f32, &mut App) + 'static> {
+    id: gpui::ElementId,
     gain: f32,
     on_change: F,
     width: Pixels,
 }
 
 impl<F: Fn(f32, &mut App) + 'static> VolumeSlider<F> {
-    pub fn new(gain: f32, on_change: F) -> Self {
-        VolumeSlider { gain, on_change, width: px(220.) }
+    pub fn new(id: impl Into<gpui::ElementId>, gain: f32, on_change: F) -> Self {
+        VolumeSlider { id: id.into(), gain, on_change, width: px(220.) }
     }
 
     pub fn width(mut self, width: Pixels) -> Self {
@@ -1036,59 +1037,10 @@ impl<F: Fn(f32, &mut App) + 'static> VolumeSlider<F> {
     }
 
     pub fn render(self, t: &Theme, _: &mut App) -> AnyElement {
-        let on_change = std::rc::Rc::new(self.on_change);
-        let gain = self.gain;
-        let color = if gain > 1. { t.caution } else { t.accent };
-        let id = gpui::ElementId::from(("volume", (gain * 1000.) as u64));
-        let bounds: std::rc::Rc<std::cell::Cell<gpui::Bounds<Pixels>>> = Default::default();
-        let (b1, b2) = (bounds.clone(), bounds.clone());
-        let (c1, c2) = (on_change.clone(), on_change.clone());
-        let to_gain = move |b: gpui::Bounds<Pixels>, x: Pixels| {
-            let w = f32::from(b.size.width).max(1.);
-            let f = (f32::from(x - b.origin.x) / w).clamp(0., 1.);
-            ((f * MAX_GAIN) / 0.05).round() * 0.05
-        };
-        div()
-            .id(id)
-            .relative()
-            .w(self.width)
-            .h(px(20.))
-            .flex()
-            .items_center()
-            .cursor_pointer()
-            .child(gpui::canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {}).absolute().inset_0())
-            .child(
-                div()
-                    .relative()
-                    .w_full()
-                    .h(px(4.))
-                    .rounded(px(2.))
-                    .bg(t.well)
-                    .child(div().absolute().left_0().top_0().h_full().rounded(px(2.)).bg(color).w(gpui::relative(gain / MAX_GAIN)))
-                    .child(div().absolute().top(px(-3.)).h(px(10.)).w(px(2.)).bg(t.text3).left(gpui::relative(1. / MAX_GAIN))),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top(px(3.))
-                    .size(px(14.))
-                    .ml(px(-7.))
-                    .left(gpui::relative(gain / MAX_GAIN))
-                    .rounded_full()
-                    .bg(gpui::white())
-                    .border_2()
-                    .border_color(color),
-            )
-            .on_mouse_down(MouseButton::Left, move |e: &MouseDownEvent, _, cx| {
-                c1(to_gain(b1.get(), e.position.x), cx);
-                cx.stop_propagation();
-            })
-            .on_mouse_move(move |e: &gpui::MouseMoveEvent, _, cx| {
-                if e.pressed_button == Some(MouseButton::Left) {
-                    c2(to_gain(b2.get(), e.position.x), cx);
-                }
-            })
-            .into_any_element()
+        let on_change = self.on_change;
+        let color = if self.gain > 1. { t.caution } else { t.accent };
+        let s = Slider { value: self.gain / MAX_GAIN, mark: Some(1. / MAX_GAIN), color };
+        track(self.id, s, t, move |f, cx| on_change(((f * MAX_GAIN) / 0.05).round() * 0.05, cx)).w(self.width).into_any_element()
     }
 }
 

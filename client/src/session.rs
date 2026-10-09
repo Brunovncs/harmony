@@ -150,10 +150,47 @@ pub enum Picture {
     Failed,
 }
 
+/// A picture's frames, each its own image, stepped by the clock rather than by GPUI. GPUI's `img`
+/// animates a many-framed image by asking for a new frame on every display refresh, which draws
+/// the whole chat again at 60-144 Hz for a GIF that changes ten times a second; `Session::picture`
+/// hands out the frame due now and notes when the next one is (`take_frame_due`).
+pub struct Frames {
+    images: Vec<Arc<RenderImage>>,
+    /// When each frame ends, in ms from the start of a loop.
+    ends: Vec<u32>,
+}
+
+impl Frames {
+    fn still(image: Arc<RenderImage>) -> Frames {
+        Frames { images: vec![image], ends: vec![0] }
+    }
+
+    /// The frame showing at `now`, and when it gives way to the next. Every copy of a GIF keeps
+    /// one clock, so they move together.
+    fn at(&self, now: Instant) -> (&Arc<RenderImage>, Option<Instant>) {
+        static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        let total = *self.ends.last().unwrap_or(&0);
+        if self.images.len() < 2 || total == 0 {
+            return (&self.images[0], None);
+        }
+        let epoch = *EPOCH.get_or_init(|| now);
+        let (i, left) = frame_at(&self.ends, now.saturating_duration_since(epoch).as_millis());
+        (&self.images[i], Some(now + Duration::from_millis(left as u64)))
+    }
+}
+
+/// Which frame shows `since` ms into the animation, and for how many ms more.
+fn frame_at(ends: &[u32], since: u128) -> (usize, u32) {
+    let total = *ends.last().unwrap_or(&0);
+    let into = (since % total.max(1) as u128) as u32;
+    let i = ends.partition_point(|&end| end <= into).min(ends.len() - 1);
+    (i, ends[i] - into)
+}
+
 /// A picture as the session holds it.
 enum Slot {
     Loading,
-    Ready(Arc<RenderImage>),
+    Ready(Arc<Frames>),
     /// `retry_at: None` when trying again would not help (not a picture, gone from the server).
     Failed {
         retry_at: Option<Instant>,
@@ -268,6 +305,8 @@ pub struct Session {
     /// How each private call ended ("ended", "missed", "declined"), for saying so.
     pub call_outcomes: HashMap<ConversationId, String>,
     pictures: Lru<String, Slot>,
+    /// When the soonest animated frame handed out since `take_frame_due` gives way to the next.
+    frame_due: Option<Instant>,
     _pump: Task<()>,
 }
 
@@ -336,6 +375,7 @@ impl Session {
                 unread: HashSet::new(),
                 viewing: None,
                 pictures: Lru::new(PICTURE_BUDGET),
+                frame_due: None,
                 _pump: pump,
             };
             s.refresh_lists(cx);
@@ -418,15 +458,21 @@ impl Session {
             }
             realtime::Event::Down => self.link = Link::Reconnecting,
             realtime::Event::Rejected => cx.emit(SessionEvent::SignedOut(SignOutReason::Expired)),
-            realtime::Event::Push(v) => self.on_push(v, cx),
+            realtime::Event::Push(v) => {
+                if !self.on_push(v, cx) {
+                    return;
+                }
+            }
         }
         cx.notify();
     }
 
-    fn on_push(&mut self, v: Value, cx: &mut Context<Self>) {
+    /// Whether the push changed anything drawn; one that only asks for something (a clip to
+    /// play, a toast) or that this client has no use for leaves the window alone.
+    fn on_push(&mut self, v: Value, cx: &mut Context<Self>) -> bool {
         let kind = v.get("type").and_then(Value::as_str).unwrap_or("").to_string();
         if self.on_private_push(&kind, &v, cx) {
-            return;
+            return true;
         }
         let parse = |key: &str| v.get(key).cloned().unwrap_or(Value::Null);
         match kind.as_str() {
@@ -521,10 +567,14 @@ impl Session {
                     self.users = users.into_iter().map(|u| (u.id, u)).collect();
                 }
             }
-            "kicked" => cx.emit(SessionEvent::SignedOut(SignOutReason::Removed)),
+            "kicked" => {
+                cx.emit(SessionEvent::SignedOut(SignOutReason::Removed));
+                return false;
+            }
             "soundpad:play" => {
                 let hash = v.get("hash").and_then(Value::as_str).unwrap_or("").to_string();
                 cx.emit(SessionEvent::SoundpadPlay { hash });
+                return false;
             }
             "voice:moved" => {
                 let to = v.get("channelId").and_then(Value::as_i64);
@@ -534,9 +584,11 @@ impl Session {
                     None => trf!("{} disconnected you from voice.", "{} desconectou você da voz.", by),
                 }));
                 cx.emit(SessionEvent::Moved(to));
+                return false;
             }
-            _ => {}
+            _ => return false,
         }
+        true
     }
 
     // Lookups.
@@ -610,7 +662,14 @@ impl Session {
     pub fn picture_from(&mut self, hash: &str, how: Fetch, cx: &mut Context<Self>) -> Picture {
         let tries = match self.pictures.get(hash) {
             Some(Slot::Loading) => return Picture::Loading,
-            Some(Slot::Ready(img)) => return Picture::Ready(img.clone()),
+            Some(Slot::Ready(frames)) => {
+                let (img, next) = frames.at(Instant::now());
+                let img = img.clone();
+                if let Some(next) = next {
+                    self.frame_due = Some(self.frame_due.map_or(next, |d| d.min(next)));
+                }
+                return Picture::Ready(img);
+            }
             Some(Slot::Failed { retry_at: Some(at), tries }) if Instant::now() >= *at => *tries,
             Some(Slot::Failed { .. }) => return Picture::Failed,
             None => 0,
@@ -621,8 +680,8 @@ impl Session {
             let key = h.clone();
             let got = core::run(fetch_attachment(api, cache, h, how)).await;
             let (slot, cost) = match got {
-                Ok((bytes, ct)) => match cx.background_executor().spawn(async move { decode_picture(&bytes, &ct, THUMBNAIL) }).await {
-                    Ok((img, cost)) => (Slot::Ready(img), cost),
+                Ok((bytes, ct)) => match cx.background_executor().spawn(async move { decode_frames(&bytes, &ct, THUMBNAIL) }).await {
+                    Ok((frames, cost)) => (Slot::Ready(Arc::new(frames)), cost),
                     Err(e) => {
                         log::info!("picture {key} did not decode: {e}");
                         (Slot::Failed { retry_at: None, tries }, 0)
@@ -650,10 +709,18 @@ impl Session {
         Picture::Loading
     }
 
+    /// When an animated picture handed out since the last call changes frame: whoever drew it
+    /// draws again then.
+    pub fn take_frame_due(&mut self) -> Option<Instant> {
+        self.frame_due.take()
+    }
+
     fn put_picture(&mut self, hash: String, slot: Slot, cost: usize, cx: &mut Context<Self>) {
         for old in self.pictures.insert(hash, slot, cost) {
-            if let Slot::Ready(img) = old {
-                cx.drop_image(img, None);
+            if let Slot::Ready(frames) = old {
+                for img in &frames.images {
+                    cx.drop_image(img.clone(), None);
+                }
             }
         }
     }
@@ -922,8 +989,33 @@ pub fn fit_within(w: u32, h: u32, fit: (u32, u32)) -> (u32, u32) {
 }
 
 /// Decodes a picture no bigger than `fit`, as the BGRA frames GPUI draws, and what it costs in
-/// bytes. Animated GIFs keep their frames, as many as fit in 64 MB. Slow: run it off the UI thread.
+/// bytes. Animated GIFs keep their frames, as many as fit in 64 MB, and GPUI animates them. Slow:
+/// run it off the UI thread.
 pub fn decode_picture(bytes: &[u8], content_type: &str, fit: (u32, u32)) -> anyhow::Result<(Arc<RenderImage>, usize)> {
+    let (frames, cost) = decode_bgra(bytes, content_type, fit)?;
+    Ok((Arc::new(RenderImage::new(frames)), cost))
+}
+
+/// As `decode_picture`, with each frame its own image, for `Frames` to step through.
+fn decode_frames(bytes: &[u8], content_type: &str, fit: (u32, u32)) -> anyhow::Result<(Frames, usize)> {
+    let (frames, cost) = decode_bgra(bytes, content_type, fit)?;
+    let mut out = Frames { images: Vec::with_capacity(frames.len()), ends: Vec::with_capacity(frames.len()) };
+    let mut end = 0u32;
+    for frame in frames {
+        let (n, d) = frame.delay().numer_denom_ms();
+        // As browsers do: a GIF that asks for no delay at all (or 10 ms) plays at 10 per second.
+        let ms = n.checked_div(d).unwrap_or(0);
+        end += if ms < 20 { 100 } else { ms };
+        out.images.push(Arc::new(RenderImage::new(smallvec::smallvec![frame])));
+        out.ends.push(end);
+    }
+    if out.images.len() == 1 {
+        return Ok((Frames::still(out.images.remove(0)), cost));
+    }
+    Ok((out, cost))
+}
+
+fn decode_bgra(bytes: &[u8], content_type: &str, fit: (u32, u32)) -> anyhow::Result<(Vec<image::Frame>, usize)> {
     use image::{AnimationDecoder, Frame, ImageDecoder, RgbaImage};
     use std::io::Cursor;
     const MAX_FRAMES_BYTES: usize = 64 << 20;
@@ -961,7 +1053,7 @@ pub fn decode_picture(bytes: &[u8], content_type: &str, fit: (u32, u32)) -> anyh
         cost = buf.len();
         frames.push(Frame::new(bgra(buf)));
     }
-    Ok((Arc::new(RenderImage::new(frames)), cost))
+    Ok((frames, cost))
 }
 
 #[cfg(test)]
@@ -970,6 +1062,17 @@ mod tests {
 
     fn msg(id: MessageId, body: &str) -> Message {
         serde_json::from_value(serde_json::json!({ "id": id, "channelId": 1, "userId": 1, "body": body })).unwrap()
+    }
+
+    #[test]
+    fn animation_frames_follow_their_delays_and_loop() {
+        let ends = [100, 150, 400];
+        assert_eq!(frame_at(&ends, 0), (0, 100));
+        assert_eq!(frame_at(&ends, 99), (0, 1));
+        assert_eq!(frame_at(&ends, 100), (1, 50));
+        assert_eq!(frame_at(&ends, 399), (2, 1));
+        assert_eq!(frame_at(&ends, 400), (0, 100));
+        assert_eq!(frame_at(&ends, 4_000_120), (1, 30));
     }
 
     fn page(ids: impl IntoIterator<Item = MessageId>) -> History {

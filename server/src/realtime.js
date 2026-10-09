@@ -536,11 +536,25 @@ export class Realtime {
     try { ws.send(JSON.stringify(payload)); } catch { /* closing */ }
   }
 
+  /**
+   * Send one payload to every socket `wants` picks, stringified once.
+   *
+   * A broadcast used to serialise the same object once per recipient, which
+   * on a message with a long roster or channel list is most of its cost.
+   * Lazily, and inside the try, so a payload nobody receives is never
+   * serialised and one that will not serialise fails as quietly as before.
+   */
+  #fanOut(payload, wants) {
+    let text;
+    for (const [ws, client] of this.#clients) {
+      if (!wants(client) || ws.readyState !== ws.OPEN) continue;
+      try { ws.send(text ??= JSON.stringify(payload)); } catch { /* closing */ }
+    }
+  }
+
   /** Send to every socket a user has open. */
   toUser(userId, payload) {
-    for (const [ws, client] of this.#clients) {
-      if (client.user?.id === userId) this.#send(ws, payload);
-    }
+    this.#fanOut(payload, (client) => client.user?.id === userId);
   }
 
   /**
@@ -562,9 +576,7 @@ export class Realtime {
 
   /** Send to everyone authenticated. */
   broadcast(payload) {
-    for (const [ws, client] of this.#clients) {
-      if (client.user) this.#send(ws, payload);
-    }
+    this.#fanOut(payload, (client) => Boolean(client.user));
   }
 
   /**
@@ -575,9 +587,7 @@ export class Realtime {
    * channel, and that question belongs with the routes that already ask it.
    */
   broadcastWhere(payload, allow) {
-    for (const [ws, client] of this.#clients) {
-      if (client.user && allow(client.user)) this.#send(ws, payload);
-    }
+    this.#fanOut(payload, (client) => Boolean(client.user) && allow(client.user));
   }
 
   broadcastRoster(channelId) {
@@ -606,8 +616,13 @@ export class Realtime {
     const byHost = new Map();
     for (const [ws, client] of this.#clients) {
       if (!client.user) continue;
-      if (!byHost.has(client.host)) byHost.set(client.host, streamsFor(client.host));
-      this.#send(ws, { type: 'streams', streams: byHost.get(client.host) });
+      if (!byHost.has(client.host)) byHost.set(client.host, { streams: streamsFor(client.host) });
+      const forHost = byHost.get(client.host);
+      if (ws.readyState !== ws.OPEN) continue;
+      // Stringified once per Host too, the same way #fanOut does it.
+      try {
+        ws.send(forHost.text ??= JSON.stringify({ type: 'streams', streams: forHost.streams }));
+      } catch { /* closing */ }
     }
   }
 
