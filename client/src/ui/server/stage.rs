@@ -303,8 +303,8 @@ impl ServerView {
             .child(
                 div()
                     .absolute()
-                    .left(px(10.))
-                    .bottom(px(10.))
+                    .left(px(16.))
+                    .bottom(px(12.))
                     .flex()
                     .items_center()
                     .gap(px(6.))
@@ -358,10 +358,10 @@ impl ServerView {
                     .when(has_sound, |d| {
                         let tile = t3.clone();
                         d.child(
-                            div()
-                                .w(px(120.))
-                                .px(px(4.))
-                                .child(VolumeSlider::new(gain, move |g, cx| tile.update(cx, |t, cx| t.set_gain(g, cx))).render(t, cx)),
+                            // Room either side for the knob, which sits half past each end.
+                            div().px(px(8.)).child(
+                                VolumeSlider::new(gain, move |g, cx| tile.update(cx, |t, cx| t.set_gain(g, cx))).width(px(112.)).render(t, cx),
+                            ),
                         )
                     })
                     .child(

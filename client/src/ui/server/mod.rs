@@ -757,11 +757,17 @@ fn signal_bars(ping: Option<u32>, t: &Theme) -> gpui::Div {
 pub struct VolumeSlider<F: Fn(f32, &mut App) + 'static> {
     gain: f32,
     on_change: F,
+    width: Pixels,
 }
 
 impl<F: Fn(f32, &mut App) + 'static> VolumeSlider<F> {
     pub fn new(gain: f32, on_change: F) -> Self {
-        VolumeSlider { gain, on_change }
+        VolumeSlider { gain, on_change, width: px(220.) }
+    }
+
+    pub fn width(mut self, width: Pixels) -> Self {
+        self.width = width;
+        self
     }
 
     pub fn render(self, t: &Theme, _: &mut App) -> AnyElement {
@@ -780,7 +786,7 @@ impl<F: Fn(f32, &mut App) + 'static> VolumeSlider<F> {
         div()
             .id(id)
             .relative()
-            .w(px(220.))
+            .w(self.width)
             .h(px(20.))
             .flex()
             .items_center()
