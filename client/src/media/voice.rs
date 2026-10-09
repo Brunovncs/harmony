@@ -222,6 +222,10 @@ pub struct Voice {
     /// An admin holds you muted; the server refuses the microphone until they let go.
     force_muted: bool,
     mic: Option<Arc<Link>>,
+    /// The microphone's first packets have had time to reach the media server, which only then
+    /// lets anyone read the path; announced before that, a subscriber gets a 404, and the Electron
+    /// client waits 4 s to try again.
+    mic_readable: bool,
     /// The microphone publish in flight, by generation.
     mic_attempt: Option<u64>,
     mic_backoff: Backoff,
@@ -295,6 +299,7 @@ impl Voice {
             deafened,
             force_muted: false,
             mic: None,
+            mic_readable: false,
             mic_attempt: None,
             mic_backoff: Backoff::default(),
             mic_guard: (!muted).then(|| a.acquire_mic()),
@@ -375,9 +380,30 @@ impl Voice {
                             };
                             let _ = futures::executor::block_on(source.capture_frame(&frame));
                         })));
-                        v.mic = Some(Arc::new(link));
+                        let link = Arc::new(link);
+                        v.mic = Some(link.clone());
                         v.mic_backoff.reset();
-                        v.announce(cx);
+                        cx.spawn(async move |this, cx| {
+                            let probe = link.clone();
+                            let rtt = core::run(async move {
+                                let start = Instant::now();
+                                while probe.packets_sent().await == 0 && start.elapsed() < Duration::from_secs(3) {
+                                    tokio::time::sleep(Duration::from_millis(50)).await;
+                                }
+                                probe.rtt_ms().await
+                            })
+                            .await;
+                            // A round trip: the packets still have to cross to the server.
+                            let crossing = rtt.unwrap_or(200).clamp(100, 1000);
+                            cx.background_executor().timer(Duration::from_millis(crossing as u64)).await;
+                            let _ = this.update(cx, |v, cx| {
+                                if v.mic.as_ref().is_some_and(|m| Arc::ptr_eq(m, &link)) {
+                                    v.mic_readable = true;
+                                    v.announce(cx);
+                                }
+                            });
+                        })
+                        .detach();
                     }
                     Err(e) => {
                         v.mic_backoff.fail(Instant::now());
@@ -398,6 +424,7 @@ impl Voice {
 
     fn drop_mic(&mut self) {
         audio::audio().set_mic_sink(None);
+        self.mic_readable = false;
         self.mic_attempt = None;
         if let Some(link) = self.mic.take() {
             link.close();
@@ -660,7 +687,7 @@ impl Voice {
         let me = self.session.read(cx).me.id;
         // Not in the roster yet, or a roster from before a rejoin.
         let Some(mine) = self.roster.iter().find(|m| m.user_id == me && Some(m.mid) == self.mid) else { return };
-        let live = [("v", self.mic.is_some()), ("c", self.share_live(TileKind::Camera)), ("s", self.share_live(TileKind::Screen))];
+        let live = [("v", self.mic.is_some() && self.mic_readable), ("c", self.share_live(TileKind::Camera)), ("s", self.share_live(TileKind::Screen))];
         let now = Instant::now();
         let rt = self.session.read(cx).realtime.clone();
         let channel = self.channel;

@@ -99,6 +99,17 @@ pub enum Route {
     Relay,
 }
 
+/// The round trip of the nominated candidate pair, the one the media takes; the others only
+/// carry connectivity checks.
+fn nominated_rtt_ms(stats: &[RtcStats]) -> Option<u32> {
+    stats.iter().find_map(|s| match s {
+        RtcStats::CandidatePair(p) if p.candidate_pair.nominated && p.candidate_pair.current_round_trip_time > 0. => {
+            Some((p.candidate_pair.current_round_trip_time * 1000.).round() as u32)
+        }
+        _ => None,
+    })
+}
+
 /// One live connection, publishing or watching. Dropping the last handle hangs it up.
 pub struct Link {
     pub pc: PeerConnection,
@@ -146,12 +157,7 @@ impl Link {
 
     /// The round trip of the connection's active candidate pair, in ms.
     pub async fn rtt_ms(&self) -> Option<u32> {
-        self.stats().await.into_iter().find_map(|s| match s {
-            RtcStats::CandidatePair(p) if p.candidate_pair.current_round_trip_time > 0. => {
-                Some((p.candidate_pair.current_round_trip_time * 1000.).round() as u32)
-            }
-            _ => None,
-        })
+        nominated_rtt_ms(&self.stats().await)
     }
 
     /// How the media travels, from the nominated candidate pair.
@@ -230,19 +236,38 @@ impl Link {
         }
     }
 
+    /// Packets sent over all outbound streams.
+    pub async fn packets_sent(&self) -> u64 {
+        self.stats()
+            .await
+            .into_iter()
+            .map(|s| match s {
+                RtcStats::OutboundRtp(o) => o.sent.packets_sent,
+                _ => 0,
+            })
+            .sum()
+    }
+
     /// Packets received over all inbound streams, to notice a connection gone quiet.
     pub async fn packets_received(&self) -> u64 {
         let stats = self.stats().await;
         if log::log_enabled!(log::Level::Debug) {
-            let kinds: Vec<String> = stats.iter().map(|s| format!("{s:?}").chars().take(18).collect()).collect();
-            let bytes: u64 = stats
-                .iter()
-                .map(|s| match s {
-                    RtcStats::Transport(t) => t.transport.bytes_received,
-                    _ => 0,
-                })
-                .sum();
-            log::debug!("inbound stats: {} entries, transport bytes {bytes}, kinds {kinds:?}", stats.len());
+            let rtt = nominated_rtt_ms(&stats);
+            for s in &stats {
+                let RtcStats::InboundRtp(i) = s else { continue };
+                let (r, d) = (&i.received, &i.inbound);
+                let buffer = if d.jitter_buffer_emitted_count > 0 { d.jitter_buffer_delay / d.jitter_buffer_emitted_count as f64 } else { 0. };
+                let concealed = if d.total_samples_received > 0 { d.concealed_samples as f64 / d.total_samples_received as f64 } else { 0. };
+                log::debug!(
+                    "inbound {}: {} packets, {} lost, jitter {:.0} ms, buffer {:.0} ms, concealed {:.1}%, rtt {rtt:?} ms",
+                    i.stream.kind,
+                    r.packets_received,
+                    r.packets_lost,
+                    r.jitter * 1000.,
+                    buffer * 1000.,
+                    concealed * 100.
+                );
+            }
         }
         stats
             .into_iter()
