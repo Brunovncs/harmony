@@ -6,7 +6,7 @@ use super::rich::{self, Lookup};
 use crate::core::types::*;
 use crate::core::{self};
 use crate::prefs::{prefs, set_prefs};
-use crate::session::{Picture, Session, SessionEvent, decode_picture};
+use crate::session::{Fetch, Picture, Session, SessionEvent, decode_picture};
 use crate::text_field::{TextField, TextFieldEvent};
 use crate::theme::{MONO, Theme, current, px, radius};
 use crate::ui::overlay::{self, Ask, Dismiss, Field, dialog_card};
@@ -33,9 +33,15 @@ struct Pending {
     preview: Option<Arc<RenderImage>>,
 }
 
+/// What a chat pane asks of the window around it.
+pub enum ChatEvent {
+    /// Ring the other person of this private conversation.
+    Call(ConversationId),
+}
+
 pub struct ChatView {
     session: Entity<Session>,
-    pub channel: ChannelId,
+    pub room: Room,
     list: ListState,
     shown: Vec<MessageId>,
     composer: Entity<TextField>,
@@ -63,10 +69,11 @@ impl Focusable for ChatView {
     }
 }
 
+impl EventEmitter<ChatEvent> for ChatView {}
+
 impl ChatView {
-    pub fn new(session: Entity<Session>, channel: ChannelId, window: &mut Window, cx: &mut Context<Self>) -> ChatView {
-        let name = session.read(cx).channel(channel).map(|c| c.name.clone()).unwrap_or_default();
-        let composer = cx.new(|cx| TextField::new(cx, true, 4000).lines(1, 10).enter_submits().bare().placeholder(composer_hint(&name)));
+    pub fn new(session: Entity<Session>, room: Room, window: &mut Window, cx: &mut Context<Self>) -> ChatView {
+        let composer = cx.new(|cx| TextField::new(cx, true, 4000).lines(1, 10).enter_submits().bare().placeholder(composer_hint(room, session.read(cx))));
         let search = cx.new(|cx| TextField::new(cx, false, 200).bare().placeholder(tr!("Search this channel", "Buscar neste canal")));
         let list = ListState::new(0, ListAlignment::Bottom, gpui::px(600.));
         list.set_follow_mode(gpui::FollowMode::Tail);
@@ -82,8 +89,8 @@ impl ChatView {
             }),
         ];
         subs.push(cx.subscribe(&session, |this, _, ev: &SessionEvent, cx| {
-            if let SessionEvent::Message(m) = ev
-                && m.channel_id == this.channel
+            if let SessionEvent::Message(room, m) = ev
+                && *room == this.room
                 && m.user_id == Some(this.session.read(cx).me.id)
             {
                 this.list.scroll_to_end();
@@ -96,14 +103,14 @@ impl ChatView {
             if e.visible_range.start < 3
                 && let Some(this) = weak.upgrade()
             {
-                let (session, ch) = (this.read(cx).session.clone(), this.read(cx).channel);
-                cx.defer(move |cx| session.update(cx, |s, cx| s.load_older(ch, cx)));
+                let (session, room) = (this.read(cx).session.clone(), this.read(cx).room);
+                cx.defer(move |cx| session.update(cx, |s, cx| s.load_older(room, cx)));
             }
         });
-        session.update(cx, |s, cx| s.open(channel, cx));
+        session.update(cx, |s, cx| s.open(room, cx));
         let mut v = ChatView {
             session,
-            channel,
+            room,
             list,
             shown: Vec::new(),
             composer,
@@ -130,7 +137,33 @@ impl ChatView {
         if let Some((_, r)) = &self.results {
             return r;
         }
-        self.session.read(cx).chats.get(&self.channel).map(|l| l.messages.as_slice()).unwrap_or(&[])
+        self.session.read(cx).chats.get(&self.room).map(|l| l.messages.as_slice()).unwrap_or(&[])
+    }
+
+    /// The private conversation on screen, and who it is with.
+    fn dm(&self, cx: &App) -> Option<(ConversationId, UserId)> {
+        let id = self.room.conversation()?;
+        Some((id, self.session.read(cx).peer_of(id)?))
+    }
+
+    /// Whether this is somewhere you can write right now, and if not, why.
+    fn blocked_reason(&self, cx: &App) -> Option<String> {
+        let (_, peer) = self.dm(cx)?;
+        let s = self.session.read(cx);
+        let name = s.display_name(Some(peer), None);
+        if s.blocked.contains(&peer) {
+            Some(trf!("You blocked {}. Unblock them to write here again.", "Você bloqueou {}. Desbloqueie para voltar a escrever aqui.", name))
+        } else if !s.vault.ready() {
+            Some(tr!("Private messages are locked on this computer.", "As mensagens privadas estão trancadas neste computador.").into())
+        } else if !s.vault.peer_has_key(peer) {
+            Some(trf!(
+                "{} can't receive private messages yet: they need to update Harmony and open it once.",
+                "{} ainda não pode receber mensagens privadas: precisa atualizar o Harmony e abri-lo uma vez.",
+                name
+            ))
+        } else {
+            None
+        }
     }
 
     /// Keeps the list in step with the messages, splicing so the scroll position holds.
@@ -178,12 +211,23 @@ impl ChatView {
         self.sending = true;
         let pending = self.pending.take();
         self.uploading = pending.is_some();
-        let (api, cache, channel) = {
-            let s = self.session.read(cx);
-            (s.api.clone(), s.cache.clone(), self.channel)
-        };
         self.composer.update(cx, |f, cx| f.clear(cx));
         cx.notify();
+        if let Room::Dm(conversation) = self.room {
+            let file = pending.map(|p| crate::session::Outgoing { bytes: p.bytes, name: p.name, mime: p.content_type });
+            let task = self.session.update(cx, |s, cx| s.send_dm(conversation, text.clone(), file, cx));
+            cx.spawn(async move |this, cx| {
+                let result = task.await;
+                let _ = this.update(cx, |this, cx| this.sent(result.err().map(|e| (e.message, text)), cx));
+            })
+            .detach();
+            return;
+        }
+        let Room::Channel(channel) = self.room else { return };
+        let (api, cache) = {
+            let s = self.session.read(cx);
+            (s.api.clone(), s.cache.clone())
+        };
         cx.spawn(async move |this, cx| {
             let result = core::run(async move {
                 let attachment = match pending {
@@ -203,20 +247,27 @@ impl ChatView {
             })
             .await;
             let _ = this.update(cx, |this, cx| {
-                this.sending = false;
-                this.uploading = false;
-                if let Err(e) = result {
-                    // Give the text back so nothing typed is lost.
-                    if let serde_json::Value::String(text) = &e.body {
-                        let text = text.clone();
-                        this.composer.update(cx, |f, cx| f.set_text(&text, cx));
-                    }
-                    overlay::toast(e.message, cx);
-                }
-                cx.notify();
+                let failed = result.err().map(|e| {
+                    let text = if let serde_json::Value::String(text) = &e.body { text.clone() } else { String::new() };
+                    (e.message, text)
+                });
+                this.sent(failed, cx)
             });
         })
         .detach();
+    }
+
+    /// A send finished. On failure the text goes back in the box, so nothing typed is lost.
+    fn sent(&mut self, failed: Option<(String, String)>, cx: &mut Context<Self>) {
+        self.sending = false;
+        self.uploading = false;
+        if let Some((why, text)) = failed {
+            if self.composer.read(cx).text().is_empty() {
+                self.composer.update(cx, |f, cx| f.set_text(&text, cx));
+            }
+            overlay::toast(why, cx);
+        }
+        cx.notify();
     }
 
     fn attach(&mut self, cx: &mut Context<Self>) {
@@ -312,6 +363,10 @@ impl ChatView {
     // @mentions.
 
     fn update_mention(&mut self, cx: &mut Context<Self>) {
+        // Two people: there is nobody to point at.
+        if self.room.conversation().is_some() {
+            return;
+        }
         let text = self.composer.read(cx).text();
         let word = text.rsplit(|c: char| c.is_whitespace()).next().unwrap_or("");
         self.mention = word.strip_prefix('@').filter(|w| !w.contains('@')).map(|w| (w.to_lowercase(), 0));
@@ -357,7 +412,7 @@ impl ChatView {
             return;
         }
         let api = self.session.read(cx).api.clone();
-        let channel = self.channel;
+        let Room::Channel(channel) = self.room else { return };
         self.searching = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(250)).await;
             let q2 = q.clone();
@@ -396,7 +451,7 @@ impl ChatView {
             .detach();
         } else {
             // Not loaded yet: fetch older pages, then try again.
-            let ch = self.channel;
+            let ch = self.room;
             self.session.update(cx, |s, cx| s.load_older(ch, cx));
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(Duration::from_millis(600)).await;
@@ -419,6 +474,11 @@ impl ChatView {
         let mine = m.reactions.iter().any(|r| r.emoji == emoji && r.user_ids.contains(&me));
         let id = m.id;
         remember_emoji(&emoji, cx);
+        if self.room.conversation().is_some() {
+            let task = self.session.update(cx, |s, cx| s.react_dm(m, emoji, cx));
+            toast_failure(task, cx);
+            return;
+        }
         self.session.update(cx, |s, cx| s.call(cx, move |api| Box::pin(async move { api.react(id, &emoji, !mine).await }), |_, _, _| {}));
     }
 
@@ -447,6 +507,7 @@ impl ChatView {
     fn edit(&mut self, m: &Message, window: &mut Window, cx: &mut Context<Self>) {
         let session = self.session.clone();
         let id = m.id;
+        let private = self.room.conversation().is_some().then(|| m.clone());
         Ask::open(
             tr!("Edit message", "Editar mensagem"),
             None,
@@ -464,6 +525,11 @@ impl ChatView {
             cx,
             move |v, _, cx| {
                 let body = v[0].trim().to_string();
+                if let Some(m) = &private {
+                    let task = session.update(cx, |s, cx| s.edit_dm(m, body, cx));
+                    toast_failure(task, cx);
+                    return None;
+                }
                 session.update(cx, |s, cx| s.call(cx, move |api| Box::pin(async move { api.edit(id, &body).await }), |_, _, _| {}));
                 None
             },
@@ -473,14 +539,25 @@ impl ChatView {
     fn delete(&mut self, m: &Message, window: &mut Window, cx: &mut Context<Self>) {
         let session = self.session.clone();
         let id = m.id;
+        let private = self.room.conversation().is_some();
         Ask::confirm_action(
             tr!("Delete this message?", "Apagar esta mensagem?"),
-            tr!("This can't be undone.", "Não dá para desfazer."),
+            if private {
+                tr!("It goes for both of you. This can't be undone.", "Ela some para os dois. Não dá para desfazer.")
+            } else {
+                tr!("This can't be undone.", "Não dá para desfazer.")
+            },
             tr!("Delete", "Apagar"),
             window,
             cx,
             move |_, cx| {
-                session.update(cx, |s, cx| s.call(cx, move |api| Box::pin(async move { api.delete_message(id).await }), |_, _, _| {}))
+                session.update(cx, |s, cx| {
+                    if private {
+                        s.call(cx, move |api| Box::pin(async move { api.delete_dm(id).await }), |_, _, _| {})
+                    } else {
+                        s.call(cx, move |api| Box::pin(async move { api.delete_message(id).await }), |_, _, _| {})
+                    }
+                })
             },
         );
     }
@@ -490,19 +567,16 @@ impl ChatView {
         self.session.update(cx, |s, cx| s.call(cx, move |api| Box::pin(async move { api.pin(id, pinned).await }), |_, _, _| {}));
     }
 
-    fn save_attachment(&mut self, hash: String, name: String, cx: &mut Context<Self>) {
+    fn save_attachment(&mut self, hash: String, name: String, how: Fetch, cx: &mut Context<Self>) {
         let dir = dirs::download_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
         let target = cx.prompt_for_new_path(&dir, Some(&name));
-        let (api, cache) = {
-            let s = self.session.read(cx);
-            (s.api.clone(), s.cache.clone())
-        };
+        let bytes = self.session.read(cx).attachment(&hash, how);
         cx.spawn(async move |_, cx| {
             let Ok(Ok(Some(path))) = target.await else { return };
-            let result = core::run(async move {
-                let (bytes, _) = cache.get(&api, &hash).await.map_err(|e| e.message)?;
+            let result = async move {
+                let bytes = bytes.await.map_err(|e| e.message)?;
                 std::fs::write(&path, bytes.as_slice()).map_err(|e| e.to_string())
-            })
+            }
             .await;
             cx.update(|cx| match result {
                 Ok(()) => overlay::toast(tr!("Saved.", "Salvo."), cx),
@@ -546,9 +620,9 @@ impl ChatView {
     }
 
     /// Shows the thumbnail at once and swaps in the full picture when it has decoded.
-    fn open_image(&mut self, image: Arc<RenderImage>, hash: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_image(&mut self, image: Arc<RenderImage>, hash: String, name: String, how: Fetch, window: &mut Window, cx: &mut Context<Self>) {
         let chat = cx.entity().downgrade();
-        let full = self.session.update(cx, |s, cx| s.full_picture(&hash, cx));
+        let full = self.session.update(cx, |s, cx| s.full_picture(&hash, how.clone(), cx));
         let view = cx.new(|cx| {
             let load = cx.spawn(async move |this, cx| {
                 if let Some(img) = full.await {
@@ -564,7 +638,7 @@ impl ChatView {
                 }
             })
             .detach();
-            Lightbox { image, full: None, hash, name, chat, focus: cx.focus_handle(), _load: load }
+            Lightbox { image, full: None, hash, name, how, chat, focus: cx.focus_handle(), _load: load }
         });
         overlay::open_dialog(view, window, cx);
     }
@@ -576,18 +650,47 @@ impl ChatView {
         let messages = self.messages(cx);
         let Some(m) = messages.get(ix).cloned() else { return div().into_any_element() };
         let prev = ix.checked_sub(1).and_then(|i| messages.get(i)).cloned();
+        if let Some(call) = m.private.as_ref().and_then(|p| p.call.clone()) {
+            return self.render_call_line(&m, &call, &t, cx);
+        }
+        let is_line = |p: &Message| p.private.as_ref().is_some_and(|p| p.call.is_some());
         let grouped = prev.as_ref().is_some_and(|p| {
-            p.user_id == m.user_id && !p.pinned && !m.pinned && m.created_at - p.created_at < GROUP_WINDOW_MS && self.results.is_none()
+            p.user_id == m.user_id
+                && !p.pinned
+                && !m.pinned
+                && !is_line(p)
+                && m.created_at - p.created_at < GROUP_WINDOW_MS
+                && self.results.is_none()
         });
         let me = self.session.read(cx).me.clone();
         let mine = m.user_id == Some(me.id);
-        let can_delete = mine || me.role.is_admin();
+        let private = self.room.conversation().is_some();
+        let unreadable = m.private.as_ref().is_some_and(|p| p.unreadable);
+        // In a private conversation nobody has a say over your words but you: no admin delete.
+        let can_delete = mine || (!private && me.role.is_admin());
         let for_me = (m.mentions.contains(&me.id) || m.mentions_everyone) && !mine;
         let flashing = self.flash.is_some_and(|(id, _)| id == m.id);
         let name = self.session.read(cx).display_name(m.user_id, m.nickname.as_deref());
-        let role = m.user_id.and_then(|u| self.session.read(cx).users.get(&u)).map(|u| u.role);
+        // Rank means nothing between two people.
+        let role = m.user_id.and_then(|u| self.session.read(cx).users.get(&u)).map(|u| u.role).filter(|_| !private);
         let avatar_img = m.user_id.and_then(|u| self.session.update(cx, |s, cx| s.avatar(u, cx)));
-        let body_el = if m.body.trim().is_empty() {
+        let body_el = if unreadable {
+            Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(icon("lock", 13., t.text3))
+                    .child(caption(
+                        tr!(
+                            "This message was sealed to a key this computer doesn't have.",
+                            "Esta mensagem foi protegida com uma chave que este computador não tem."
+                        ),
+                        t.text3,
+                    ))
+                    .into_any_element(),
+            )
+        } else if m.body.trim().is_empty() {
             None
         } else {
             let parsed = self.parsed(&m, cx);
@@ -632,12 +735,14 @@ impl ChatView {
                             }),
                         ),
                 )
-                .child(
-                    tool_button(("pin", m.id as u64), "pin", m.pinned, if m.pinned { t.accent } else { t.text2 }, &t)
-                        .tooltip(tip(if m.pinned { tr!("Unpin", "Desafixar") } else { tr!("Pin to the channel", "Fixar no canal") }, &t))
-                        .on_click(cx.listener(move |this, _, _, cx| this.pin(&m2, cx))),
-                )
-                .when(mine, |d| {
+                .when(!private, |d| {
+                    d.child(
+                        tool_button(("pin", m.id as u64), "pin", m.pinned, if m.pinned { t.accent } else { t.text2 }, &t)
+                            .tooltip(tip(if m.pinned { tr!("Unpin", "Desafixar") } else { tr!("Pin to the channel", "Fixar no canal") }, &t))
+                            .on_click(cx.listener(move |this, _, _, cx| this.pin(&m2, cx))),
+                    )
+                })
+                .when(mine && !unreadable, |d| {
                     d.child(
                         tool_button(("edit", m.id as u64), "edit", false, t.text2, &t)
                             .tooltip(tip(tr!("Edit", "Editar"), &t))
@@ -730,14 +835,49 @@ impl ChatView {
         }
     }
 
+    /// "Missed call from Ana", "Call · 12 min": a line across the conversation, not a message.
+    fn render_call_line(&mut self, m: &Message, call: &CallMeta, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let s = self.session.read(cx);
+        let from_me = m.user_id == Some(s.me.id);
+        let caller = s.display_name(m.user_id, None);
+        let missed = call.outcome != "ended";
+        let time = Local.timestamp_millis_opt(m.created_at).single();
+        let stamp = time.map(|d| crate::i18n::message_time(&d, &Local::now())).unwrap_or_default();
+        let color = if missed && !from_me { t.critical } else { t.text3 };
+        div()
+            .id(("call-line", m.id as u64))
+            .w_full()
+            .flex()
+            .justify_center()
+            .px(px(16.))
+            .mt(px(10.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(14.))
+                    .py(px(7.))
+                    .rounded_full()
+                    .bg(t.layer)
+                    .border_1()
+                    .border_color(t.stroke)
+                    .child(icon(if missed { "phone-off" } else { "phone" }, 14., color))
+                    .child(div().text_size(px(13.)).text_color(t.text2).child(crate::dm::call_line(call, &caller, from_me)))
+                    .child(mono(stamp, t.text3)),
+            )
+            .into_any_element()
+    }
+
     fn render_attachment(&mut self, m: &Message, t: &Theme, _: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let hash = m.attachment_hash.clone()?;
         let name = m.attachment_name.clone().unwrap_or_else(|| tr!("attachment", "anexo").into());
+        let how = Fetch::of(m);
         if m.media_type == Some(MediaType::Image) {
-            let pic = self.session.update(cx, |s, cx| s.picture(&hash, cx));
+            let pic = self.session.update(cx, |s, cx| s.picture_from(&hash, how.clone(), cx));
             return Some(match pic {
                 Picture::Ready(image) => {
-                    let (img2, h2, n2) = (image.clone(), hash.clone(), name.clone());
+                    let (img2, h2, n2, f2) = (image.clone(), hash.clone(), name.clone(), how.clone());
                     div()
                         .id(("attachment", m.id as u64))
                         .max_w(px(420.))
@@ -748,21 +888,24 @@ impl ChatView {
                         .border_color(t.stroke)
                         .cursor_pointer()
                         .child(img(image).max_w(px(420.)).max_h(px(300.)).object_fit(gpui::ObjectFit::Contain))
-                        .on_click(cx.listener(move |this, _, window, cx| this.open_image(img2.clone(), h2.clone(), n2.clone(), window, cx)))
+                        .on_click(
+                            cx.listener(move |this, _, window, cx| this.open_image(img2.clone(), h2.clone(), n2.clone(), f2.clone(), window, cx)),
+                        )
                         .into_any_element()
                 }
                 Picture::Loading => div().w(px(240.)).h(px(160.)).rounded(px(radius::CARD)).bg(t.layer).into_any_element(),
-                Picture::Failed => file_card(m.id, &name, &hash, t, cx),
+                Picture::Failed => file_card(m.id, &name, &hash, how, t, cx),
             });
         }
-        let mine = m.user_id == Some(self.session.read(cx).me.id);
+        // Swapping the file is a channel's: a sealed message would have to be sealed again.
+        let mine = m.user_id == Some(self.session.read(cx).me.id) && self.room.channel().is_some();
         let id = m.id;
         Some(
             div()
                 .flex()
                 .items_center()
                 .gap(px(6.))
-                .child(file_card(m.id, &name, &hash, t, cx))
+                .child(file_card(m.id, &name, &hash, how, t, cx))
                 .when(mine, |d| {
                     d.child(
                         icon_button(("replace", m.id as u64), "paperclip", t)
@@ -824,10 +967,153 @@ impl ChatView {
         Some(row.into_any_element())
     }
 
-    fn render_header(&mut self, t: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+    /// A private conversation's header: who it is with and whether they are around, that it is
+    /// sealed end to end, and the call button.
+    fn render_dm_header(&mut self, conversation: ConversationId, peer: UserId, t: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let img = self.session.update(cx, |s, cx| s.avatar(peer, cx));
         let s = self.session.read(cx);
-        let ch = s.channel(self.channel).cloned();
-        let pins = s.chats.get(&self.channel).map(|l| l.pinned.len()).unwrap_or(0);
+        let name = s.display_name(Some(peer), None);
+        let online = s.online.contains(&peer);
+        let verified = s.vault.verified(peer);
+        let in_call = s.calls.contains_key(&conversation);
+        let can_call = s.vault.ready() && s.vault.peer_has_key(peer) && !s.blocked.contains(&peer);
+        let session = self.session.clone();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .h(px(52.))
+            .px(px(16.))
+            .border_b_1()
+            .border_color(t.stroke)
+            .child(div().relative().child(avatar(&name, img, 28., None)).child(
+                div()
+                    .absolute()
+                    .right(px(-2.))
+                    .bottom(px(-2.))
+                    .size(px(10.))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(t.pane)
+                    .bg(if online { t.success } else { t.text3 }),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w(px(0.))
+                    .child(title(name.clone(), t.text))
+                    .child(caption(if online { tr!("Online", "Online") } else { tr!("Offline", "Offline") }, t.text3)),
+            )
+            .child(
+                div()
+                    .id("e2ee")
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .h(px(24.))
+                    .px(px(8.))
+                    .rounded_full()
+                    .bg(t.tint(t.success))
+                    .cursor_pointer()
+                    .child(icon(if verified { "shield-check" } else { "lock" }, 12., t.success))
+                    .child(div().text_size(px(11.5)).text_color(t.success).child(if verified {
+                        tr!("Verified", "Verificada")
+                    } else {
+                        tr!("End-to-end encrypted", "Criptografia de ponta a ponta")
+                    }))
+                    .tooltip(tip(
+                        tr!(
+                            "Only the two of you can read this conversation or hear your calls, not even whoever runs the server. Click to compare your safety number.",
+                            "Só vocês dois conseguem ler esta conversa e ouvir suas chamadas, nem quem administra o servidor. Clique para comparar o código de segurança."
+                        ),
+                        t,
+                    ))
+                    .on_click(move |_, window, cx| super::private::safety_number(&session, peer, window, cx)),
+            )
+            .child(div().flex_1())
+            .child(
+                tool_button("dm-call", "phone", in_call, if in_call { t.success } else if can_call { t.text2 } else { t.text3 }, t)
+                    .when(!can_call, |d| d.opacity(0.5))
+                    .tooltip(tip(if in_call { tr!("In a call", "Em chamada") } else { tr!("Start a call", "Iniciar uma chamada") }, t))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        if can_call {
+                            cx.emit(ChatEvent::Call(conversation));
+                        }
+                    })),
+            )
+            .child(
+                icon_button("dm-more", "more", t).tooltip(tip(tr!("More", "Mais"), t)).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        super::private::conversation_menu(&this.session, peer, e.position, window, cx);
+                    }),
+                ),
+            )
+    }
+
+    /// A notice above a private conversation: a key that changed, or why you can't write.
+    fn render_dm_notice(&mut self, peer: UserId, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let s = self.session.read(cx);
+        let name = s.display_name(Some(peer), None);
+        if s.vault.ready() && s.vault.key_changed_for(peer) {
+            let (session, s2) = (self.session.clone(), self.session.clone());
+            return Some(
+                notice(
+                    "shield-alert",
+                    trf!(
+                        "{}'s security key changed. It happens when someone sets Harmony up again without their recovery key; if you weren't expecting it, compare your safety number with them.",
+                        "A chave de segurança de {} mudou. Isso acontece quando alguém configura o Harmony de novo sem a chave de recuperação; se você não esperava por isso, comparem o código de segurança.",
+                        name
+                    ),
+                    t.caution,
+                    t,
+                )
+                .child(
+                    button("key-compare", tr!("Compare", "Comparar"), Kind::Standard, t)
+                        .on_click(move |_, window, cx| super::private::safety_number(&s2, peer, window, cx)),
+                )
+                .child(button("key-ok", tr!("Got it", "Entendi"), Kind::Primary, t).on_click(move |_, _, cx| {
+                    session.update(cx, |s, cx| {
+                        s.vault.accept_key(peer);
+                        cx.notify();
+                    })
+                }))
+                .into_any_element(),
+            );
+        }
+        let why = self.blocked_reason(cx)?;
+        let s = self.session.read(cx);
+        let blocked = s.blocked.contains(&peer);
+        let locked = !s.vault.ready();
+        let session = self.session.clone();
+        Some(
+            notice(if blocked { "ban" } else { "lock" }, why, t.text2, t)
+                .when(blocked, |d| {
+                    d.child(button("unblock", tr!("Unblock", "Desbloquear"), Kind::Standard, t).on_click(move |_, _, cx| {
+                        session.update(cx, |s, cx| s.set_blocked(peer, false, cx))
+                    }))
+                })
+                .when(locked, |d| {
+                    let session = self.session.clone();
+                    d.child(
+                        button("unlock-here", tr!("Unlock", "Desbloquear"), Kind::Primary, t)
+                            .on_click(move |_, window, cx| super::private::unlock(&session, window, cx)),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    fn render_header(&mut self, t: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        if let Some((conversation, peer)) = self.dm(cx) {
+            return self.render_dm_header(conversation, peer, t, cx);
+        }
+        let channel = self.room.channel().unwrap_or(-1);
+        let s = self.session.read(cx);
+        let ch = s.channel(channel).cloned();
+        let pins = s.chats.get(&self.room).map(|l| l.pinned.len()).unwrap_or(0);
         div()
             .flex()
             .items_center()
@@ -877,7 +1163,7 @@ impl ChatView {
         if !self.show_pins {
             return None;
         }
-        let pinned = self.session.read(cx).chats.get(&self.channel).map(|l| l.pinned.clone()).unwrap_or_default();
+        let pinned = self.session.read(cx).chats.get(&self.room).map(|l| l.pinned.clone()).unwrap_or_default();
         let mut col = div().id("pinned").flex().flex_col().gap(px(2.)).max_h(px(220.)).overflow_y_scroll().p(px(6.));
         if pinned.is_empty() {
             col = col.child(div().p(px(10.)).child(caption(
@@ -1057,20 +1343,47 @@ impl ChatView {
 impl Render for ChatView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = current();
-        let log = self.session.read(cx).chats.get(&self.channel);
+        let log = self.session.read(cx).chats.get(&self.room);
         let (loaded, error) = (log.is_some_and(|l| l.loaded), log.and_then(|l| l.error.clone()));
         let empty = self.messages(cx).is_empty();
-        let readable = self.session.read(cx).channel(self.channel).is_some_and(|c| self.session.read(cx).can_read(c));
-        let name = self.session.read(cx).channel(self.channel).map(|c| c.name.clone()).unwrap_or_default();
+        let dm = self.dm(cx);
+        let s = self.session.read(cx);
+        let readable = match self.room {
+            Room::Channel(id) => s.channel(id).is_some_and(|c| s.can_read(c)),
+            Room::Dm(_) => dm.is_some(),
+        };
+        let writable = readable && self.blocked_reason(cx).is_none();
+        let name = match dm {
+            Some((_, peer)) => s.display_name(Some(peer), None),
+            None => self.room.channel().and_then(|id| s.channel(id)).map(|c| c.name.clone()).unwrap_or_default(),
+        };
         if self.lang != crate::i18n::lang() {
             self.lang = crate::i18n::lang();
-            self.composer.update(cx, |f, cx| f.set_placeholder(composer_hint(&name), cx));
+            let hint = composer_hint(self.room, self.session.read(cx));
+            self.composer.update(cx, |f, cx| f.set_placeholder(hint, cx));
             self.search.update(cx, |f, cx| f.set_placeholder(tr!("Search this channel", "Buscar neste canal"), cx));
         }
         let header = self.render_header(&t, cx);
         let pins = self.render_pins(&t, cx);
+        let notice = dm.and_then(|(_, peer)| self.render_dm_notice(peer, &t, cx));
         let composer = self.render_composer(&t, cx);
-        let body: AnyElement = if !readable {
+        let drop_title = if dm.is_some() {
+            trf!("Drop a file to send it to {}", "Solte um arquivo para enviá-lo para {}", name)
+        } else {
+            trf!("Drop a file to send it in #{}", "Solte um arquivo para enviá-lo em #{}", name)
+        };
+        let body: AnyElement = if dm.is_some() && loaded && empty {
+            empty_state(
+                "lock",
+                &trf!("Your private conversation with {}", "Sua conversa privada com {}", name),
+                tr!(
+                    "Only the two of you can read what you write here, or hear your calls: it is sealed on your computers, and not even whoever runs the server can open it.",
+                    "Só vocês dois conseguem ler o que escreverem aqui ou ouvir suas chamadas: tudo é protegido nos seus computadores, e nem quem administra o servidor consegue abrir."
+                ),
+                &t,
+            )
+            .into_any_element()
+        } else if !readable {
             empty_state(
                 "lock",
                 tr!("This channel is locked", "Este canal tem senha"),
@@ -1114,7 +1427,7 @@ impl Render for ChatView {
             .flex()
             .flex_col()
             .size_full()
-            .when(readable, |d| {
+            .when(writable, |d| {
                 d.on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
                     if let Some(path) = paths.paths().first() {
                         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
@@ -1130,15 +1443,16 @@ impl Render for ChatView {
             .when_some(self.results.as_ref(), |d, (q, r)| {
                 d.child(div().px(px(16.)).py(px(6.)).border_b_1().border_color(t.stroke).child(caption(results_for(r.len(), q), t.text3)))
             })
+            .children(notice)
             .child(div().flex_1().min_h(px(0.)).child(body))
-            .when(readable, |d| d.child(composer))
+            .when(writable, |d| d.child(composer))
             // Texel's drop target: dashed, inset, with one line saying what happens.
             .child(
                 div()
                     .absolute()
                     .inset(px(10.))
                     .invisible()
-                    .group_drag_over::<gpui::ExternalPaths>("chat-drop", |s| s.visible())
+                    .when(writable, |d| d.group_drag_over::<gpui::ExternalPaths>("chat-drop", |s| s.visible()))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1154,7 +1468,7 @@ impl Render for ChatView {
                             .items_center()
                             .gap(px(8.))
                             .child(icon("paperclip", 26., t.accent))
-                            .child(title(trf!("Drop a file to send it in #{}", "Solte um arquivo para enviá-lo em #{}", name), t.text)),
+                            .child(title(drop_title, t.text)),
                     ),
             )
     }
@@ -1174,7 +1488,7 @@ pub fn empty_state(glyph: &'static str, heading: &str, text: &str, t: &Theme) ->
     )
 }
 
-fn file_card(id: MessageId, name: &str, hash: &str, t: &Theme, cx: &mut Context<ChatView>) -> AnyElement {
+fn file_card(id: MessageId, name: &str, hash: &str, how: Fetch, t: &Theme, cx: &mut Context<ChatView>) -> AnyElement {
     let (h, n) = (hash.to_string(), name.to_string());
     div()
         .flex()
@@ -1195,13 +1509,46 @@ fn file_card(id: MessageId, name: &str, hash: &str, t: &Theme, cx: &mut Context<
         .child(
             icon_button(("save", id as u64), "download", t)
                 .tooltip(tip(tr!("Save", "Salvar"), t))
-                .on_click(cx.listener(move |this, _, _, cx| this.save_attachment(h.clone(), n.clone(), cx))),
+                .on_click(cx.listener(move |this, _, _, cx| this.save_attachment(h.clone(), n.clone(), how.clone(), cx))),
         )
         .into_any_element()
 }
 
-fn composer_hint(channel: &str) -> String {
-    trf!("Message #{}", "Mensagem em #{}", channel)
+fn composer_hint(room: Room, s: &Session) -> String {
+    match room {
+        Room::Channel(id) => trf!("Message #{}", "Mensagem em #{}", s.channel(id).map(|c| c.name.as_str()).unwrap_or("")),
+        Room::Dm(id) => {
+            let name = s.display_name(s.peer_of(id), None);
+            trf!("Message {}", "Mensagem para {}", name)
+        }
+    }
+}
+
+/// A strip above a conversation with something to say, and buttons for what to do about it.
+fn notice(glyph: &'static str, text: String, color: gpui::Hsla, t: &Theme) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .px(px(16.))
+        .py(px(10.))
+        .border_b_1()
+        .border_color(t.stroke)
+        .bg(t.tint(color))
+        .child(icon(glyph, 16., color))
+        .child(div().flex_1().min_w(px(0.)).child(caption(text, t.text)))
+}
+
+/// Toasts what went wrong when a background send fails.
+fn toast_failure(task: Task<Result<(), crate::core::api::ApiError>>, cx: &mut App) {
+    cx.spawn(async move |cx| {
+        if let Err(e) = task.await
+            && !e.message.is_empty()
+        {
+            cx.update(|cx| overlay::toast(e.message, cx));
+        }
+    })
+    .detach();
 }
 
 fn results_for(n: usize, q: &str) -> String {
@@ -1262,6 +1609,7 @@ struct Lightbox {
     full: Option<Arc<RenderImage>>,
     hash: String,
     name: String,
+    how: Fetch,
     chat: gpui::WeakEntity<ChatView>,
     focus: FocusHandle,
     _load: Task<()>,
@@ -1298,9 +1646,9 @@ impl Render for Lightbox {
                     .py(px(10.))
                     .child(div().flex_1().truncate().child(body(self.name.clone(), t.text2)))
                     .child(button("lightbox-save", tr!("Save", "Salvar"), Kind::Standard, &t).on_click(cx.listener(|this, _, _, cx| {
-                        let (h, n) = (this.hash.clone(), this.name.clone());
+                        let (h, n, how) = (this.hash.clone(), this.name.clone(), this.how.clone());
                         if let Some(chat) = this.chat.upgrade() {
-                            chat.update(cx, |c, cx| c.save_attachment(h, n, cx));
+                            chat.update(cx, |c, cx| c.save_attachment(h, n, how, cx));
                         }
                     })))
                     .child(

@@ -9,6 +9,7 @@
 #[macro_use]
 mod i18n;
 mod core;
+mod dm;
 mod emoji;
 mod hotkeys;
 mod icons;

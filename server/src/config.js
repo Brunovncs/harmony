@@ -145,6 +145,10 @@ export const config = {
   // does not stay logged in forever.
   sessionIdleMs: num(process.env.HARMONY_SESSION_IDLE_MS, 30 * 24 * 60 * 60 * 1000),
 
+  // How long a private call waits for somebody whose connection dropped before
+  // it ends. See GRACE_MS in calls.js.
+  callGraceMs: num(process.env.HARMONY_CALL_GRACE_MS, 20 * 1000),
+
   // STUN servers handed to clients. NONE by default, because nothing here
   // needs one.
   //

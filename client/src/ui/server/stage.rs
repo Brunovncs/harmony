@@ -97,9 +97,11 @@ impl ServerView {
             )
             .into_any_element();
         };
-        let channel = call.read(cx).channel;
-        let name = self.session.read(cx).channel(channel).map(|c| c.name.clone()).unwrap_or_default();
-        let roster = self.session.read(cx).rosters.get(&channel).cloned().unwrap_or_default();
+        let place = call.read(cx).place;
+        let private = place.conversation().is_some();
+        let ringing = call.read(cx).ringing(cx);
+        let name = self.session.read(cx).place_name(place);
+        let roster = self.session.read(cx).roster(place).cloned().unwrap_or_default();
         let voice = call.read(cx).voice.clone();
         let tiles: Vec<Entity<Tile>> = voice.as_ref().map(|v| v.read(cx).tiles.clone()).unwrap_or_default();
         let header = div()
@@ -110,13 +112,19 @@ impl ServerView {
             .px(px(16.))
             .border_b_1()
             .border_color(t.stroke)
-            .child(icon("volume", 18., t.success))
+            .child(icon(if private { "phone" } else { "volume" }, 18., t.success))
             .child(title(name, t.text))
-            .child(mono(trf!("{} here", "{} aqui", roster.len()), t.text3))
+            .when(!private, |d| d.child(mono(trf!("{} here", "{} aqui", roster.len()), t.text3)))
+            .when(private, |d| {
+                d.child(chip(
+                    if ringing { tr!("Ringing…", "Chamando…") } else { tr!("End-to-end encrypted", "Criptografia de ponta a ponta") },
+                    if ringing { t.caution } else { t.success },
+                ))
+            })
             .child(div().flex_1())
             .children(voice.as_ref().map(|v| self.ghosts(v, t, cx)));
         let body = if tiles.is_empty() {
-            self.render_people(&roster, channel, t, cx)
+            self.render_people(&roster, place, t, cx)
         } else {
             self.render_tiles(&tiles, voice.as_ref(), t, window, cx)
         };
@@ -153,11 +161,11 @@ impl ServerView {
         row.into_any_element()
     }
 
-    fn render_people(&mut self, roster: &[Member], channel: ChannelId, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_people(&mut self, roster: &[Member], place: Place, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let me = self.session.read(cx).me.id;
         let mut grid = div().flex().flex_wrap().justify_center().content_center().gap(px(14.)).p(px(24.)).size_full();
         for m in roster {
-            let is_speaking = self.is_speaking(channel, m.user_id, cx);
+            let is_speaking = self.is_speaking(place, m.user_id, cx);
             let name = self.session.read(cx).display_name(Some(m.user_id), Some(&m.nickname));
             let image = self.session.update(cx, |s, cx| s.avatar(m.user_id, cx));
             let (user, mid) = (m.user_id, m.mid);
@@ -197,19 +205,24 @@ impl ServerView {
                 .when(m.user_id != me, |d| {
                     d.on_mouse_down(
                         MouseButton::Right,
-                        cx.listener(move |this, e: &MouseDownEvent, window, cx| this.peer_menu(channel, user, mid, e.position, window, cx)),
+                        cx.listener(move |this, e: &MouseDownEvent, window, cx| this.peer_menu(place, user, mid, e.position, window, cx)),
                     )
                 });
             grid = grid.child(speaking(card, is_speaking, radius::CARD + 2., t));
         }
         if roster.len() <= 1 {
-            grid = grid.child(div().w_full().flex().justify_center().child(caption(
-                tr!(
+            let waiting = match place {
+                Place::Call(id) => {
+                    let name = self.session.read(cx).display_name(self.session.read(cx).peer_of(id), None);
+                    trf!("Waiting for {} to answer…", "Esperando {} atender…", name)
+                }
+                Place::Channel(_) => tr!(
                     "You're the only one here. Share your screen or turn on your camera while you wait.",
                     "Só você está aqui. Compartilhe a tela ou ligue a câmera enquanto espera."
-                ),
-                t.text3,
-            )));
+                )
+                .into(),
+            };
+            grid = grid.child(div().w_full().flex().justify_center().child(caption(waiting, t.text3)));
         }
         grid.into_any_element()
     }
@@ -285,7 +298,7 @@ impl ServerView {
         let group = SharedString::from(format!("tile-{id}"));
         let (t1, t2, t3) = (tile.clone(), tile.clone(), tile.clone());
         let voice = voice.cloned();
-        let lit = kind == TileKind::Camera && self.call_channel(cx).is_some_and(|c| self.is_speaking(c, user, cx));
+        let lit = kind == TileKind::Camera && self.call_place(cx).is_some_and(|p| self.is_speaking(p, user, cx));
         let el = div()
             .id(("tile", id))
             .group(group.clone())

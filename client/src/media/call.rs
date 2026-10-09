@@ -1,8 +1,12 @@
-//! Being in a voice channel: joining and leaving through the socket, keeping the media tokens
-//! fresh, mute and deafen, and the audio and video connections (see `voice`).
+//! Being in a call: a voice channel, or a private call with one other person. Joining and leaving
+//! through the socket, ringing and answering, keeping the media tokens fresh, mute and deafen, and
+//! the audio and video connections (see `voice`). A private call's media is sealed end to end with
+//! a key the caller makes and only the two of them can open (see `rtc::FrameKey`).
 
 use super::audio::Cue;
+use super::rtc::FrameKey;
 use super::voice::{Voice, roster_cues, voice_cue};
+use crate::core::api::ApiError;
 use crate::core::types::*;
 use crate::session::{Session, SessionEvent};
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task, WeakEntity};
@@ -32,7 +36,7 @@ pub enum CallEvent {
 
 pub struct Call {
     pub session: Entity<Session>,
-    pub channel: ChannelId,
+    pub place: Place,
     pub state: CallState,
     pub tokens: Option<VoiceTokens>,
     pub mid: Option<i64>,
@@ -40,6 +44,8 @@ pub struct Call {
     pub deafened: bool,
     pub voice: Option<Entity<Voice>>,
     password: Option<String>,
+    /// A private call's media key; none in a voice channel.
+    key: Option<[u8; 32]>,
     /// The roster the cues compare against; none until one has been seen, so arriving in a room
     /// of six plays nothing.
     cue_roster: Option<Vec<Member>>,
@@ -52,17 +58,97 @@ pub struct Call {
 impl EventEmitter<CallEvent> for Call {}
 
 impl Call {
+    /// Joins a voice channel.
     pub fn join(
         session: Entity<Session>,
         channel: ChannelId,
         password: Option<String>,
         muted: bool,
         deafened: bool,
-        cx: &mut gpui::App,
+        cx: &mut App,
+    ) -> Entity<Call> {
+        let call = Call::start(session, Place::Channel(channel), password, None, muted, deafened, cx);
+        call.update(cx, |c, cx| c.send_join(cx));
+        call
+    }
+
+    /// Rings the other person of a private conversation, and takes a slot in the call straight
+    /// away, so the media is ready the moment they answer.
+    pub fn dial(session: Entity<Session>, conversation: ConversationId, muted: bool, deafened: bool, cx: &mut App) -> Result<Entity<Call>, ApiError> {
+        let (key, sealed) = session.update(cx, |s, _| s.new_call_key(conversation))?;
+        let rt = session.read(cx).realtime.clone();
+        let ring = Session::request(
+            rt,
+            "call:start",
+            json!({
+                "conversationId": conversation,
+                "sealedKey": sealed.text,
+                "senderKey": sealed.sender_key,
+                "recipientKey": sealed.recipient_key,
+            }),
+        );
+        let call = Call::start(session, Place::Call(conversation), None, Some(key), muted, deafened, cx);
+        call.update(cx, |_, cx| {
+            cx.spawn(async move |this, cx| {
+                let reply = ring.await;
+                let _ = this.update(cx, |this, cx| match reply {
+                    // Two people calling each other at once: the server made it one call, under
+                    // the other person's key. Use theirs.
+                    Ok(v) => {
+                        if let Some(info) = v.get("call").and_then(|c| serde_json::from_value::<CallInfo>(c.clone()).ok())
+                            && info.caller_id != this.session.read(cx).me.id
+                        {
+                            this.session.update(cx, |s, _| {
+                                s.calls.insert(conversation, info);
+                            });
+                            this.key = this.session.update(cx, |s, _| s.call_key(conversation));
+                        }
+                        this.send_join(cx);
+                    }
+                    Err(e) => {
+                        let why = crate::core::api::friendly(e.code, &e.reply)
+                            .unwrap_or_else(|| trf!("Could not call ({}).", "Não foi possível ligar ({}).", e));
+                        cx.emit(CallEvent::Ended(Some(why)));
+                    }
+                });
+            })
+            .detach();
+        });
+        Ok(call)
+    }
+
+    /// Picks up a call you are being rung for.
+    pub fn answer(session: Entity<Session>, conversation: ConversationId, muted: bool, deafened: bool, cx: &mut App) -> Option<Entity<Call>> {
+        let key = session.update(cx, |s, _| s.call_key(conversation))?;
+        let rt = session.read(cx).realtime.clone();
+        let answer = Session::request(rt, "call:answer", json!({ "conversationId": conversation }));
+        let call = Call::start(session, Place::Call(conversation), None, Some(key), muted, deafened, cx);
+        call.update(cx, |_, cx| {
+            cx.spawn(async move |this, cx| {
+                let reply = answer.await;
+                let _ = this.update(cx, |this, cx| match reply {
+                    Ok(_) => this.send_join(cx),
+                    Err(_) => cx.emit(CallEvent::Ended(Some(tr!("That call has ended.", "Essa chamada já terminou.").into()))),
+                });
+            })
+            .detach();
+        });
+        Some(call)
+    }
+
+    fn start(
+        session: Entity<Session>,
+        place: Place,
+        password: Option<String>,
+        key: Option<[u8; 32]>,
+        muted: bool,
+        deafened: bool,
+        cx: &mut App,
     ) -> Entity<Call> {
         let call = cx.new(|cx| {
             let sub = cx.subscribe(&session, |this: &mut Call, _, ev: &SessionEvent, cx| match ev {
-                SessionEvent::Roster(id) if *id == this.channel => this.on_roster(cx),
+                SessionEvent::Roster(p) if *p == this.place => this.on_roster(cx),
+                SessionEvent::CallChanged(id) if this.place == Place::Call(*id) => this.on_call_changed(cx),
                 SessionEvent::Reconnected => {
                     this.state = CallState::Reconnecting;
                     this.cue_roster = None;
@@ -71,9 +157,9 @@ impl Call {
                 }
                 _ => {}
             });
-            let mut call = Call {
+            Call {
                 session,
-                channel,
+                place,
                 state: CallState::Joining,
                 tokens: None,
                 mid: None,
@@ -81,14 +167,13 @@ impl Call {
                 deafened,
                 voice: None,
                 password,
+                key,
                 cue_roster: None,
                 quiet_until: None,
                 left: false,
                 _refresh: Task::ready(()),
                 _subs: vec![sub],
-            };
-            call.send_join(cx);
-            call
+            }
         });
         if !cx.has_global::<ActiveCall>() {
             cx.on_app_quit(|cx| {
@@ -101,13 +186,47 @@ impl Call {
         call
     }
 
+    /// The private call is ringing the other person and they have not picked up yet.
+    pub fn ringing(&self, cx: &App) -> bool {
+        let Place::Call(id) = self.place else { return false };
+        self.session.read(cx).calls.get(&id).is_some_and(|c| c.state == CallPhase::Ringing)
+    }
+
+    /// Who the private call is with.
+    pub fn peer(&self, cx: &App) -> Option<UserId> {
+        self.session.read(cx).peer_of(self.place.conversation()?)
+    }
+
+    /// The private call changed on the server: answered (nothing to do, the media is already
+    /// there), or over.
+    fn on_call_changed(&mut self, cx: &mut Context<Self>) {
+        let Place::Call(id) = self.place else { return };
+        if self.session.read(cx).calls.contains_key(&id) || self.left {
+            cx.notify();
+            return;
+        }
+        let s = self.session.read(cx);
+        let name = s.display_name(self.peer(cx), None);
+        let why = match s.call_outcomes.get(&id).map(String::as_str) {
+            Some("declined") if self.tokens.is_some() => Some(trf!("{} declined the call.", "{} recusou a chamada.", name)),
+            Some("missed") if self.tokens.is_some() => Some(trf!("{} didn't answer.", "{} não atendeu.", name)),
+            _ => None,
+        };
+        // Already over on the server: nothing to hang up there.
+        self.left = true;
+        cx.emit(CallEvent::Ended(why));
+    }
+
     fn send_join(&mut self, cx: &mut Context<Self>) {
         let rt = self.session.read(cx).realtime.clone();
-        let mut payload = json!({ "channelId": self.channel });
+        let (kind, mut payload) = match self.place {
+            Place::Channel(id) => ("voice:join", json!({ "channelId": id, "muted": self.muted, "deafened": self.deafened })),
+            Place::Call(id) => ("call:join", json!({ "conversationId": id, "muted": self.muted, "deafened": self.deafened })),
+        };
         if let Some(p) = &self.password {
             payload["password"] = json!(p);
         }
-        let reply = Session::request(rt, "voice:join", payload);
+        let reply = Session::request(rt, kind, payload);
         cx.spawn(async move |this, cx| {
             let reply = reply.await;
             let _ = this.update(cx, |this, cx| match reply {
@@ -115,10 +234,17 @@ impl Call {
                     let tokens: Option<VoiceTokens> = serde_json::from_value(v.clone()).ok();
                     this.mid = v.get("mid").and_then(|m| m.as_i64());
                     if let Some(roster) = v.get("roster").and_then(|r| serde_json::from_value::<Vec<Member>>(r.clone()).ok()) {
-                        let channel = this.channel;
+                        let place = this.place;
                         this.session.update(cx, |s, cx| {
-                            s.rosters.insert(channel, roster);
-                            s.unlocked.insert(channel);
+                            match place {
+                                Place::Channel(id) => {
+                                    s.rosters.insert(id, roster);
+                                    s.unlocked.insert(id);
+                                }
+                                Place::Call(id) => {
+                                    s.call_rosters.insert(id, roster);
+                                }
+                            }
                             cx.notify();
                         });
                     }
@@ -137,7 +263,9 @@ impl Call {
                 }
                 Err(e) => match e.code {
                     ErrorCode::PasswordRequired | ErrorCode::BadPassword => {
-                        cx.emit(CallEvent::NeedsPassword { channel: this.channel, wrong: e.code == ErrorCode::BadPassword });
+                        if let Place::Channel(channel) = this.place {
+                            cx.emit(CallEvent::NeedsPassword { channel, wrong: e.code == ErrorCode::BadPassword });
+                        }
                         cx.emit(CallEvent::Ended(None));
                     }
                     ErrorCode::ChannelFull => {
@@ -149,6 +277,10 @@ impl Call {
                     }
                     ErrorCode::NoSuchChannel => {
                         cx.emit(CallEvent::Ended(Some(tr!("That channel is gone.", "Esse canal não existe mais.").into())))
+                    }
+                    ErrorCode::NoSuchCall | ErrorCode::NotAnswered => {
+                        this.left = true;
+                        cx.emit(CallEvent::Ended(Some(tr!("The call has ended.", "A chamada terminou.").into())))
                     }
                     ErrorCode::Offline | ErrorCode::Timeout => {
                         // The socket is down; `Reconnected` will try again.
@@ -173,8 +305,8 @@ impl Call {
         self._refresh = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(every).await;
-                let Ok(rt) = this.update(cx, |this, cx| (this.session.read(cx).realtime.clone(), this.channel)) else { return };
-                let reply = Session::request(rt.0, "voice:refresh", json!({ "channelId": rt.1 })).await;
+                let Ok((rt, place)) = this.update(cx, |this, cx| (this.session.read(cx).realtime.clone(), this.place)) else { return };
+                let reply = Session::request(rt, "voice:refresh", place.payload()).await;
                 if let Ok(v) = reply
                     && let Ok(tokens) = serde_json::from_value::<VoiceTokens>(v)
                 {
@@ -195,8 +327,9 @@ impl Call {
             Some(v) if !first => v.update(cx, |v, cx| v.restart(tokens, self.mid, cx)),
             _ => {
                 let session = self.session.clone();
-                let (muted, deafened, mid, channel) = (self.muted, self.deafened, self.mid, self.channel);
-                let voice = cx.new(|cx| Voice::new(session, channel, tokens, mid, muted, deafened, cx));
+                let (muted, deafened, mid, place) = (self.muted, self.deafened, self.mid, self.place);
+                let key = self.key.as_ref().map(FrameKey::new);
+                let voice = cx.new(|cx| Voice::new(session, place, key, tokens, mid, muted, deafened, cx));
                 cx.observe(&voice, |_, _, cx| cx.notify()).detach();
                 self.voice = Some(voice);
             }
@@ -205,7 +338,7 @@ impl Call {
     }
 
     fn on_roster(&mut self, cx: &mut Context<Self>) {
-        let roster = self.session.read(cx).rosters.get(&self.channel).cloned().unwrap_or_default();
+        let roster = self.session.read(cx).roster(self.place).cloned().unwrap_or_default();
         let me = self.session.read(cx).me.id;
         if let Some(mine) = roster.iter().find(|m| m.user_id == me) {
             self.mid = Some(mine.mid);
@@ -245,7 +378,7 @@ impl Call {
 
     pub fn set_muted(&mut self, muted: bool, cx: &mut Context<Self>) {
         let me = self.session.read(cx).me.id;
-        let mine = self.session.read(cx).rosters.get(&self.channel).and_then(|r| r.iter().find(|m| m.user_id == me)).cloned();
+        let mine = self.session.read(cx).roster(self.place).and_then(|r| r.iter().find(|m| m.user_id == me)).cloned();
         if !muted && let Some(mine) = mine.filter(|m| m.silenced()) {
             crate::ui::overlay::toast(
                 if mine.force_muted {
@@ -300,8 +433,7 @@ impl Call {
 
     fn send_mute(&self, cx: &mut Context<Self>) {
         let rt = self.session.read(cx).realtime.clone();
-        let reply =
-            Session::request(rt, "voice:mute", json!({ "channelId": self.channel, "muted": self.muted, "deafened": self.deafened }));
+        let reply = Session::request(rt, "voice:mute", self.place.with(json!({ "muted": self.muted, "deafened": self.deafened })));
         cx.background_executor()
             .spawn(async move {
                 let _ = reply.await;
@@ -313,20 +445,26 @@ impl Call {
         drop(self.hang_up(cx));
     }
 
-    /// Hangs up every connection and leaves the channel; the handle finishes once the server
-    /// has the leave.
+    /// Hangs up every connection and leaves; the handle finishes once the server has it. Leaving
+    /// a private call ends it for both: one person on their own is not a call.
     fn hang_up(&mut self, cx: &mut Context<Self>) -> tokio::task::JoinHandle<()> {
-        self.left = true;
+        let told = std::mem::replace(&mut self.left, true);
         if let Some(v) = self.voice.take() {
             v.update(cx, |v, cx| v.shutdown(cx));
         }
         self._refresh = Task::ready(());
         let rt = self.session.read(cx).realtime.clone();
         // Queued now, so a join that follows cannot overtake it.
-        let reply = Session::request(rt, "voice:leave", json!({ "channelId": self.channel }));
+        let reply = match self.place {
+            _ if told => None,
+            Place::Channel(_) => Some(Session::request(rt, "voice:leave", self.place.payload())),
+            Place::Call(id) => Some(Session::request(rt, "call:hang-up", json!({ "conversationId": id }))),
+        };
         crate::core::runtime().spawn(async move {
-            if let Err(e) = reply.await {
-                log::info!("voice:leave: {e}");
+            if let Some(reply) = reply
+                && let Err(e) = reply.await
+            {
+                log::info!("leaving: {e}");
             }
         })
     }

@@ -28,7 +28,7 @@ pub struct Menu {
     pub call: Option<(bool, bool)>,
 }
 
-pub use platform::{Instance, Tray, hide_window, show_window};
+pub use platform::{Instance, Tray, flash_window, hide_window, show_window};
 
 #[cfg(windows)]
 mod platform {
@@ -223,6 +223,22 @@ mod platform {
         // SAFETY: as in `hide_window`.
         unsafe {
             let _ = ShowWindowAsync(HWND(hwnd as _), SW_SHOW);
+        }
+    }
+
+    /// Flashes the window's taskbar button until it is brought to the front, as a call should.
+    pub fn flash_window(hwnd: isize) {
+        use windows::Win32::UI::WindowsAndMessaging::{FLASHW_ALL, FLASHW_TIMERNOFG, FLASHWINFO, FlashWindowEx};
+        let info = FLASHWINFO {
+            cbSize: size_of::<FLASHWINFO>() as u32,
+            hwnd: HWND(hwnd as _),
+            dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG,
+            uCount: 0,
+            dwTimeout: 0,
+        };
+        // SAFETY: `info` is a complete FLASHWINFO for this window, read during the call only.
+        unsafe {
+            let _ = FlashWindowEx(&info);
         }
     }
 
@@ -430,4 +446,6 @@ mod platform {
     pub fn hide_window(_: isize) {}
 
     pub fn show_window(_: isize) {}
+
+    pub fn flash_window(_: isize) {}
 }

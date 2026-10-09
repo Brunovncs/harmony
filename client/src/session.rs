@@ -1,6 +1,10 @@
 //! What the window knows about the server it is connected to: who is there, the channels and
-//! who is in each, chat history, emoji, soundpad clips. One entity, fed by the realtime socket and
-//! by HTTP replies; views observe it.
+//! who is in each, chat history, emoji, soundpad clips, and your private conversations (see
+//! `private`). One entity, fed by the realtime socket and by HTTP replies; views observe it.
+
+mod private;
+
+pub use private::{Dm, Outgoing};
 
 use crate::core::api::{Api, ApiError};
 use crate::core::cache::Cache;
@@ -8,6 +12,7 @@ use crate::core::lru::Lru;
 use crate::core::realtime::{self, Realtime};
 use crate::core::types::*;
 use crate::core::{self};
+use crate::dm::Vault;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, RenderImage, Task};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -46,6 +51,12 @@ pub struct ChatLog {
     /// Older messages exist before the first one shown.
     pub more_before: bool,
     pub error: Option<String>,
+}
+
+/// A page of history as it arrived.
+enum Page {
+    Open(History),
+    Sealed(DmHistory),
 }
 
 /// A push that changes a chat log.
@@ -150,14 +161,36 @@ enum Slot {
     },
 }
 
+/// Where a picture's bytes come from: the public uploads, or a private conversation, sealed under a
+/// key of its own that only its message carries.
+#[derive(Clone)]
+pub enum Fetch {
+    Public,
+    Sealed { conversation: ConversationId, file: SealedFile },
+}
+
+impl Fetch {
+    /// How an attachment of this message is fetched.
+    pub fn of(m: &Message) -> Fetch {
+        match m.private.as_ref().and_then(|p| p.file.clone()) {
+            Some(file) => Fetch::Sealed { conversation: m.channel_id, file },
+            None => Fetch::Public,
+        }
+    }
+}
+
 /// Something the rest of the window should react to, beyond redrawing.
 pub enum SessionEvent {
     /// A message mentioning you arrived in a channel that is not open.
     Mentioned,
-    /// A new message in any channel (for scrolling and sounds).
-    Message(Message),
-    /// The roster of the voice channel you are in changed.
-    Roster(ChannelId),
+    /// A new message in a channel or a private conversation (for scrolling and sounds).
+    Message(Room, Box<Message>),
+    /// The roster of a voice channel or a private call changed.
+    Roster(Place),
+    /// Someone is calling you.
+    Ringing(ConversationId),
+    /// A private call changed: answered, or over.
+    CallChanged(ConversationId),
     SoundpadPlay {
         hash: String,
     },
@@ -210,17 +243,30 @@ pub struct Session {
     pub ice_servers: Vec<IceServer>,
     pub emojis: Vec<CustomEmoji>,
     pub clips: Vec<Clip>,
-    pub chats: HashMap<ChannelId, ChatLog>,
+    pub chats: HashMap<Room, ChatLog>,
     /// Messages naming you (or everyone) per channel since you last opened it. Counted here from
     /// the pushes and nowhere else: nothing is sent to the server, and it goes when the app closes.
     pub mentioned: HashMap<ChannelId, u32>,
-    pub open_channel: Option<ChannelId>,
+    pub open_room: Option<Room>,
     /// Channels with messages from others since you last looked at them. Counted from the pushes,
     /// like the mentions, and kept nowhere else.
     pub unread: HashSet<ChannelId>,
-    /// The chat on screen; none while the stage is. `open_channel` stays on the last chat opened,
+    /// The chat on screen; none while the stage is. `open_room` stays on the last chat opened,
     /// which is not the same thing once you go to the stage.
-    pub viewing: Option<ChannelId>,
+    pub viewing: Option<Room>,
+    /// Your private-conversation keys and everybody's public ones.
+    pub vault: Vault,
+    /// Your private conversations, by id.
+    pub dms: HashMap<ConversationId, Dm>,
+    /// The conversation list has come from the server at least once.
+    pub dms_loaded: bool,
+    /// People you blocked.
+    pub blocked: HashSet<UserId>,
+    /// Private calls ringing for you, from you, or under way.
+    pub calls: HashMap<ConversationId, CallInfo>,
+    pub call_rosters: HashMap<ConversationId, Vec<Member>>,
+    /// How each private call ended ("ended", "missed", "declined"), for saying so.
+    pub call_outcomes: HashMap<ConversationId, String>,
     pictures: Lru<String, Slot>,
     _pump: Task<()>,
 }
@@ -257,12 +303,20 @@ impl Session {
                 }
             })
             .detach();
+            let vault = Vault::new(crate::core::keystore::KeyFile::open(&api.base(), &me.nickname), me.id);
             let mut s = Session {
                 api,
                 cache,
                 realtime: Some(rt),
                 link: Link::Reconnecting,
                 users: HashMap::from([(me.id, me.clone())]),
+                vault,
+                dms: HashMap::new(),
+                dms_loaded: false,
+                blocked: HashSet::new(),
+                calls: HashMap::new(),
+                call_rosters: HashMap::new(),
+                call_outcomes: HashMap::new(),
                 me,
                 server_name,
                 server_icon,
@@ -278,13 +332,14 @@ impl Session {
                 clips: Vec::new(),
                 chats: HashMap::new(),
                 mentioned: HashMap::new(),
-                open_channel: None,
+                open_room: None,
                 unread: HashSet::new(),
                 viewing: None,
                 pictures: Lru::new(PICTURE_BUDGET),
                 _pump: pump,
             };
             s.refresh_lists(cx);
+            s.start_private(cx);
             s
         })
     }
@@ -333,6 +388,8 @@ impl Session {
         self.groups = snap.groups;
         self.online = snap.online.into_iter().collect();
         self.rosters = snap.rosters.into_iter().filter_map(|(k, v)| Some((k.parse().ok()?, v))).collect();
+        self.call_rosters = snap.calls.iter().map(|c| (c.conversation_id, c.roster.clone())).collect();
+        self.calls = snap.calls.into_iter().map(|c| (c.conversation_id, c)).collect();
         if let Some(cap) = snap.voice_cap {
             self.voice_cap = cap;
         }
@@ -346,13 +403,16 @@ impl Session {
         match ev {
             realtime::Event::Up(snap) => {
                 let was_down = self.link == Link::Reconnecting && !self.channels.is_empty();
+                let calls_before = self.calls.clone();
                 if let Some(snap) = snap {
                     self.apply_snapshot(*snap);
                 }
                 self.link = Link::Up;
+                self.calls_reconciled(calls_before, cx);
                 if was_down {
                     cx.emit(SessionEvent::Reconnected);
                     self.refresh_lists(cx);
+                    self.start_private(cx);
                     self.catch_up(cx);
                 }
             }
@@ -365,6 +425,9 @@ impl Session {
 
     fn on_push(&mut self, v: Value, cx: &mut Context<Self>) {
         let kind = v.get("type").and_then(Value::as_str).unwrap_or("").to_string();
+        if self.on_private_push(&kind, &v, cx) {
+            return;
+        }
         let parse = |key: &str| v.get(key).cloned().unwrap_or(Value::Null);
         match kind.as_str() {
             "presence" => {
@@ -384,14 +447,15 @@ impl Session {
                 let id = v.get("channelId").and_then(Value::as_i64).unwrap_or(-1);
                 if let Some(roster) = list_of::<Member>(parse("roster")) {
                     self.rosters.insert(id, roster);
-                    cx.emit(SessionEvent::Roster(id));
+                    cx.emit(SessionEvent::Roster(Place::Channel(id)));
                 }
             }
             "message" => {
                 if let Ok(m) = serde_json::from_value::<Message>(parse("message")) {
+                    let room = Room::Channel(m.channel_id);
                     let mine = m.user_id == Some(self.me.id);
                     let for_me = m.mentions.contains(&self.me.id) || m.mentions_everyone;
-                    let away = self.viewing != Some(m.channel_id);
+                    let away = self.viewing != Some(room);
                     if !mine && away {
                         self.unread.insert(m.channel_id);
                     }
@@ -399,15 +463,15 @@ impl Session {
                         *self.mentioned.entry(m.channel_id).or_default() += 1;
                         cx.emit(SessionEvent::Mentioned);
                     }
-                    if let Some(log) = self.chats.get_mut(&m.channel_id) {
+                    if let Some(log) = self.chats.get_mut(&room) {
                         log.push(LogOp::Added(m.clone()));
                     }
-                    cx.emit(SessionEvent::Message(m));
+                    cx.emit(SessionEvent::Message(room, Box::new(m)));
                 }
             }
             "message:updated" => {
                 if let Ok(m) = serde_json::from_value::<Message>(parse("message"))
-                    && let Some(log) = self.chats.get_mut(&m.channel_id)
+                    && let Some(log) = self.chats.get_mut(&Room::Channel(m.channel_id))
                 {
                     log.push(LogOp::Updated(m));
                 }
@@ -415,14 +479,14 @@ impl Session {
             "message:deleted" => {
                 let id = v.get("id").and_then(Value::as_i64).unwrap_or(-1);
                 let ch = v.get("channelId").and_then(Value::as_i64).unwrap_or(-1);
-                if let Some(log) = self.chats.get_mut(&ch) {
+                if let Some(log) = self.chats.get_mut(&Room::Channel(ch)) {
                     log.push(LogOp::Deleted(id));
                 }
             }
             "message:reactions" => {
                 let id = v.get("id").and_then(Value::as_i64).unwrap_or(-1);
                 let ch = v.get("channelId").and_then(Value::as_i64).unwrap_or(-1);
-                if let (Some(log), Some(r)) = (self.chats.get_mut(&ch), list_of::<Reaction>(parse("reactions"))) {
+                if let (Some(log), Some(r)) = (self.chats.get_mut(&Room::Channel(ch)), list_of::<Reaction>(parse("reactions"))) {
                     log.push(LogOp::Reactions(id, r));
                 }
             }
@@ -514,11 +578,36 @@ impl Session {
         !ch.locked || self.unlocked.contains(&ch.id)
     }
 
+    /// What a call is called: the channel's name, or "Call with Ana".
+    pub fn place_name(&self, place: Place) -> String {
+        match place {
+            Place::Channel(id) => self.channel(id).map(|c| c.name.clone()).unwrap_or_default(),
+            Place::Call(id) => {
+                let name = self.display_name(self.peer_of(id), None);
+                trf!("Call with {}", "Chamada com {}", name)
+            }
+        }
+    }
+
+    /// Who is in a voice channel or a private call right now.
+    pub fn roster(&self, place: Place) -> Option<&Vec<Member>> {
+        match place {
+            Place::Channel(id) => self.rosters.get(&id),
+            Place::Call(id) => self.call_rosters.get(&id),
+        }
+    }
+
     // Pictures: avatars, emoji and attachments, by hash.
 
     /// The picture behind a hash, small enough for any box it is drawn in, loading it in the
     /// background the first time it is asked for (and again later if that failed).
     pub fn picture(&mut self, hash: &str, cx: &mut Context<Self>) -> Picture {
+        self.picture_from(hash, Fetch::Public, cx)
+    }
+
+    /// As `picture`, from wherever the attachment lives: a sealed one is fetched from its
+    /// conversation and opened here, off the UI thread. The disk cache keeps it sealed.
+    pub fn picture_from(&mut self, hash: &str, how: Fetch, cx: &mut Context<Self>) -> Picture {
         let tries = match self.pictures.get(hash) {
             Some(Slot::Loading) => return Picture::Loading,
             Some(Slot::Ready(img)) => return Picture::Ready(img.clone()),
@@ -530,7 +619,7 @@ impl Session {
         let (api, cache, h) = (self.api.clone(), self.cache.clone(), hash.to_string());
         cx.spawn(async move |this, cx| {
             let key = h.clone();
-            let got = core::run(async move { cache.get(&api, &h).await }).await;
+            let got = core::run(fetch_attachment(api, cache, h, how)).await;
             let (slot, cost) = match got {
                 Ok((bytes, ct)) => match cx.background_executor().spawn(async move { decode_picture(&bytes, &ct, THUMBNAIL) }).await {
                     Ok((img, cost)) => (Slot::Ready(img), cost),
@@ -571,12 +660,18 @@ impl Session {
 
     /// The picture at its own size (to `FULL`), for the lightbox. Not kept here: whoever asked
     /// drops it from the GPU when done.
-    pub fn full_picture(&self, hash: &str, cx: &mut Context<Self>) -> Task<Option<Arc<RenderImage>>> {
+    pub fn full_picture(&self, hash: &str, how: Fetch, cx: &mut Context<Self>) -> Task<Option<Arc<RenderImage>>> {
         let (api, cache, h) = (self.api.clone(), self.cache.clone(), hash.to_string());
         cx.spawn(async move |_, cx| {
-            let (bytes, ct) = core::run(async move { cache.get(&api, &h).await }).await.ok()?;
+            let (bytes, ct) = core::run(fetch_attachment(api, cache, h, how)).await.ok()?;
             cx.background_executor().spawn(async move { decode_picture(&bytes, &ct, FULL) }).await.ok().map(|(img, _)| img)
         })
+    }
+
+    /// An attachment's bytes as they were sent (opened, if it was sealed), to save to disk.
+    pub fn attachment(&self, hash: &str, how: Fetch) -> impl Future<Output = Result<Arc<Vec<u8>>, ApiError>> + use<> {
+        let (api, cache, h) = (self.api.clone(), self.cache.clone(), hash.to_string());
+        async move { core::run(fetch_attachment(api, cache, h, how)).await.map(|(bytes, _)| bytes) }
     }
 
     pub fn avatar(&mut self, user: UserId, cx: &mut Context<Self>) -> Option<Arc<RenderImage>> {
@@ -619,14 +714,19 @@ impl Session {
 
     // Chat.
 
-    pub fn open(&mut self, channel: ChannelId, cx: &mut Context<Self>) {
-        self.open_channel = Some(channel);
-        self.viewing = Some(channel);
-        self.mentioned.remove(&channel);
-        self.unread.remove(&channel);
-        let log = self.chats.entry(channel).or_default();
+    pub fn open(&mut self, room: Room, cx: &mut Context<Self>) {
+        self.open_room = Some(room);
+        self.viewing = Some(room);
+        match room {
+            Room::Channel(id) => {
+                self.mentioned.remove(&id);
+                self.unread.remove(&id);
+            }
+            Room::Dm(id) => self.mark_read(id, cx),
+        }
+        let log = self.chats.entry(room).or_default();
         if !log.loaded && !log.fetching {
-            self.fetch_latest(channel, cx);
+            self.fetch_latest(room, cx);
         }
         cx.notify();
     }
@@ -641,23 +741,49 @@ impl Session {
     /// After a reconnect: whatever happened in the channels already shown while the socket was
     /// down (and another go at the open one, if it never loaded).
     fn catch_up(&mut self, cx: &mut Context<Self>) {
-        let due: Vec<ChannelId> =
-            self.chats.iter().filter(|(id, l)| !l.fetching && (l.loaded || self.open_channel == Some(**id))).map(|(id, _)| *id).collect();
+        let due: Vec<Room> =
+            self.chats.iter().filter(|(id, l)| !l.fetching && (l.loaded || self.open_room == Some(**id))).map(|(id, _)| *id).collect();
         for id in due {
             self.fetch_latest(id, cx);
         }
     }
 
-    fn fetch_latest(&mut self, channel: ChannelId, cx: &mut Context<Self>) {
-        self.chats.entry(channel).or_default().fetching = true;
+    /// A page of a room's history, before `before` or the latest. A private conversation's comes
+    /// sealed and is opened here, with the keys that came with it.
+    fn page(&self, room: Room, before: Option<MessageId>) -> impl Future<Output = Result<Page, ApiError>> + use<> {
         let api = self.api.clone();
+        core::run(async move {
+            match room {
+                Room::Channel(id) => api.messages(id, before).await.map(Page::Open),
+                Room::Dm(id) => api.dm_messages(id, before).await.map(Page::Sealed),
+            }
+        })
+    }
+
+    fn opened(&mut self, room: Room, page: Page) -> History {
+        match (room, page) {
+            (_, Page::Open(h)) => h,
+            (Room::Dm(id), Page::Sealed(h)) => self.open_history(id, h),
+            (Room::Channel(_), Page::Sealed(_)) => History::default(),
+        }
+    }
+
+    fn fetch_latest(&mut self, room: Room, cx: &mut Context<Self>) {
+        self.chats.entry(room).or_default().fetching = true;
+        let page = self.page(room, None);
         cx.spawn(async move |this, cx| {
-            let got = core::run(async move { api.messages(channel, None).await }).await;
+            let got = page.await;
             let _ = this.update(cx, |s, cx| {
-                let log = s.chats.entry(channel).or_default();
+                let got = got.map(|p| s.opened(room, p));
+                let log = s.chats.entry(room).or_default();
                 match got {
                     Ok(h) => log.land(h),
                     Err(e) => log.fetch_failed(e.message),
+                }
+                if let Room::Dm(id) = room
+                    && s.viewing == Some(room)
+                {
+                    s.mark_read(id, cx);
                 }
                 cx.notify();
             });
@@ -666,18 +792,19 @@ impl Session {
     }
 
     /// One more page of history before the oldest message shown.
-    pub fn load_older(&mut self, channel: ChannelId, cx: &mut Context<Self>) {
-        let Some(log) = self.chats.get_mut(&channel) else { return };
+    pub fn load_older(&mut self, room: Room, cx: &mut Context<Self>) {
+        let Some(log) = self.chats.get_mut(&room) else { return };
         if log.fetching || log.loading_older || !log.more_before {
             return;
         }
         let Some(first) = log.messages.first().map(|m| m.id) else { return };
         log.loading_older = true;
-        let api = self.api.clone();
+        let page = self.page(room, Some(first));
         cx.spawn(async move |this, cx| {
-            let got = core::run(async move { api.messages(channel, Some(first)).await }).await;
+            let got = page.await;
             let _ = this.update(cx, |s, cx| {
-                let log = s.chats.entry(channel).or_default();
+                let got = got.map(|p| s.opened(room, p));
+                let log = s.chats.entry(room).or_default();
                 log.loading_older = false;
                 if let Ok(h) = got {
                     log.more_before = h.messages.len() >= PAGE;
@@ -722,6 +849,29 @@ impl Session {
             match reply {
                 Some(reply) => core::run(reply).await,
                 None => Err(realtime::RequestError { code: ErrorCode::Offline, reply: Value::Null }),
+            }
+        }
+    }
+}
+
+/// An attachment's bytes and type: from the cache or the server, and opened when sealed. Sealed
+/// files are cached as they came, so what this computer keeps on disk is ciphertext too.
+async fn fetch_attachment(api: Api, cache: Cache, hash: String, how: Fetch) -> Result<(Arc<Vec<u8>>, String), ApiError> {
+    match how {
+        Fetch::Public => cache.get(&api, &hash).await,
+        Fetch::Sealed { conversation, file } => {
+            let (sealed, _) = cache.fetch(&hash, || api.download_sealed(conversation, &hash)).await?;
+            let opened = crate::core::crypto::unb64(&file.key)
+                .and_then(|k| <[u8; 32]>::try_from(k).ok())
+                .and_then(|k| crate::core::crypto::open_file(&k, &sealed));
+            match opened {
+                Some(plain) => Ok((Arc::new(plain), file.mime)),
+                None => Err(ApiError {
+                    status: 0,
+                    code: ErrorCode::Corrupt,
+                    message: tr!("That file did not open.", "Esse arquivo não abriu.").into(),
+                    body: Value::Null,
+                }),
             }
         }
     }

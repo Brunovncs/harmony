@@ -729,6 +729,10 @@ pub enum Cue {
     Mention,
     /// A message somewhere you are not looking: lower and softer than a mention, which is for you.
     Message,
+    /// Someone is calling you: repeated while it rings.
+    Ring,
+    /// You are calling someone and they have not picked up yet: quieter, repeated.
+    RingBack,
 }
 
 const C5: f32 = 523.25;
@@ -759,6 +763,8 @@ impl Cue {
             Cue::Undeafen => (&[(D4, 0.), (A4, 0.07)], 0.28, 0.9),
             Cue::Mention => (&[(A5, 0.), (D6, 0.08), (F6, 0.16)], 0.3, 0.9),
             Cue::Message => (&[(E5, 0.), (A5, 0.06)], 0.22, 0.6),
+            Cue::Ring => (&[(E5, 0.), (G5, 0.12), (E5, 0.24), (G5, 0.36), (E5, 0.9), (G5, 1.02), (E5, 1.14), (G5, 1.26)], 0.3, 0.95),
+            Cue::RingBack => (&[(D5, 0.), (D5, 0.45)], 0.35, 0.45),
         }
     }
 }

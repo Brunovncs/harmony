@@ -361,6 +361,94 @@ impl Api {
         self.get(&format!("/api/channels/{channel}/search?q={q}")).await
     }
 
+    // Private conversations: keys.
+
+    pub async fn keys(&self) -> Result<KeysReply> {
+        self.get("/api/keys").await
+    }
+
+    pub async fn lookup_keys(&self, ids: &[KeyId]) -> Result<Vec<PublicKeyInfo>> {
+        #[derive(serde::Deserialize)]
+        struct R {
+            #[serde(deserialize_with = "lenient")]
+            keys: Vec<PublicKeyInfo>,
+        }
+        let ids: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+        Ok(self.get::<R>(&format!("/api/keys/lookup?ids={}", ids.join(","))).await?.keys)
+    }
+
+    pub async fn publish_key(&self, public_key: &str, wrapped: &str) -> Result<OwnKey> {
+        Ok(self.post::<KeyReply>("/api/keys", json!({ "publicKey": public_key, "wrapped": wrapped })).await?.key)
+    }
+
+    pub async fn rewrap_key(&self, key_id: KeyId, wrapped: &str) -> Result<OwnKey> {
+        Ok(self.post::<KeyReply>("/api/keys/wrap", json!({ "keyId": key_id, "wrapped": wrapped })).await?.key)
+    }
+
+    // Private conversations.
+
+    pub async fn dms(&self) -> Result<DmList> {
+        self.get("/api/dms").await
+    }
+
+    pub async fn open_dm(&self, user: UserId) -> Result<Conversation> {
+        Ok(self.post::<ConversationReply>("/api/dms", json!({ "userId": user })).await?.conversation)
+    }
+
+    pub async fn dm_messages(&self, id: ConversationId, before: Option<MessageId>) -> Result<DmHistory> {
+        let q = before.map(|b| format!("?before={b}")).unwrap_or_default();
+        self.get(&format!("/api/dms/{id}/messages{q}")).await
+    }
+
+    pub async fn send_dm(&self, id: ConversationId, sealed: &Sealed, attachment: Option<&str>) -> Result<SealedMessage> {
+        let body = json!({
+            "sealed": sealed.text, "senderKey": sealed.sender_key, "recipientKey": sealed.recipient_key,
+            "attachmentHash": attachment,
+        });
+        Ok(self.post::<SealedReply>(&format!("/api/dms/{id}/messages"), body).await?.message)
+    }
+
+    pub async fn edit_dm(&self, message: MessageId, sealed: &Sealed) -> Result<SealedMessage> {
+        let body = json!({ "sealed": sealed.text, "senderKey": sealed.sender_key, "recipientKey": sealed.recipient_key });
+        Ok(self.post::<SealedReply>(&format!("/api/dm-messages/{message}/edit"), body).await?.message)
+    }
+
+    pub async fn delete_dm(&self, message: MessageId) -> Result<Value> {
+        self.post(&format!("/api/dm-messages/{message}/delete"), json!({})).await
+    }
+
+    /// `None` clears your reactions to the message.
+    pub async fn react_dm(&self, message: MessageId, sealed: Option<&Sealed>) -> Result<Value> {
+        let body = match sealed {
+            Some(s) => json!({ "sealed": s.text, "senderKey": s.sender_key, "recipientKey": s.recipient_key }),
+            None => json!({ "sealed": null }),
+        };
+        self.post(&format!("/api/dm-messages/{message}/react"), body).await
+    }
+
+    pub async fn read_dm(&self, id: ConversationId, up_to: MessageId) -> Result<Value> {
+        self.post(&format!("/api/dms/{id}/read"), json!({ "upTo": up_to })).await
+    }
+
+    pub async fn set_blocked(&self, user: UserId, blocked: bool) -> Result<Vec<UserId>> {
+        #[derive(serde::Deserialize)]
+        struct R {
+            blocked: Vec<UserId>,
+        }
+        Ok(self.post::<R>("/api/dms/blocks", json!({ "userId": user, "blocked": blocked })).await?.blocked)
+    }
+
+    /// Uploads an attachment already sealed on this computer.
+    pub async fn upload_sealed(&self, id: ConversationId, bytes: Vec<u8>) -> Result<Upload> {
+        let url = format!("{}/api/dms/{id}/uploads", self.base());
+        self.send(self.http.post(url).header("Content-Type", "application/octet-stream").body(bytes), Duration::from_secs(120)).await
+    }
+
+    /// A sealed attachment, still sealed: it is opened by whoever holds its key.
+    pub async fn download_sealed(&self, id: ConversationId, hash: &str) -> Result<(Vec<u8>, String)> {
+        self.file(&format!("/api/dms/{id}/uploads/{hash}")).await
+    }
+
     // Files.
 
     pub async fn upload(&self, bytes: Vec<u8>, content_type: &str) -> Result<Upload> {
@@ -514,6 +602,29 @@ struct MessageReply {
     message: Message,
 }
 
+#[derive(serde::Deserialize)]
+struct KeyReply {
+    key: OwnKey,
+}
+
+#[derive(serde::Deserialize)]
+struct ConversationReply {
+    conversation: Conversation,
+}
+
+#[derive(serde::Deserialize)]
+struct SealedReply {
+    message: SealedMessage,
+}
+
+/// Something sealed for a private conversation, and the two keys it was sealed to.
+#[derive(Clone, Debug)]
+pub struct Sealed {
+    pub text: String,
+    pub sender_key: KeyId,
+    pub recipient_key: KeyId,
+}
+
 /// The server's message for a failure: ours, in the reader's language, for every code we know;
 /// the server's own (in English) for one we don't; the status when there is neither.
 fn message_for(code: ErrorCode, status: u16, body: &Value) -> String {
@@ -595,6 +706,18 @@ pub fn friendly(code: ErrorCode, body: &Value) -> Option<String> {
             tr!("Not connected to the server. Try again once it's back.", "Sem conexão com o servidor. Tente de novo quando ela voltar.")
         }
         E::Timeout => tr!("The server didn't answer. Try again.", "O servidor não respondeu. Tente de novo."),
+        E::NoKey => tr!("Set up private messages first.", "Ative as mensagens privadas primeiro."),
+        E::PeerHasNoKey => tr!(
+            "They can't receive private messages yet: they need to update Harmony and open it once.",
+            "Essa pessoa ainda não pode receber mensagens privadas: ela precisa atualizar o Harmony e abri-lo uma vez."
+        ),
+        E::StaleKey => tr!("A security key changed. Try again.", "Uma chave de segurança mudou. Tente de novo."),
+        E::Blocked => tr!("You can't send messages in this conversation.", "Não é possível enviar mensagens nesta conversa."),
+        E::SlowDown => tr!("Too much at once. Wait a moment.", "Muita coisa de uma vez. Espere um pouco."),
+        E::NoSuchConversation => tr!("That conversation is gone.", "Essa conversa não existe mais."),
+        E::NoSuchCall | E::NotAnswered => tr!("That call has ended.", "Essa chamada já terminou."),
+        E::PeerOffline => tr!("They're offline. They'll see you called.", "A pessoa está offline. Ela vai ver que você ligou."),
+        E::NotYourself => tr!("That's you.", "Essa pessoa é você."),
         _ => return None,
     };
     Some(text.into())

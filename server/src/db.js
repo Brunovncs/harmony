@@ -309,6 +309,102 @@ const MIGRATIONS = [
   (db) => {
     db.exec('ALTER TABLE channels ADD COLUMN mic_locked INTEGER NOT NULL DEFAULT 0');
   },
+
+  /*
+   * v12 -- private conversations between two people, end-to-end encrypted.
+   *
+   * The server holds ciphertext and the metadata it cannot avoid knowing
+   * (who, when, how big). It never holds a key that opens anything: the
+   * private half of every identity key is generated on the client, and what
+   * is stored here (`wrapped`) is that key sealed under a recovery key the
+   * server never sees. Nothing below is readable by whoever runs the server,
+   * the owner included, and that is the feature rather than a side effect.
+   *
+   * user_keys keeps HISTORY, not just the current key. A message is sealed
+   * to the pair of keys that existed when it was sent, and somebody who loses
+   * their recovery key and starts over must not make every message the other
+   * person ever received from them unreadable to that other person as well.
+   * The current key is the newest row.
+   *
+   * dm_messages.sender_key / recipient_key are plain integers, not foreign
+   * keys: a message names the keys it was sealed to, and an account removal
+   * that takes the keys with it must not be blocked by -- or cascade through
+   * -- the other person's half of the history, which goes with the
+   * conversation anyway.
+   *
+   * user_a < user_b makes "the conversation between these two" exactly one
+   * row, so two people opening it at the same moment cannot make two.
+   *
+   * dm_reads is a high-water mark per person, which is all an unread count
+   * needs and is the same on every device that person uses. It is never sent
+   * to the other side: "seen" is something to opt into, not a default.
+   *
+   * kind = 'call' rows are written by the server itself -- "missed call",
+   * "call, 5 minutes" -- from facts it already has; `meta` holds them as
+   * plain JSON and `sealed` is null.
+   */
+  (db) => {
+    db.exec(`
+      CREATE TABLE user_keys (
+        id         INTEGER PRIMARY KEY,
+        user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        public_key TEXT    NOT NULL,
+        wrapped    TEXT    NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX user_keys_user ON user_keys(user_id, id DESC);
+
+      CREATE TABLE dm_conversations (
+        id         INTEGER PRIMARY KEY,
+        user_a     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        user_b     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at INTEGER NOT NULL,
+        last_at    INTEGER NOT NULL,
+        CHECK (user_a < user_b),
+        UNIQUE (user_a, user_b)
+      );
+      CREATE INDEX dm_conversations_b ON dm_conversations(user_b);
+
+      CREATE TABLE dm_messages (
+        id              INTEGER PRIMARY KEY,
+        conversation_id INTEGER NOT NULL REFERENCES dm_conversations(id) ON DELETE CASCADE,
+        user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        kind            TEXT    NOT NULL DEFAULT 'text',
+        sender_key      INTEGER,
+        recipient_key   INTEGER,
+        sealed          TEXT,
+        meta            TEXT,
+        attachment_hash TEXT    REFERENCES uploads(hash),
+        created_at      INTEGER NOT NULL,
+        edited_at       INTEGER
+      );
+      CREATE INDEX dm_messages_conversation ON dm_messages(conversation_id, id DESC);
+
+      CREATE TABLE dm_reactions (
+        message_id    INTEGER NOT NULL REFERENCES dm_messages(id) ON DELETE CASCADE,
+        user_id       INTEGER NOT NULL REFERENCES users(id)       ON DELETE CASCADE,
+        sender_key    INTEGER NOT NULL,
+        recipient_key INTEGER NOT NULL,
+        sealed        TEXT    NOT NULL,
+        updated_at    INTEGER NOT NULL,
+        PRIMARY KEY (message_id, user_id)
+      );
+
+      CREATE TABLE dm_reads (
+        conversation_id INTEGER NOT NULL REFERENCES dm_conversations(id) ON DELETE CASCADE,
+        user_id         INTEGER NOT NULL REFERENCES users(id)            ON DELETE CASCADE,
+        last_read_id    INTEGER NOT NULL,
+        PRIMARY KEY (conversation_id, user_id)
+      );
+
+      CREATE TABLE dm_blocks (
+        blocker_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        blocked_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (blocker_id, blocked_id)
+      );
+    `);
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

@@ -15,6 +15,8 @@ import { WebSocketServer } from 'ws';
 
 import { publicChannel, publicGroup, VOICE_HARD_CAP } from './channels.js';
 import { publicUser } from './accounts.js';
+import { Calls, publicCall } from './calls.js';
+import { DirectMessages } from './dms.js';
 
 /** A socket that has not answered a ping in this long is assumed dead. */
 const HEARTBEAT_MS = 15_000;
@@ -33,6 +35,9 @@ export class Realtime {
    * @param {import('./channels.js').Channels} deps.channels
    * @param {import('./channels.js').VoiceRooms} deps.voice
    * @param {(channelId: number, userId: number, mid: number, host: string) => object} deps.issueTokens
+   * @param {(conversationId: number, userId: number, mid: number, host: string) => object} deps.issueCallTokens
+   * @param {import('./dms.js').DirectMessages} deps.dms
+   * @param {import('./calls.js').Calls} deps.calls
    * @param {(channelId: number, mid: number) => Promise<void>} deps.kickMember
    */
   constructor(deps) {
@@ -121,6 +126,8 @@ export class Realtime {
     for (const { channelId } of this.#deps.voice.leaveAll(client.user.id)) {
       this.broadcastRoster(channelId);
     }
+    // Ringing ends; a call under way waits a little for them to come back.
+    this.#deps.calls?.disconnected(client.user.id);
     // After leaveAll, so a client redrawing on this gets a roster that has
     // already lost them rather than one that still has them in a channel.
     this.broadcastPresence();
@@ -198,6 +205,7 @@ export class Realtime {
         return ws.close(4401, 'bad token');
       }
       client.user = user;
+      this.#deps.calls?.reconnected(user.id);
       // Before the reply, so the arriving client's own hello already
       // contains them -- otherwise the one person guaranteed to be online
       // is missing from the list until somebody else connects.
@@ -215,6 +223,12 @@ export class Realtime {
         rosters: this.#deps.voice.allRosters(),
         online: this.onlineUserIds(),
         voiceCap: VOICE_HARD_CAP,
+        // A call ringing for them, or one they were in before the socket
+        // dropped: without it a reconnect mid-call would forget the call.
+        calls: (this.#deps.calls?.forUser(user.id) ?? []).map((c) => ({
+          ...publicCall(c),
+          roster: this.#deps.calls.voice.roster(c.conversationId),
+        })),
       });
     }
 
@@ -235,6 +249,10 @@ export class Realtime {
       'voice:mute': this.#voiceMute,
       'voice:publishing': this.#voicePublishing,
       'voice:refresh': this.#voiceRefresh,
+      'call:start': this.#callStart,
+      'call:answer': this.#callAnswer,
+      'call:hang-up': this.#callHangUp,
+      'call:join': this.#callJoin,
       'soundpad:play': this.#soundpadPlay,
       'admin:force-mute': this.#adminForceMute,
       'admin:move': this.#adminMove,
@@ -252,14 +270,20 @@ export class Realtime {
     if (verdict !== 'ok') return { type: 'voice:error', error: verdict };
 
     // Leaving the previous channel first keeps "one voice channel at a time"
-    // true without the client having to sequence two requests.
+    // true without the client having to sequence two requests. A private call
+    // counts as somewhere too.
     for (const { channelId: left } of this.#deps.voice.leaveAll(user.id)) {
       if (left !== channelId) this.broadcastRoster(left);
     }
+    this.#deps.calls?.leaveUser(user.id);
 
     const joined = this.#deps.voice.join(channelId, user);
     if (!joined.ok) {
       return { type: 'voice:error', error: joined.error, cap: VOICE_HARD_CAP };
+    }
+    // Arriving muted is said in the join itself, so the room never sees a live mic flash by.
+    if (msg.muted !== undefined) {
+      this.#deps.voice.setMuted(channelId, user.id, msg.muted, msg.deafened);
     }
 
     this.broadcastRoster(channelId);
@@ -272,30 +296,58 @@ export class Realtime {
     };
   }
 
+  /**
+   * Where a voice request is about: a channel, or -- with `conversationId`
+   * instead of `channelId` -- a private call. The two keep their slots in
+   * separate VoiceRooms, so the same mute, publishing and refresh handlers
+   * serve both, and each tells its own audience about a change: a channel
+   * everybody, a call only its two people.
+   */
+  #place(msg) {
+    if (msg.conversationId != null && this.#deps.calls) {
+      const id = Number(msg.conversationId);
+      return {
+        id,
+        rooms: this.#deps.calls.voice,
+        announce: () => this.#deps.calls.broadcastRoster(id),
+        tokens: this.#deps.issueCallTokens,
+        echo: { conversationId: id },
+      };
+    }
+    const id = Number(msg.channelId);
+    return {
+      id,
+      rooms: this.#deps.voice,
+      announce: () => this.broadcastRoster(id),
+      tokens: this.#deps.issueTokens,
+      echo: { channelId: id },
+    };
+  }
+
   #voiceLeave(user, msg) {
-    const channelId = Number(msg.channelId);
-    const mid = this.#deps.voice.leave(channelId, user.id);
+    const place = this.#place(msg);
+    const mid = place.rooms.leave(place.id, user.id);
     if (mid === false) return { type: 'voice:error', error: 'not_in_channel' };
-    this.broadcastRoster(channelId);
-    return { type: 'voice:left', channelId };
+    place.announce();
+    return { type: 'voice:left', ...place.echo };
   }
 
   #voiceMute(user, msg) {
-    const channelId = Number(msg.channelId);
-    if (!this.#deps.voice.setMuted(channelId, user.id, msg.muted, msg.deafened)) {
+    const place = this.#place(msg);
+    if (!place.rooms.setMuted(place.id, user.id, msg.muted, msg.deafened)) {
       return { type: 'voice:error', error: 'not_in_channel' };
     }
-    this.broadcastRoster(channelId);
+    place.announce();
     return { type: 'voice:ok' };
   }
 
   /** The client telling us which of its paths are actually publishing. */
   #voicePublishing(user, msg) {
-    const channelId = Number(msg.channelId);
-    const found = this.#deps.voice.find(channelId, user.id);
+    const place = this.#place(msg);
+    const found = place.rooms.find(place.id, user.id);
     if (!found) return { type: 'voice:error', error: 'not_in_channel' };
-    this.#deps.voice.trackPublish(channelId, found.mid, String(msg.kind), Boolean(msg.on));
-    this.broadcastRoster(channelId);
+    place.rooms.trackPublish(place.id, found.mid, String(msg.kind), Boolean(msg.on));
+    place.announce();
     return { type: 'voice:ok' };
   }
 
@@ -308,13 +360,95 @@ export class Realtime {
    * joins the channel an hour in, hence this.
    */
   #voiceRefresh(user, msg, ws) {
-    const channelId = Number(msg.channelId);
-    const found = this.#deps.voice.find(channelId, user.id);
+    const place = this.#place(msg);
+    const found = place.rooms.find(place.id, user.id);
     if (!found) return { type: 'voice:error', error: 'not_in_channel' };
     return {
       type: 'voice:tokens',
-      channelId,
-      ...this.#deps.issueTokens(channelId, user.id, found.mid, this.#clients.get(ws)?.host),
+      ...place.echo,
+      ...place.tokens(place.id, user.id, found.mid, this.#clients.get(ws)?.host),
+    };
+  }
+
+  // ------------------------------------------------------------- calls
+
+  /** The conversation in `msg`, if this user is in it; and the other person. */
+  #conversation(user, msg) {
+    const conversation = this.#deps.dms?.forUser(user.id, Number(msg.conversationId));
+    if (!conversation) return null;
+    return { conversation, peerId: DirectMessages.peerOf(conversation, user.id) };
+  }
+
+  /**
+   * Ring the other person in a conversation.
+   *
+   * `sealedKey` is the call's media key, sealed by the caller to the
+   * conversation's keys exactly as a message is; the server passes it on and
+   * cannot open it. Blocking either way round refuses the call as it refuses
+   * a message.
+   */
+  #callStart(user, msg) {
+    const found = this.#conversation(user, msg);
+    if (!found) return { type: 'call:error', error: 'no_such_conversation' };
+    const { conversation, peerId } = found;
+    if (this.#deps.dms.isBlocked(user.id, peerId)) return { type: 'call:error', error: 'blocked' };
+    if (typeof msg.sealedKey !== 'string' || !/^[A-Za-z0-9_-]{40,512}$/.test(msg.sealedKey)) {
+      return { type: 'call:error', error: 'bad_message' };
+    }
+    const keys = this.#deps.dms.checkKeys(conversation, user.id, msg.senderKey, msg.recipientKey);
+    if (!keys.ok) return { type: 'call:error', error: keys.error };
+
+    const result = this.#deps.calls.start({
+      conversationId: conversation.id,
+      callerId: user.id,
+      calleeId: peerId,
+      sealedKey: msg.sealedKey,
+      senderKey: msg.senderKey,
+      recipientKey: msg.recipientKey,
+      calleeOnline: this.#isOnline(peerId),
+    });
+    if (!result.ok) return { type: 'call:error', error: result.error };
+    return { type: 'call:ok', call: publicCall(result.call) };
+  }
+
+  #callAnswer(user, msg) {
+    const result = this.#deps.calls?.answer(Number(msg.conversationId), user.id);
+    if (!result?.ok) return { type: 'call:error', error: 'no_such_call' };
+    return { type: 'call:ok', call: publicCall(result.call) };
+  }
+
+  /** Cancel, decline or hang up: which one it is depends on who and when. See Calls.hangUp. */
+  #callHangUp(user, msg) {
+    const result = this.#deps.calls?.hangUp(Number(msg.conversationId), user.id);
+    if (!result?.ok) return { type: 'call:error', error: 'no_such_call' };
+    return { type: 'call:ok' };
+  }
+
+  /**
+   * Take a media slot in a call: the caller while it rings, so they are ready
+   * the moment it is answered, and the callee once they have answered. Being
+   * in a call is being somewhere, so any voice channel is left first.
+   */
+  #callJoin(user, msg, ws) {
+    const call = this.#deps.calls?.get(Number(msg.conversationId));
+    if (!call || !Calls.isParty(call, user.id)) return { type: 'call:error', error: 'no_such_call' };
+    if (call.state !== 'active' && call.callerId !== user.id) {
+      return { type: 'call:error', error: 'not_answered' };
+    }
+
+    for (const { channelId } of this.#deps.voice.leaveAll(user.id)) this.broadcastRoster(channelId);
+    const joined = this.#deps.calls.voice.join(call.conversationId, user);
+    if (!joined.ok) return { type: 'call:error', error: joined.error };
+    if (msg.muted !== undefined) {
+      this.#deps.calls.voice.setMuted(call.conversationId, user.id, msg.muted, msg.deafened);
+    }
+    this.#deps.calls.broadcastRoster(call.conversationId);
+    return {
+      type: 'call:joined',
+      conversationId: call.conversationId,
+      mid: joined.mid,
+      ...this.#deps.issueCallTokens(call.conversationId, user.id, joined.mid, this.#clients.get(ws)?.host),
+      roster: this.#deps.calls.voice.roster(call.conversationId),
     };
   }
 

@@ -14,7 +14,6 @@ use crate::core::types::VoiceTokens;
 use crate::session::Session;
 use gpui::{Context, Entity};
 use libwebrtc::peer_connection_factory::native::PeerConnectionFactoryExt;
-use serde_json::json;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -210,10 +209,11 @@ impl Voice {
             let s = session.read(cx);
             (s.api.clone(), s.ice_servers.clone(), s.realtime.clone())
         };
-        let channel = self.channel;
+        let place = self.place;
+        let key = self.key.clone();
         cx.spawn(async move |this, cx| {
             // Fresh tokens first: the ones from joining may be close to expiring.
-            let tokens = match Session::request(rt, "voice:refresh", json!({ "channelId": channel })).await {
+            let tokens = match Session::request(rt, "voice:refresh", place.payload()).await {
                 Ok(v) => serde_json::from_value::<VoiceTokens>(v).ok(),
                 Err(_) => None,
             };
@@ -232,7 +232,7 @@ impl Voice {
                 TileKind::Screen => tokens.publish.screen.clone(),
             };
             let link = core::run(async move {
-                let link = rtc::publish(&api, &url, &ice, audio.map(|a| (a, 128_000)), Some((track, params))).await?;
+                let link = rtc::publish(&api, &url, &ice, audio.map(|a| (a, 128_000)), Some((track, params)), key.as_ref()).await?;
                 if link.connected(voice::CONNECT_LIMIT).await { Ok(link) } else { Err(voice::not_connected()) }
             })
             .await;

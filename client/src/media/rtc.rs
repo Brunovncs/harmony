@@ -7,6 +7,9 @@ use crate::core::types::{ErrorCode, IceServer};
 use libwebrtc::MediaType;
 use libwebrtc::audio_track::RtcAudioTrack;
 use libwebrtc::media_stream_track::MediaStreamTrack;
+use libwebrtc::native::frame_cryptor::{
+    EncryptionAlgorithm, EncryptionState, FrameCryptor, KeyDerivationAlgorithm, KeyProvider, KeyProviderOptions,
+};
 use libwebrtc::peer_connection::{IceGatheringState, OfferOptions, PeerConnection, PeerConnectionState};
 use libwebrtc::peer_connection_factory::{self as pcf, PeerConnectionFactory, RtcConfiguration};
 use libwebrtc::rtp_parameters::{DegradationPreference, RtpCodecCapability};
@@ -16,6 +19,56 @@ use libwebrtc::stats::RtcStats;
 use libwebrtc::video_track::RtcVideoTrack;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+
+/// The key a private call's media is sealed with, frame by frame, before it leaves this computer.
+///
+/// MediaMTX relays the RTP as always, but every audio and video frame in it is AES-GCM sealed
+/// under this key (LiveKit's frame cryptor): the relay forwards what it cannot read. Codec headers
+/// stay in the clear, which is all the relay needs to packetize and to find keyframes; measured
+/// through MediaMTX for Opus, H.264 and VP8 before this was built. The key itself is random per
+/// call and reaches the other person sealed inside the call's ring (`dm::Vault`).
+#[derive(Clone)]
+pub struct FrameKey(KeyProvider);
+
+impl FrameKey {
+    pub fn new(key: &[u8; 32]) -> FrameKey {
+        let provider = KeyProvider::new(KeyProviderOptions {
+            shared_key: true,
+            // No ratcheting: a call's key never changes, and with a window every frame that fails
+            // to open would cost a round of key derivation trying the next one.
+            ratchet_window_size: 0,
+            ratchet_salt: b"harmony-call-v1".to_vec(),
+            // A frame that does not open is dropped, never played; no count makes the key invalid.
+            failure_tolerance: -1,
+            key_ring_size: 16,
+            key_derivation_algorithm: KeyDerivationAlgorithm::PBKDF2,
+        });
+        provider.set_shared_key(0, key.to_vec());
+        FrameKey(provider)
+    }
+
+    fn cryptor_for(&self, kind: Side) -> FrameCryptor {
+        let fc = match kind {
+            Side::Send(sender) => FrameCryptor::new_for_rtp_sender(factory(), "harmony".into(), EncryptionAlgorithm::AesGcm, self.0.clone(), sender),
+            Side::Receive(receiver) => {
+                FrameCryptor::new_for_rtp_receiver(factory(), "harmony".into(), EncryptionAlgorithm::AesGcm, self.0.clone(), receiver)
+            }
+        };
+        fc.on_state_change(Some(Box::new(|_, state: EncryptionState| match state {
+            EncryptionState::Ok | EncryptionState::New => {}
+            other => log::warn!("call encryption: {other:?}"),
+        })));
+        fc.set_key_index(0);
+        // The C++ side starts disabled.
+        fc.set_enabled(true);
+        fc
+    }
+}
+
+enum Side {
+    Send(libwebrtc::rtp_sender::RtpSender),
+    Receive(libwebrtc::rtp_receiver::RtpReceiver),
+}
 
 static FACTORY: OnceLock<PeerConnectionFactory> = OnceLock::new();
 static HARDWARE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -119,6 +172,8 @@ pub struct Link {
     /// Since when the connection has been `Disconnected`, as last looked at by `is_stuck`.
     down_since: parking_lot::Mutex<Option<std::time::Instant>>,
     api: Api,
+    /// A private call's frame cryptors, one per track: they live exactly as long as the connection.
+    _cryptors: Vec<FrameCryptor>,
 }
 
 impl Link {
@@ -428,7 +483,14 @@ pub fn with_candidates(sdp: &str, candidates: &[(usize, String)]) -> String {
     out
 }
 
-async fn negotiate(api: &Api, pc: PeerConnection, url: &str, gathering: Gathering, receive: bool) -> Result<Link, ApiError> {
+async fn negotiate(
+    api: &Api,
+    pc: PeerConnection,
+    url: &str,
+    gathering: Gathering,
+    receive: bool,
+    cryptors: Vec<FrameCryptor>,
+) -> Result<Link, ApiError> {
     let fail = |m: String| ApiError { status: 0, code: ErrorCode::MediaError, message: m, body: Default::default() };
     // The bindings always pass the legacy offerToReceive options, and `false` turns receiving
     // transceivers inactive, so watching has to ask for it.
@@ -462,6 +524,7 @@ async fn negotiate(api: &Api, pc: PeerConnection, url: &str, gathering: Gatherin
         closed: Default::default(),
         down_since: Default::default(),
         api: api.clone(),
+        _cryptors: cryptors,
     })
 }
 
@@ -487,13 +550,15 @@ fn new_pc(ice: &[IceServer]) -> Result<(PeerConnection, Gathering), ApiError> {
     Ok((pc, Gathering { done, candidates }))
 }
 
-/// Publishes a microphone and/or a video to a WHIP URL.
+/// Publishes a microphone and/or a video to a WHIP URL; with a `FrameKey`, every frame is sealed
+/// before it leaves, from the very first one.
 pub async fn publish(
     api: &Api,
     url: &str,
     ice: &[IceServer],
     audio: Option<(RtcAudioTrack, u64)>,
     video: Option<(RtcVideoTrack, VideoParams)>,
+    key: Option<&FrameKey>,
 ) -> Result<Link, ApiError> {
     let (pc, gathered) = new_pc(ice)?;
     let init = || RtpTransceiverInit {
@@ -502,9 +567,11 @@ pub async fn publish(
         send_encodings: Vec::new(),
     };
     let fail = |m: String| ApiError { status: 0, code: ErrorCode::MediaError, message: m, body: Default::default() };
+    let mut cryptors = Vec::new();
     let mut audio_bitrate = None;
     if let Some((track, bitrate)) = audio {
-        pc.add_transceiver(MediaStreamTrack::Audio(track), init()).map_err(|e| fail(e.message))?;
+        let t = pc.add_transceiver(MediaStreamTrack::Audio(track), init()).map_err(|e| fail(e.message))?;
+        cryptors.extend(key.map(|k| k.cryptor_for(Side::Send(t.sender()))));
         audio_bitrate = Some(bitrate);
     }
     let mut video_params = None;
@@ -513,9 +580,10 @@ pub async fn publish(
         t.sender().set_video_encoder_backend(encoder_backend());
         let caps = factory().get_rtp_sender_capabilities(MediaType::Video);
         let _ = t.set_codec_preferences(prefer_h264(caps.codecs));
+        cryptors.extend(key.map(|k| k.cryptor_for(Side::Send(t.sender()))));
         video_params = Some(params);
     }
-    let link = negotiate(api, pc, url, gathered, false).await?;
+    let link = negotiate(api, pc, url, gathered, false, cryptors).await?;
     // Encoder limits go on after the answer, once the sender has its encodings.
     for sender in link.pc.senders() {
         match sender.track() {
@@ -574,24 +642,29 @@ pub enum Track {
     Video(RtcVideoTrack),
 }
 
-/// Watches a WHEP URL. Tracks arrive through `on_track` as the connection comes up.
+/// Watches a WHEP URL. Tracks arrive through `on_track` as the connection comes up. With a
+/// `FrameKey`, frames are opened as they arrive; one that does not open is never played.
 pub async fn watch(
     api: &Api,
     url: &str,
     ice: &[IceServer],
     video: bool,
+    key: Option<&FrameKey>,
     on_track: impl FnMut(Track) + Send + 'static,
 ) -> Result<Link, ApiError> {
     let (pc, gathered) = new_pc(ice)?;
     let init = || RtpTransceiverInit { direction: RtpTransceiverDirection::RecvOnly, stream_ids: Vec::new(), send_encodings: Vec::new() };
     let fail = |m: String| ApiError { status: 0, code: ErrorCode::MediaError, message: m, body: Default::default() };
+    let mut cryptors = Vec::new();
     if video {
         let t = pc.add_transceiver_for_media(MediaType::Video, init()).map_err(|e| fail(e.message))?;
         let caps = factory().get_rtp_receiver_capabilities(MediaType::Video);
         let _ = t.set_codec_preferences(prefer_h264(caps.codecs));
+        cryptors.extend(key.map(|k| k.cryptor_for(Side::Receive(t.receiver()))));
     }
-    pc.add_transceiver_for_media(MediaType::Audio, init()).map_err(|e| fail(e.message))?;
-    let link = negotiate(api, pc, url, gathered, true).await?;
+    let t = pc.add_transceiver_for_media(MediaType::Audio, init()).map_err(|e| fail(e.message))?;
+    cryptors.extend(key.map(|k| k.cryptor_for(Side::Receive(t.receiver()))));
+    let link = negotiate(api, pc, url, gathered, true, cryptors).await?;
     // Each receiving transceiver has its track from the start; hand them over once connected.
     let mut on_track = on_track;
     log::debug!("{} transceivers", link.pc.transceivers().len());

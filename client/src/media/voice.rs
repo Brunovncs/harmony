@@ -218,7 +218,10 @@ const MIC_DISCONNECTED: Duration = Duration::from_secs(8);
 
 pub struct Voice {
     session: Entity<Session>,
-    pub channel: ChannelId,
+    pub place: Place,
+    /// A private call's frame key: everything published is sealed with it, everything watched
+    /// opened with it. None in a voice channel.
+    pub(super) key: Option<rtc::FrameKey>,
     tokens: VoiceTokens,
     mid: Option<i64>,
     muted: bool,
@@ -257,9 +260,11 @@ const SPEAK_ON: f32 = 0.0075;
 const SPEAK_OFF: f32 = 0.0035;
 
 impl Voice {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session: Entity<Session>,
-        channel: ChannelId,
+        place: Place,
+        key: Option<rtc::FrameKey>,
         tokens: VoiceTokens,
         mid: Option<i64>,
         muted: bool,
@@ -296,7 +301,8 @@ impl Voice {
         });
         let mut v = Voice {
             session,
-            channel,
+            place,
+            key,
             tokens,
             mid,
             muted,
@@ -358,9 +364,10 @@ impl Voice {
         let url = self.tokens.publish.voice.clone();
         let ice = self.ice(cx);
         let mid = self.mid;
+        let key = self.key.clone();
         cx.spawn(async move |this, cx| {
             let link = core::run(async move {
-                let link = rtc::publish(&api, &url, &ice, Some((track, 32_000)), None).await?;
+                let link = rtc::publish(&api, &url, &ice, Some((track, 32_000)), None, key.as_ref()).await?;
                 if link.connected(CONNECT_LIMIT).await { Ok(link) } else { Err(not_connected()) }
             })
             .await;
@@ -469,7 +476,7 @@ impl Voice {
     fn peer_url(&self, mid: i64, kind: &str) -> String {
         let t = &self.tokens;
         let token = url::form_urlencoded::byte_serialize(t.token.as_bytes()).collect::<String>();
-        format!("{}/vc-{}-{}-{kind}/whep?token={token}", t.whep_base.trim_end_matches('/'), base36(self.channel), base36(mid))
+        format!("{}/{}/whep?token={token}", t.whep_base.trim_end_matches('/'), self.place.path(mid, kind))
     }
 
     /// Brings everything in line with a new roster.
@@ -510,12 +517,13 @@ impl Voice {
         let api = self.session.read(cx).api.clone();
         let url = self.peer_url(mid, "v");
         let ice = self.ice(cx);
+        let key = self.key.clone();
         let pumps: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Default::default();
         let pump_slot = pumps.clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(after).await;
             let link = core::run(async move {
-                rtc::watch(&api, &url, &ice, false, move |track| {
+                rtc::watch(&api, &url, &ice, false, key.as_ref(), move |track| {
                     if let Track::Audio(a) = track {
                         let src = source.clone();
                         log::info!("voice from slot {mid}: track in hand");
@@ -559,12 +567,13 @@ impl Voice {
         let api = self.session.read(cx).api.clone();
         let url = self.peer_url(mid, kind.path());
         let ice = self.ice(cx);
+        let key = self.key.clone();
         let weak = tile.downgrade();
         let pumps: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Default::default();
         let pump_slot = pumps.clone();
         cx.spawn(async move |this, cx| {
             let link = core::run(async move {
-                rtc::watch(&api, &url, &ice, true, move |track| {
+                rtc::watch(&api, &url, &ice, true, key.as_ref(), move |track| {
                     if let Some(p) = super::video::pump(track, &slot, sound.as_ref()) {
                         pump_slot.lock().push(p);
                     }
@@ -601,9 +610,9 @@ impl Voice {
 
     fn refresh_tokens(&mut self, cx: &mut Context<Self>) {
         let rt = self.session.read(cx).realtime.clone();
-        let channel = self.channel;
+        let place = self.place;
         cx.spawn(async move |this, cx| {
-            if let Ok(v) = Session::request(rt, "voice:refresh", serde_json::json!({ "channelId": channel })).await
+            if let Ok(v) = Session::request(rt, "voice:refresh", place.payload()).await
                 && let Ok(t) = serde_json::from_value::<VoiceTokens>(v)
             {
                 let _ = this.update(cx, |v, _| v.tokens = t);
@@ -694,7 +703,7 @@ impl Voice {
         let live = [("v", self.mic.is_some() && self.mic_readable), ("c", self.share_live(TileKind::Camera)), ("s", self.share_live(TileKind::Screen))];
         let now = Instant::now();
         let rt = self.session.read(cx).realtime.clone();
-        let channel = self.channel;
+        let place = self.place;
         for (kind, on) in publishing_fixes(live, &mine.publishing) {
             if self.announced.get(kind).is_some_and(|&(was, at)| was == on && now.duration_since(at) < ANNOUNCE_AGAIN) {
                 continue;
@@ -703,7 +712,7 @@ impl Voice {
             log::info!("telling the server {kind} is {}", if on { "on" } else { "off" });
             let rt = rt.clone();
             cx.spawn(async move |this, cx| {
-                let payload = serde_json::json!({ "channelId": channel, "kind": kind, "on": on });
+                let payload = place.with(serde_json::json!({ "kind": kind, "on": on }));
                 if let Err(e) = Session::request(rt, "voice:publishing", payload).await {
                     log::warn!("voice:publishing {kind} {on} failed: {e}");
                     let _ = this.update(cx, |v, _| v.announced.remove(kind));

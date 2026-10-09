@@ -13,6 +13,8 @@ use std::collections::HashMap;
 pub type UserId = i64;
 pub type ChannelId = i64;
 pub type MessageId = i64;
+pub type ConversationId = i64;
+pub type KeyId = i64;
 
 /// The `error` codes the server answers with, and the client's own for failures that never got
 /// an answer.
@@ -75,6 +77,19 @@ pub enum ErrorCode {
     BadReply,
     BadHash,
     Corrupt,
+    // Private conversations and calls.
+    StaleKey,
+    NoKey,
+    PeerHasNoKey,
+    BadKey,
+    BadMessage,
+    Blocked,
+    SlowDown,
+    NotYourself,
+    NoSuchConversation,
+    NoSuchCall,
+    NotAnswered,
+    PeerOffline,
     #[serde(other)]
     Unknown,
 }
@@ -249,6 +264,251 @@ pub struct Message {
     pub mentions_everyone: bool,
     #[serde(default)]
     pub created_at: i64,
+    /// A private conversation's message, as opened on this computer; none for a channel's.
+    #[serde(skip)]
+    pub private: Option<Private>,
+}
+
+/// What only the two people in a private conversation know about one of its messages, once it is
+/// opened here. A message reuses the channel shape for everything else, so one chat view draws both.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Private {
+    /// The attachment's key and details, which travel sealed inside the message.
+    pub file: Option<SealedFile>,
+    /// A line the server wrote about a call.
+    pub call: Option<CallMeta>,
+    /// It did not open here: sealed to a key this computer does not have.
+    pub unreadable: bool,
+}
+
+/// An attachment in a private conversation: the server has only its ciphertext.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SealedFile {
+    pub key: String,
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallMeta {
+    /// "ended", "missed" or "declined".
+    pub outcome: String,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+}
+
+/// Someone's public identity key, as `/api/keys` lists them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicKeyInfo {
+    pub id: KeyId,
+    pub user_id: UserId,
+    pub public_key: String,
+    #[serde(default)]
+    pub created_at: i64,
+}
+
+/// Your own key, with its private half sealed under your recovery key.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnKey {
+    pub id: KeyId,
+    pub public_key: String,
+    pub wrapped: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct KeysReply {
+    #[serde(default, deserialize_with = "lenient")]
+    pub keys: Vec<PublicKeyInfo>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub mine: Option<OwnKey>,
+}
+
+/// A private conversation's message as the server holds it: sealed.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SealedMessage {
+    pub id: MessageId,
+    pub conversation_id: ConversationId,
+    pub user_id: UserId,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub sender_key: Option<KeyId>,
+    #[serde(default)]
+    pub recipient_key: Option<KeyId>,
+    #[serde(default)]
+    pub sealed: Option<String>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub meta: Option<CallMeta>,
+    #[serde(default)]
+    pub attachment_hash: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub reactions: Vec<SealedReaction>,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub edited_at: Option<i64>,
+}
+
+/// One person's reactions to a message, sealed as one.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SealedReaction {
+    pub user_id: UserId,
+    pub sender_key: KeyId,
+    pub recipient_key: KeyId,
+    pub sealed: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Conversation {
+    pub id: ConversationId,
+    pub user_ids: Vec<UserId>,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub last_at: i64,
+    #[serde(default)]
+    pub unread: u32,
+    #[serde(default)]
+    pub last_read_id: MessageId,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub last: Option<SealedMessage>,
+}
+
+impl Conversation {
+    pub fn peer(&self, me: UserId) -> UserId {
+        self.user_ids.iter().copied().find(|u| *u != me).unwrap_or(me)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct DmList {
+    #[serde(default, deserialize_with = "lenient")]
+    pub conversations: Vec<Conversation>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub keys: Vec<PublicKeyInfo>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub blocked: Vec<UserId>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct DmHistory {
+    #[serde(default, deserialize_with = "lenient")]
+    pub messages: Vec<SealedMessage>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub keys: Vec<PublicKeyInfo>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CallPhase {
+    Ringing,
+    Active,
+    #[serde(other)]
+    Ended,
+}
+
+/// A call in a private conversation, as the server pushes it.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallInfo {
+    pub conversation_id: ConversationId,
+    pub caller_id: UserId,
+    pub callee_id: UserId,
+    pub state: CallPhase,
+    #[serde(default)]
+    pub started_at: i64,
+    #[serde(default)]
+    pub answered_at: Option<i64>,
+    #[serde(default)]
+    pub sealed_key: String,
+    #[serde(default)]
+    pub sender_key: KeyId,
+    #[serde(default)]
+    pub recipient_key: KeyId,
+    #[serde(default)]
+    pub outcome: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub roster: Vec<Member>,
+}
+
+/// Where a call happens: a voice channel, or the call of a private conversation. They share slots,
+/// rosters, mute and publishing; the server tells them apart by which id a request carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Place {
+    Channel(ChannelId),
+    Call(ConversationId),
+}
+
+impl Place {
+    /// The id field every voice request about this place carries.
+    pub fn payload(self) -> Value {
+        match self {
+            Place::Channel(id) => serde_json::json!({ "channelId": id }),
+            Place::Call(id) => serde_json::json!({ "conversationId": id }),
+        }
+    }
+
+    /// The payload with more fields in it.
+    pub fn with(self, extra: Value) -> Value {
+        let mut out = self.payload();
+        if let (Value::Object(o), Value::Object(e)) = (&mut out, extra) {
+            o.extend(e);
+        }
+        out
+    }
+
+    /// A member's media path, as the server names them: `vc-<cid>-<mid>-<k>` in a channel,
+    /// `dm.<conversation>.<mid>.<k>` in a call.
+    pub fn path(self, mid: i64, kind: &str) -> String {
+        match self {
+            Place::Channel(id) => format!("vc-{}-{}-{kind}", base36(id), base36(mid)),
+            Place::Call(id) => format!("dm.{}.{}.{kind}", base36(id), base36(mid)),
+        }
+    }
+
+    pub fn channel(self) -> Option<ChannelId> {
+        match self {
+            Place::Channel(id) => Some(id),
+            Place::Call(_) => None,
+        }
+    }
+
+    pub fn conversation(self) -> Option<ConversationId> {
+        match self {
+            Place::Call(id) => Some(id),
+            Place::Channel(_) => None,
+        }
+    }
+}
+
+/// What a chat pane shows: a text channel, or a private conversation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Room {
+    Channel(ChannelId),
+    Dm(ConversationId),
+}
+
+impl Room {
+    pub fn channel(self) -> Option<ChannelId> {
+        match self {
+            Room::Channel(id) => Some(id),
+            Room::Dm(_) => None,
+        }
+    }
+
+    pub fn conversation(self) -> Option<ConversationId> {
+        match self {
+            Room::Dm(id) => Some(id),
+            Room::Channel(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -445,7 +705,9 @@ pub struct SearchReply {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceTokens {
-    pub channel_id: ChannelId,
+    /// None for a private call's tokens, which name the conversation instead.
+    #[serde(default)]
+    pub channel_id: Option<ChannelId>,
     pub token: String,
     pub publish: Publish,
     pub whep_base: String,
@@ -479,6 +741,9 @@ pub struct Snapshot {
     pub online: Vec<UserId>,
     #[serde(default, rename = "voiceCap", deserialize_with = "lenient_opt")]
     pub voice_cap: Option<i64>,
+    /// Private calls ringing for you or under way, with their rosters.
+    #[serde(default, deserialize_with = "lenient")]
+    pub calls: Vec<CallInfo>,
 }
 
 /// Base 36, the way the server names channel paths (`vc-<cid36>-<mid36>-<kind>`).
@@ -503,6 +768,31 @@ pub fn base36(mut n: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn places_name_their_paths_as_the_server_does() {
+        assert_eq!(Place::Channel(41).path(2, "v"), "vc-15-2-v");
+        assert_eq!(Place::Call(41).path(2, "s"), "dm.15.2.s");
+        assert_eq!(Place::Call(3).with(serde_json::json!({ "muted": true })), serde_json::json!({ "conversationId": 3, "muted": true }));
+    }
+
+    #[test]
+    fn sealed_messages_and_calls_parse_as_the_server_writes_them() {
+        let m: SealedMessage = serde_json::from_str(
+            r#"{"id":9,"conversationId":2,"userId":1,"kind":"call","senderKey":null,"recipientKey":null,"sealed":null,
+            "meta":{"outcome":"ended","durationMs":61000},"attachmentHash":null,"reactions":[],"createdAt":5,"editedAt":null}"#,
+        )
+        .unwrap();
+        assert_eq!(m.meta.unwrap().duration_ms, Some(61000));
+        let c: CallInfo = serde_json::from_str(
+            r#"{"conversationId":2,"callerId":1,"calleeId":3,"state":"ringing","startedAt":1,"answeredAt":null,"sealedKey":"x","senderKey":4,"recipientKey":5}"#,
+        )
+        .unwrap();
+        assert_eq!(c.state, CallPhase::Ringing);
+        let t: VoiceTokens =
+            serde_json::from_str(r#"{"conversationId":2,"token":"t","publish":{"voice":"a","cam":"b","screen":"c"},"whepBase":"w"}"#).unwrap();
+        assert_eq!(t.channel_id, None);
+    }
 
     #[test]
     fn base36_matches_javascript() {

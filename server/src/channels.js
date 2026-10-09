@@ -56,6 +56,40 @@ export function parseChannelPath(path) {
   };
 }
 
+/**
+ * MediaMTX path for one side of a private call.
+ *
+ *   dm.<conversation36>.<mid36>.<k>        e.g. dm.5.1.v
+ *
+ * Dots, not dashes, on purpose: no nickname and no legacy stream name may
+ * contain a dot (USERNAME_RE in rooms.js), so this namespace cannot be
+ * claimed by anybody's login -- the guard `vc-` needs in isSystemName is
+ * unnecessary here by construction rather than by rule.
+ */
+export const callPath = (conversationId, mid, kind) =>
+  `dm.${conversationId.toString(36)}.${mid.toString(36)}.${MEDIA_KINDS[kind] ?? kind}`;
+
+const CALL_PATH_RE = /^dm\.([0-9a-z]{1,6})\.([0-9a-z]{1,4})\.([vcs])$/;
+
+export function parseCallPath(path) {
+  const match = CALL_PATH_RE.exec(String(path ?? '').toLowerCase());
+  if (!match) return null;
+  const [, conv36, mid36, kind] = match;
+  return {
+    conversationId: Number.parseInt(conv36, 36),
+    mid: Number.parseInt(mid36, 36),
+    kind,
+  };
+}
+
+/**
+ * Token flags. A channel token and a call token share one format and one
+ * secret, and a conversation id can equal a channel id, so the flag is what
+ * stops a token for channel 5 opening call 5 or the other way round. The auth
+ * hook checks it on both sides.
+ */
+export const TOKEN_FLAGS = { channel: 'rw', call: 'dm' };
+
 // ---------------------------------------------------------------------------
 // Tokens
 // ---------------------------------------------------------------------------

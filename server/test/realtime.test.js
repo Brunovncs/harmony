@@ -264,6 +264,24 @@ describe('voice presence', () => {
     watcher.ws.close();
   });
 
+  it('takes the mute in the join, so the first roster already shows it', async () => {
+    const watcher = connect(ownerToken);
+    await watcher.hello();
+
+    const joiner = connect(memberToken);
+    await joiner.hello();
+    await joiner.request({ type: 'voice:join', channelId: voiceChannelId, muted: true, deafened: false });
+
+    const roster = await watcher.next(
+      (m) => m.type === 'voice:roster' && m.channelId === voiceChannelId && m.roster.length === 1,
+    );
+    assert.equal(roster.roster[0].muted, true);
+    assert.equal(roster.roster[0].deafened, false);
+
+    joiner.ws.close();
+    watcher.ws.close();
+  });
+
   it('removes presence when the socket drops, with nothing to reconcile', async () => {
     const watcher = connect(ownerToken);
     await watcher.hello();

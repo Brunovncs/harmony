@@ -4,6 +4,7 @@
 use super::{Center, ServerView};
 use crate::core::types::*;
 use crate::prefs::{prefs, set_prefs};
+use crate::dm::KeyState;
 use crate::session::Session;
 use crate::theme::{Theme, px, radius};
 use crate::ui::overlay::{self, Ask, Dismiss, Field, menu_card, menu_item};
@@ -20,6 +21,42 @@ impl ServerView {
         let layout: Vec<(Option<Group>, Vec<Channel>)> =
             self.session.read(cx).layout().into_iter().map(|(g, cs)| (g.cloned(), cs.into_iter().cloned().collect())).collect();
         let mut list = div().id("channels").flex().flex_col().gap(px(1.)).px(px(8.)).pb(px(8.)).flex_1().min_h(px(0.)).overflow_y_scroll();
+        // Your conversations first, then the server's channels, scrolling as one list.
+        if let Some(dms) = self.render_dms(t, window, cx) {
+            list = list.child(dms);
+        }
+        let empty = self.session.read(cx).channels.is_empty();
+        list = list
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .pt(px(10.))
+                    .pb(px(4.))
+                    .px(px(4.))
+                    .child(icon("hash", 12., t.text3))
+                    .child(label(tr!("Channels", "Canais"), t))
+                    .child(div().flex_1())
+                    .when(admin, |d| {
+                        d.child(
+                            icon_button("new-channel", "plus", t)
+                                .size(px(22.))
+                                .tooltip(tip(tr!("New channel or group", "Novo canal ou grupo"), t))
+                                .on_click(cx.listener(|this, _, window, cx| this.new_channel(window, cx))),
+                        )
+                    }),
+            )
+            .when(empty, |d| {
+                d.child(div().px(px(8.)).py(px(4.)).child(caption(
+                    if admin {
+                        tr!("No channels yet. Make one with the + above.", "Ainda não há canais. Crie um com o + acima.")
+                    } else {
+                        tr!("No channels yet. An admin can make some.", "Ainda não há canais. Um admin pode criar alguns.")
+                    },
+                    t.text3,
+                )))
+            });
         for (group, channels) in layout {
             if let Some(g) = &group {
                 let folded = self.folded.contains(&g.id);
@@ -98,39 +135,178 @@ impl ServerView {
                     .on_drop(cx.listener(|this, d: &DraggedChannel, _, cx| this.move_channel(d.id, Drop::End, cx))),
             );
         }
-        let empty = self.session.read(cx).channels.is_empty();
+        div().flex().flex_col().size_full().pt(px(6.)).child(list)
+    }
+
+    /// Private conversations, above the channels: the people you talk to, newest first, with
+    /// what is unread and who is calling. Folds like a group. Says plainly when this computer
+    /// can't open them yet, and nags gently until the recovery key is kept somewhere.
+    fn render_dms(&mut self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let s = self.session.read(cx);
+        let state = s.vault.state.clone();
+        if matches!(state, KeyState::Unsupported) {
+            return None;
+        }
+        let folded = self.folded.contains(&DMS_FOLD);
+        let unread = s.dm_unread();
+        let needs_backup = s.vault.needs_backup();
+        let dms: Vec<(ConversationId, UserId, String, u32, bool)> = s
+            .dm_list()
+            .into_iter()
+            .map(|d| (d.info.id, d.peer, d.preview.clone(), d.info.unread, s.calls.contains_key(&d.info.id)))
+            .collect();
+        let mut col = div().flex().flex_col().gap(px(1.)).pb(px(6.)).child(
+            div()
+                .id("dms-head")
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .pt(px(6.))
+                .pb(px(4.))
+                .px(px(4.))
+                .cursor_pointer()
+                .child(icon(if folded { "chevron-right" } else { "chevron-down" }, 12., t.text3))
+                .child(label(tr!("Direct messages", "Mensagens diretas"), t))
+                .child(div().flex_1())
+                .when(folded && unread > 0, |d| d.child(badge_text(unread_count(unread), t.on_accent, t.accent)))
+                .child(
+                    icon_button("new-dm", "plus", t)
+                        .size(px(22.))
+                        .tooltip(tip(tr!("New private conversation", "Nova conversa privada"), t))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            let view = cx.entity().downgrade();
+                            super::private::pick_person(&this.session, window, cx, move |user, window, cx| {
+                                if let Some(view) = view.upgrade() {
+                                    view.update(cx, |v, cx| v.message_user(user, window, cx));
+                                }
+                            });
+                        })),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if !this.folded.remove(&DMS_FOLD) {
+                        this.folded.insert(DMS_FOLD);
+                    }
+                    cx.notify();
+                })),
+        );
+        if folded {
+            return Some(col.into_any_element());
+        }
+        let session = self.session.clone();
+        match state {
+            KeyState::Locked => {
+                col = col.child(key_card(
+                    "lock",
+                    tr!(
+                        "Your private messages are locked on this computer. Unlock them with your recovery key.",
+                        "Suas mensagens privadas estão trancadas neste computador. Desbloqueie com a sua chave de recuperação."
+                    ),
+                    tr!("Unlock", "Desbloquear"),
+                    t,
+                    move |window, cx| super::private::unlock(&session, window, cx),
+                ));
+            }
+            KeyState::Failed(_) => {
+                col = col.child(div().px(px(8.)).py(px(4.)).child(caption(
+                    tr!("Private messages aren't available right now.", "As mensagens privadas não estão disponíveis agora."),
+                    t.text3,
+                )));
+            }
+            _ if needs_backup => {
+                col = col.child(key_card(
+                    "key",
+                    tr!(
+                        "Keep your recovery key: it's how you read your private messages on another computer.",
+                        "Guarde sua chave de recuperação: é com ela que você lê suas mensagens privadas em outro computador."
+                    ),
+                    tr!("Show key", "Ver chave"),
+                    t,
+                    move |window, cx| super::private::backup(&session, window, cx),
+                ));
+            }
+            _ => {}
+        }
+        if dms.is_empty() && self.session.read(cx).vault.ready() {
+            col = col.child(div().px(px(8.)).py(px(4.)).child(caption(
+                tr!(
+                    "Talk to someone in private: press + or right-click a member.",
+                    "Converse com alguém no privado: clique no + ou com o botão direito em um membro."
+                ),
+                t.text3,
+            )));
+        }
+        for (id, peer, preview, unread, in_call) in dms {
+            col = col.child(self.dm_row(id, peer, preview, unread, in_call, t, window, cx));
+        }
+        Some(col.into_any_element())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dm_row(
+        &mut self,
+        id: ConversationId,
+        peer: UserId,
+        preview: String,
+        unread: u32,
+        in_call: bool,
+        t: &Theme,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let img = self.session.update(cx, |s, cx| s.avatar(peer, cx));
+        let s = self.session.read(cx);
+        let name = s.display_name(Some(peer), None);
+        let online = s.online.contains(&peer);
+        let open = self.center == Center::Chat(Room::Dm(id));
+        let fg = if open || unread > 0 { t.text } else { t.text2 };
+        let hover = t.layer_hover;
         div()
+            .id(("dm", id as u64))
+            .relative()
             .flex()
-            .flex_col()
-            .size_full()
+            .items_center()
+            .gap(px(9.))
+            .h(px(40.))
+            .px(px(6.))
+            .rounded(px(radius::INNER + 1.))
+            .cursor_pointer()
+            .when(open, |d| d.bg(t.layer_hover))
+            .when(!open, |d| d.hover(move |s| s.bg(hover)))
+            .when(open, |d| d.child(div().absolute().left(px(-8.)).top(px(12.)).w(px(3.)).h(px(16.)).rounded(px(2.)).bg(t.accent)))
+            .child(div().relative().flex_none().child(avatar(&name, img, 26., None)).child(
+                div()
+                    .absolute()
+                    .right(px(-2.))
+                    .bottom(px(-2.))
+                    .size(px(10.))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(t.pane)
+                    .bg(if online { t.success } else { t.text3 }),
+            ))
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .h(px(44.))
-                    .pl(px(14.))
-                    .pr(px(8.))
-                    .child(label(tr!("Channels", "Canais"), t))
-                    .when(admin, |d| {
-                        d.child(
-                            icon_button("new-channel", "plus", t)
-                                .tooltip(tip(tr!("New channel or group", "Novo canal ou grupo"), t))
-                                .on_click(cx.listener(|this, _, window, cx| this.new_channel(window, cx))),
-                        )
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(13.5))
+                            .text_color(fg)
+                            .when(open || unread > 0, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                            .child(name),
+                    )
+                    .when(!preview.is_empty(), |d| {
+                        d.child(div().truncate().text_size(px(11.5)).text_color(if unread > 0 { t.text2 } else { t.text3 }).child(preview))
                     }),
             )
-            .when(empty, |d| {
-                d.child(div().px(px(16.)).py(px(8.)).child(caption(
-                    if admin {
-                        tr!("No channels yet. Make one with the + above.", "Ainda não há canais. Crie um com o + acima.")
-                    } else {
-                        tr!("No channels yet. An admin can make some.", "Ainda não há canais. Um admin pode criar alguns.")
-                    },
-                    t.text3,
-                )))
-            })
-            .child(list)
+            .when(in_call, |d| d.child(icon("phone", 13., t.success)))
+            .when(unread > 0 && !open, |d| d.child(badge_text(unread_count(unread), t.on_accent, t.accent)))
+            .on_click(cx.listener(move |this, _, window, cx| this.open_room(Room::Dm(id), window, cx)))
+            .into_any_element()
     }
 
     fn has_people(&self, channel: ChannelId, cx: &App) -> bool {
@@ -143,7 +319,7 @@ impl ServerView {
         let voice = c.kind == ChannelKind::Voice;
         let in_call = self.call_channel(cx) == Some(c.id);
         let open = match self.center {
-            Center::Text(id) => id == c.id,
+            Center::Chat(room) => room == Room::Channel(c.id),
             Center::Stage => in_call,
         };
         let mentions = s.mentioned.get(&c.id).copied().unwrap_or(0);
@@ -230,7 +406,7 @@ impl ServerView {
     }
 
     fn voice_member_row(&mut self, channel: ChannelId, m: &Member, t: &Theme, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let speaking = self.is_speaking(channel, m.user_id, cx);
+        let speaking = self.is_speaking(Place::Channel(channel), m.user_id, cx);
         let me = self.session.read(cx).me.id == m.user_id;
         let admin = self.session.read(cx).me.role.is_admin();
         let name = self.session.read(cx).display_name(Some(m.user_id), Some(&m.nickname));
@@ -260,7 +436,7 @@ impl ServerView {
                 d.on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                        this.peer_menu(channel, user, mid, e.position, window, cx);
+                        this.peer_menu(Place::Channel(channel), user, mid, e.position, window, cx);
                     }),
                 )
             })
@@ -620,6 +796,37 @@ impl ServerView {
         }
         self.session.update(cx, |s, cx| s.call(cx, move |api| Box::pin(async move { api.arrange(&groups, &order).await }), |_, _, _| {}));
     }
+}
+
+/// The fold key of the private conversations' section; channel groups use their (positive) ids.
+const DMS_FOLD: i64 = -1;
+
+/// "3", or "99+".
+fn unread_count(n: u32) -> String {
+    if n > 99 { "99+".into() } else { n.to_string() }
+}
+
+/// A small card in the sidebar about your private-message key, with the one thing to do about it.
+fn key_card(
+    glyph: &'static str,
+    text: &'static str,
+    action: &'static str,
+    t: &Theme,
+    on: impl Fn(&mut Window, &mut App) + 'static,
+) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .mx(px(2.))
+        .my(px(4.))
+        .p(px(10.))
+        .rounded(px(radius::CARD))
+        .bg(t.tint(t.accent))
+        .border_1()
+        .border_color(t.accent.opacity(0.35))
+        .child(div().flex().gap(px(8.)).child(icon(glyph, 15., t.accent)).child(div().flex_1().min_w(px(0.)).child(caption(text, t.text))))
+        .child(button(SharedString::from(format!("key-card-{glyph}")), action, Kind::Primary, t).on_click(move |_, window, cx| on(window, cx)))
 }
 
 /// New messages you have not seen: the accent pill of the channel you are in, small.

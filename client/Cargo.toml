@@ -22,6 +22,15 @@ libwebrtc = "0.3.51"
 
 anyhow = "1"
 async-channel = "2"
+# End-to-end encryption of private conversations (core/crypto.rs): X25519 to agree a key with the
+# other person, HKDF-SHA256 to derive from it, XChaCha20-Poly1305 to seal. RustCrypto and dalek,
+# audited, nothing hand-rolled.
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+getrandom = "0.2"
+hkdf = "0.12"
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+zeroize = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 cpal = "0.18"
 dirs = "7"
@@ -80,6 +89,8 @@ embed-resource = "3"
 [profile.dev.package."*"]
 # Media code is unusable unoptimised: decoding, scaling and segmentation run every frame.
 opt-level = 2
+# Full debug info for dependencies made target/ tens of GB; backtraces only need line tables.
+debug = "line-tables-only"
 
 [profile.release]
 lto = "thin"

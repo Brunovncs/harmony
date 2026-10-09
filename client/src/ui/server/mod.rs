@@ -7,6 +7,7 @@ pub mod chat;
 pub mod emoji_picker;
 mod members;
 mod picker;
+pub mod private;
 pub mod rich;
 mod share;
 pub mod sidebar;
@@ -23,7 +24,7 @@ use crate::session::{Link, Session, SessionEvent};
 use crate::theme::{GUTTER, Theme, current, px, radius};
 use crate::ui::overlay::{self, Ask, Field};
 use crate::widgets::*;
-use chat::ChatView;
+use chat::{ChatEvent, ChatView};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnimationExt, AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
@@ -35,7 +36,8 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Center {
-    Text(ChannelId),
+    /// A text channel or a private conversation.
+    Chat(Room),
     /// The voice channel you are in: people, cameras, screens.
     Stage,
 }
@@ -45,8 +47,10 @@ pub struct ServerView {
     root: WeakEntity<Root>,
     pub center: Center,
     pub folded: HashSet<i64>,
-    chats: HashMap<ChannelId, Entity<ChatView>>,
+    chats: HashMap<Room, Entity<ChatView>>,
     pub call: Option<Entity<Call>>,
+    /// The "is calling you" dialog, while it rings.
+    ringing: Option<Entity<private::Incoming>>,
     pub focused_tile: Option<Entity<crate::media::video::Tile>>,
     /// The pointer is on the connection dot, which opens to say what it means.
     link_hover: bool,
@@ -126,6 +130,14 @@ impl ServerView {
         crate::media::voice::apply_mic_prefs(cx);
         crate::media::audio::audio().set_output(&prefs(cx).voice_output_id);
         let this = cx.entity();
+        // The ring: someone calling you, or the other end ringing while you wait.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(2600)).await;
+                let Ok(()) = this.update(cx, |v, cx| v.ring_tick(cx)) else { break };
+            }
+        })
+        .detach();
         let sidebar = Panel::new(&this, &this, |s, t, w, cx| s.render_sidebar(t, w, cx).into_any_element(), cx);
         let members = Panel::new(&this, &session, |s, t, w, cx| s.render_members(t, w, cx).into_any_element(), cx);
         ServerView {
@@ -138,6 +150,7 @@ impl ServerView {
             focused_tile: None,
             link_hover: false,
             message_cue_at: None,
+            ringing: None,
             sidebar,
             members,
             focus: cx.focus_handle(),
@@ -149,18 +162,26 @@ impl ServerView {
         let s = self.session.read(cx);
         let server = (s.api.base(), s.clips.iter().map(|c| c.id).collect());
         crate::ui::hotkeys::set_server(Some(server), cx);
-        // Open the first text channel once the list arrives.
+        // Off the stage with no call: back to the chat that was open (the conversation a call was
+        // made from, say), or the first text channel once the list arrives.
         if self.center == Center::Stage && self.call.is_none() {
-            let first =
-                self.session.read(cx).layout().into_iter().flat_map(|(_, cs)| cs).find(|c| c.kind == ChannelKind::Text).map(|c| c.id);
-            if let Some(id) = first {
-                self.center = Center::Text(id);
-                self.session.update(cx, |s, cx| s.open(id, cx));
+            let s = self.session.read(cx);
+            let last = s.open_room.filter(|r| match r {
+                Room::Channel(id) => s.channel(*id).is_some(),
+                Room::Dm(id) => s.dms.contains_key(id),
+            });
+            let first = || s.layout().into_iter().flat_map(|(_, cs)| cs).find(|c| c.kind == ChannelKind::Text).map(|c| Room::Channel(c.id));
+            if let Some(room) = last.or_else(first) {
+                self.center = Center::Chat(room);
+                self.session.update(cx, |s, cx| s.open(room, cx));
             }
         }
-        if let Center::Text(id) = self.center
-            && self.session.read(cx).channel(id).is_none()
-        {
+        let gone = match self.center {
+            Center::Chat(Room::Channel(id)) => self.session.read(cx).channel(id).is_none(),
+            Center::Chat(Room::Dm(id)) => self.session.read(cx).dms_loaded && !self.session.read(cx).dms.contains_key(&id),
+            Center::Stage => false,
+        };
+        if gone {
             self.show_stage(cx);
         }
         cx.notify();
@@ -173,7 +194,15 @@ impl ServerView {
                     crate::media::audio::cue(Cue::Mention, cue_volume(cx));
                 }
             }
-            SessionEvent::Message(m) => self.message_cue(m, window, cx),
+            SessionEvent::Message(room, m) => self.message_cue(*room, m, window, cx),
+            SessionEvent::Ringing(id) => self.show_ringing(*id, window, cx),
+            SessionEvent::CallChanged(id) => {
+                let still = self.session.read(cx).calls.get(id).is_some_and(|c| c.state == CallPhase::Ringing);
+                if !still && let Some(r) = self.ringing.take_if(|r| r.read(cx).conversation == *id) {
+                    r.update(cx, |r, cx| r.close(cx));
+                }
+                cx.notify();
+            }
             SessionEvent::SoundpadPlay { hash } => {
                 let deaf = self.call.as_ref().is_some_and(|c| c.read(cx).deafened);
                 if !deaf {
@@ -193,23 +222,174 @@ impl ServerView {
 
     /// The tone for someone else's message, unless you are looking at it, silenced its channel or
     /// turned the tone off. A mention has its own; a burst makes one sound.
-    fn message_cue(&mut self, m: &Message, window: &Window, cx: &mut Context<Self>) {
+    fn message_cue(&mut self, room: Room, m: &Message, window: &Window, cx: &mut Context<Self>) {
         const BURST: std::time::Duration = std::time::Duration::from_secs(2);
         let s = self.session.read(cx);
         let p = prefs(cx);
         let mention = m.mentions.contains(&s.me.id) || m.mentions_everyone;
-        let looking = s.viewing == Some(m.channel_id) && window.is_window_active();
+        let looking = s.viewing == Some(room) && window.is_window_active();
+        let private = room.conversation().is_some();
+        // A private message is written to you, as a mention is: it rings like one.
+        let (cue, wanted) = if private { (Cue::Mention, p.mention_sound) } else { (Cue::Message, p.message_sound) };
+        if private && m.user_id != Some(s.me.id) && !looking {
+            let name = s.display_name(m.user_id, None);
+            crate::ui::tray::attention(window, &name, tr!("sent you a private message", "te mandou uma mensagem privada"), cx);
+        }
         if m.user_id == Some(s.me.id)
-            || mention
+            || (mention && !private)
             || looking
-            || !p.message_sound
-            || p.channel_muted(&s.api.base(), m.channel_id)
+            || !wanted
+            || room.channel().is_some_and(|id| p.channel_muted(&s.api.base(), id))
             || self.message_cue_at.is_some_and(|at| at.elapsed() < BURST)
         {
             return;
         }
         self.message_cue_at = Some(std::time::Instant::now());
-        crate::media::audio::cue(Cue::Message, cue_volume(cx));
+        crate::media::audio::cue(cue, cue_volume(cx));
+    }
+
+    /// Every couple of seconds: the ring of a call coming in, or the one going out.
+    fn ring_tick(&mut self, cx: &mut Context<Self>) {
+        if self.ringing.is_some() {
+            crate::media::audio::cue(Cue::Ring, cue_volume(cx).max(0.6));
+        } else if self.call.as_ref().is_some_and(|c| c.read(cx).ringing(cx)) {
+            crate::media::audio::cue(Cue::RingBack, cue_volume(cx));
+        }
+    }
+
+    // Private conversations and calls.
+
+    /// Opens the conversation with `user`, making it if needed.
+    pub fn message_user(&mut self, user: UserId, window: &mut Window, cx: &mut Context<Self>) {
+        let task = self.session.update(cx, |s, cx| s.open_dm_with(user, cx));
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let got = task.await;
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = this.update(cx, |this, cx| match got {
+                    Ok(id) => this.open_room(Room::Dm(id), window, cx),
+                    Err(e) => overlay::toast(e.message, cx),
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// Opens the conversation with `user` and rings them.
+    pub fn call_user(&mut self, user: UserId, window: &mut Window, cx: &mut Context<Self>) {
+        let task = self.session.update(cx, |s, cx| s.open_dm_with(user, cx));
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let got = task.await;
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = this.update(cx, |this, cx| match got {
+                    Ok(id) => {
+                        this.open_room(Room::Dm(id), window, cx);
+                        this.start_call(id, window, cx);
+                    }
+                    Err(e) => overlay::toast(e.message, cx),
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// Rings the other person of a private conversation.
+    pub fn start_call(&mut self, conversation: ConversationId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.call.as_ref().is_some_and(|c| c.read(cx).place == Place::Call(conversation)) {
+            self.show_stage(cx);
+            return;
+        }
+        let (muted, deafened) = self.carried_mute(cx);
+        self.hang_up(false, cx);
+        match Call::dial(self.session.clone(), conversation, muted, deafened, cx) {
+            Ok(call) => self.adopt_call(call, window, cx),
+            Err(e) => overlay::toast(e.message, cx),
+        }
+    }
+
+    fn show_ringing(&mut self, conversation: ConversationId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(caller) = self.session.read(cx).calls.get(&conversation).map(|c| c.caller_id) else { return };
+        if let Some(old) = self.ringing.take() {
+            old.update(cx, |r, cx| r.close(cx));
+        }
+        let this = cx.entity().downgrade();
+        let (answer, decline) = (this.clone(), this);
+        let view = cx.new(|cx| private::Incoming {
+            session: self.session.clone(),
+            conversation,
+            caller,
+            on_answer: std::rc::Rc::new(move |id, window, cx| {
+                if let Some(this) = answer.upgrade() {
+                    this.update(cx, |this, cx| this.answer_call(id, window, cx));
+                }
+            }),
+            on_decline: std::rc::Rc::new(move |id, cx| {
+                if let Some(this) = decline.upgrade() {
+                    this.update(cx, |this, cx| {
+                        this.ringing = None;
+                        request(&this.session, "call:hang-up", serde_json::json!({ "conversationId": id }), cx);
+                    });
+                }
+            }),
+            focus: cx.focus_handle(),
+        });
+        // Closed without an answer (Escape, a click outside): stop ringing here; the caller
+        // still hears it ring until they give up or it times out, as with a phone left alone.
+        cx.subscribe(&view, |this, v, _: &overlay::Dismiss, _| {
+            if this.ringing.as_ref() == Some(&v) {
+                this.ringing = None;
+            }
+        })
+        .detach();
+        self.ringing = Some(view.clone());
+        crate::media::audio::cue(Cue::Ring, cue_volume(cx).max(0.6));
+        let name = self.session.read(cx).display_name(Some(caller), None);
+        crate::ui::tray::attention(window, &name, tr!("is calling you", "está te ligando"), cx);
+        overlay::open_dialog(view, window, cx);
+    }
+
+    fn answer_call(&mut self, conversation: ConversationId, window: &mut Window, cx: &mut Context<Self>) {
+        self.ringing = None;
+        let (muted, deafened) = self.carried_mute(cx);
+        self.hang_up(false, cx);
+        match Call::answer(self.session.clone(), conversation, muted, deafened, cx) {
+            Some(call) => {
+                self.adopt_call(call, window, cx);
+                self.open_room(Room::Dm(conversation), window, cx);
+                self.show_stage(cx);
+            }
+            None => overlay::toast(
+                tr!("That call couldn't be opened on this computer.", "Essa chamada não pôde ser aberta neste computador."),
+                cx,
+            ),
+        }
+    }
+
+    /// The mute and deafen a new call starts with: as the call before had them, and muted when
+    /// that is the setting.
+    fn carried_mute(&self, cx: &App) -> (bool, bool) {
+        let (muted, deafened) = self.call.as_ref().map(|c| (c.read(cx).muted, c.read(cx).deafened)).unwrap_or((false, false));
+        (muted || prefs(cx).join_muted, deafened)
+    }
+
+    /// Makes `call` the one in progress: its events, the tray, the stage.
+    fn adopt_call(&mut self, call: Entity<Call>, window: &mut Window, cx: &mut Context<Self>) {
+        let sub = cx.subscribe_in(&call, window, |this, _, ev: &CallEvent, window, cx| match ev {
+            CallEvent::NeedsPassword { channel, wrong } => this.ask_password(*channel, *wrong, window, cx),
+            CallEvent::Ended(why) => {
+                this.leave_voice(cx);
+                if let Some(why) = why {
+                    overlay::toast(why.clone(), cx);
+                }
+            }
+        });
+        self._subs.push(sub);
+        cx.observe(&call, |_, _, cx| cx.notify()).detach();
+        self.call = Some(call);
+        crate::ui::updates::call_changed(true, cx);
+        self.show_stage(cx);
+        cx.notify();
     }
 
     /// The voice stage in the middle, in place of any chat.
@@ -229,21 +409,42 @@ impl ServerView {
     // Where you are.
 
     pub fn open_text(&mut self, id: ChannelId, window: &mut Window, cx: &mut Context<Self>) {
-        self.center = Center::Text(id);
-        let session = self.session.clone();
-        self.chats.entry(id).or_insert_with(|| cx.new(|cx| ChatView::new(session, id, window, cx)));
-        let chat = self.chats[&id].clone();
-        self.session.update(cx, |s, cx| s.open(id, cx));
+        self.open_room(Room::Channel(id), window, cx);
+    }
+
+    /// A text channel or a private conversation, in the middle.
+    pub fn open_room(&mut self, room: Room, window: &mut Window, cx: &mut Context<Self>) {
+        self.center = Center::Chat(room);
+        let chat = self.chat_view(room, window, cx);
+        self.session.update(cx, |s, cx| s.open(room, cx));
         chat.update(cx, |c, cx| c.focus_composer(window, cx));
         cx.notify();
     }
 
-    pub fn call_channel(&self, cx: &App) -> Option<ChannelId> {
-        self.call.as_ref().map(|c| c.read(cx).channel)
+    fn chat_view(&mut self, room: Room, window: &mut Window, cx: &mut Context<Self>) -> Entity<ChatView> {
+        if let Some(chat) = self.chats.get(&room) {
+            return chat.clone();
+        }
+        let session = self.session.clone();
+        let chat = cx.new(|cx| ChatView::new(session, room, window, cx));
+        let sub = cx.subscribe_in(&chat, window, |this, _, ev: &ChatEvent, window, cx| match ev {
+            ChatEvent::Call(id) => this.start_call(*id, window, cx),
+        });
+        self._subs.push(sub);
+        self.chats.insert(room, chat.clone());
+        chat
     }
 
-    pub fn is_speaking(&self, channel: ChannelId, user: UserId, cx: &App) -> bool {
-        self.call.as_ref().is_some_and(|c| c.read(cx).channel == channel && c.read(cx).is_speaking(user, cx))
+    pub fn call_place(&self, cx: &App) -> Option<Place> {
+        self.call.as_ref().map(|c| c.read(cx).place)
+    }
+
+    pub fn call_channel(&self, cx: &App) -> Option<ChannelId> {
+        self.call_place(cx).and_then(Place::channel)
+    }
+
+    pub fn is_speaking(&self, place: Place, user: UserId, cx: &App) -> bool {
+        self.call.as_ref().is_some_and(|c| c.read(cx).place == place && c.read(cx).is_speaking(user, cx))
     }
 
     /// A click on a voice channel: asks first, unless that was turned off or you are already in
@@ -292,25 +493,11 @@ impl ServerView {
             cx.notify();
             return;
         }
-        let (muted, deafened) = self.call.as_ref().map(|c| (c.read(cx).muted, c.read(cx).deafened)).unwrap_or((false, false));
+        let (muted, deafened) = self.carried_mute(cx);
         // Quietly: the new channel's connect is the sound of switching.
         self.hang_up(false, cx);
         let call = Call::join(self.session.clone(), id, password, muted, deafened, cx);
-        let sub = cx.subscribe_in(&call, window, |this, _, ev: &CallEvent, window, cx| match ev {
-            CallEvent::NeedsPassword { channel, wrong } => this.ask_password(*channel, *wrong, window, cx),
-            CallEvent::Ended(why) => {
-                this.leave_voice(cx);
-                if let Some(why) = why {
-                    overlay::toast(why.clone(), cx);
-                }
-            }
-        });
-        self._subs.push(sub);
-        cx.observe(&call, |_, _, cx| cx.notify()).detach();
-        self.call = Some(call);
-        crate::ui::updates::call_changed(true, cx);
-        self.show_stage(cx);
-        cx.notify();
+        self.adopt_call(call, window, cx);
     }
 
     pub fn leave_voice(&mut self, cx: &mut Context<Self>) {
@@ -404,11 +591,13 @@ impl ServerView {
     }
 
     /// Right-click on someone in voice: their volume for you, and the admin's tools.
-    pub fn peer_menu(&mut self, channel: ChannelId, user: UserId, mid: i64, at: Point<Pixels>, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn peer_menu(&mut self, place: Place, user: UserId, mid: i64, at: Point<Pixels>, _: &mut Window, cx: &mut Context<Self>) {
         let s = self.session.read(cx);
-        let admin = s.me.role.is_admin();
+        // An admin's say ends at the channels: a private call is nobody's to moderate.
+        let channel = place.channel().unwrap_or(-1);
+        let admin = s.me.role.is_admin() && place.channel().is_some();
         let force_muted = s.rosters.get(&channel).and_then(|r| r.iter().find(|m| m.mid == mid)).is_some_and(|m| m.force_muted);
-        let in_my_call = self.call_channel(cx) == Some(channel);
+        let in_my_call = self.call_place(cx) == Some(place);
         let others: Vec<(ChannelId, String)> =
             s.channels.iter().filter(|c| c.kind == ChannelKind::Voice && c.id != channel).map(|c| (c.id, c.name.clone())).collect();
         let name = s.display_name(Some(user), None);
@@ -687,13 +876,17 @@ impl ServerView {
     fn render_voice_panel(&mut self, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let call = self.call.clone()?;
         let c = call.read(cx);
-        let name = self.session.read(cx).channel(c.channel).map(|c| c.name.clone()).unwrap_or_default();
+        let name = self.session.read(cx).place_name(c.place);
+        let private = c.place.conversation().is_some();
+        let ringing = c.ringing(cx);
         let state = c.state.clone();
         let voice = c.voice.clone();
         let ping = voice.as_ref().and_then(|v| v.read(cx).ping_ms);
         let mic_failed = voice.as_ref().is_some_and(|v| v.read(cx).mic_failed());
         let (camera_on, screen_on) = stage::sharing(&self.session, voice.as_ref(), cx);
         let (label_text, color) = match state {
+            _ if ringing => (tr!("Ringing…", "Chamando…"), t.caution),
+            CallState::Connected if private => (tr!("In a private call", "Em chamada privada"), t.success),
             CallState::Connected if mic_failed => (tr!("Microphone not sent", "Microfone não enviado"), t.caution),
             CallState::Connected => (tr!("Voice connected", "Voz conectada"), t.success),
             CallState::Joining => (tr!("Connecting…", "Conectando…"), t.caution),
@@ -738,7 +931,7 @@ impl ServerView {
                         )
                         .child(
                             tool_button("hang-up", "phone-off", false, t.critical, t)
-                                .tooltip(tip(tr!("Leave the channel", "Sair do canal"), t))
+                                .tooltip(tip(if private { tr!("Hang up", "Desligar") } else { tr!("Leave the channel", "Sair do canal") }, t))
                                 .on_click(cx.listener(|this, _, _, cx| this.leave_voice(cx))),
                         ),
                 )
@@ -776,7 +969,7 @@ impl ServerView {
                                     }),
                                 ),
                         )
-                        .child(
+                        .when(!private, |d| d.child(
                             panel_button("soundpad", "soundboard", false, t)
                                 .tooltip(tip(tr!("Soundboard: play a sound for everyone", "Painel de sons: toque um som para todos"), t))
                                 .on_mouse_down(
@@ -786,7 +979,7 @@ impl ServerView {
                                         this.open_soundpad(e.position, window, cx)
                                     }),
                                 ),
-                        ),
+                        )),
                 )
                 .into_any_element(),
         )
@@ -914,14 +1107,7 @@ impl Render for ServerView {
             voice.read(cx).hide_streams(self.center != Center::Stage);
         }
         let center: AnyElement = match self.center {
-            Center::Text(id) => {
-                if !self.chats.contains_key(&id) {
-                    let session = self.session.clone();
-                    let chat = cx.new(|cx| ChatView::new(session, id, window, cx));
-                    self.chats.insert(id, chat);
-                }
-                self.chats[&id].clone().cached(StyleRefinement::default().size_full()).into_any_element()
-            }
+            Center::Chat(room) => self.chat_view(room, window, cx).cached(StyleRefinement::default().size_full()).into_any_element(),
             Center::Stage => self.render_stage(&t, window, cx).into_any_element(),
         };
         let members = show_members.then(|| self.members.clone().cached(StyleRefinement::default().size_full()));

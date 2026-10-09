@@ -18,16 +18,22 @@ import { Accounts, claimOwner, ensureOwnerToken, publicUser } from './accounts.j
 import {
   Channels,
   VoiceRooms,
+  callPath,
   channelPath,
   channelSecret,
   mintChannelToken,
+  parseCallPath,
   parseChannelPath,
   publicChannel,
   publicGroup,
   readChannelToken,
   MEDIA_KINDS,
+  TOKEN_FLAGS,
 } from './channels.js';
 import { Realtime } from './realtime.js';
+import { DirectMessages, publicConversation, publicDmMessage } from './dms.js';
+import { mountDirectMessages } from './dm-routes.js';
+import { Calls } from './calls.js';
 import {
   Chat, Soundpad, Emojis,
   publicMessage, publicClip, publicEmoji, allowedTypes, mediaTypeOf, mentionsIn,
@@ -48,7 +54,17 @@ app.disable('x-powered-by');
  * proxies it actually trusts, landing on the address Caddy observed.
  */
 app.set('trust proxy', 'loopback');
-app.use(express.json({ limit: '16kb' }));
+
+/*
+ * Request bodies are small JSON everywhere except a private conversation's
+ * routes, where a message arrives sealed: a 4000-character body that is all
+ * emoji is 16 KB of UTF-8 before it is encrypted and base64'd. Those get a
+ * bigger allowance -- still a ceiling, enforced again per field in dms.js --
+ * and everything else keeps the tight one.
+ */
+const smallJson = express.json({ limit: '16kb' });
+const sealedJson = express.json({ limit: '96kb' });
+app.use((req, res, next) => (req.path.startsWith('/api/dm') ? sealedJson : smallJson)(req, res, next));
 
 const db = openDatabase({ dataDir: ensureDataDir(config.dataDir) });
 const metaStore = meta(db);
@@ -70,6 +86,26 @@ const mediaSecret = channelSecret(metaStore);
 const chat = new Chat(db, { dataDir: config.dataDir, maxDiskBytes: config.maxDiskBytes });
 const soundpad = new Soundpad(db);
 const emojis = new Emojis(db);
+const dms = new DirectMessages(db);
+/*
+ * Calls in private conversations. `record` writes the call's line into the
+ * conversation -- "missed call", "call, 5 minutes" -- and tells both people,
+ * exactly as a message they sent would.
+ */
+const calls = new Calls({
+  graceMs: config.callGraceMs,
+  notify: (userIds, payload) => { for (const id of userIds) realtime?.toUser(id, payload); },
+  record: (conversationId, callerId, meta) => {
+    const conversation = dms.get(conversationId);
+    if (!conversation) return;
+    const message = publicDmMessage(dms.record(conversationId, callerId, meta));
+    for (const id of DirectMessages.members(conversation)) {
+      realtime?.toUser(id, {
+        type: 'dm:message', message, conversation: publicConversation(dms.get(conversationId)),
+      });
+    }
+  },
+});
 /*
  * The name and the door key.
  *
@@ -551,7 +587,9 @@ app.post('/api/accounts/:id/delete', requireRole('owner'), (req, res) => {
   }
 
   // Their sessions went with the row, so every later request fails -- but a
-  // socket authenticates once and would go on receiving everything.
+  // socket authenticates once and would go on receiving everything. A call
+  // they were in ends too; its conversation went with them, so it leaves no line.
+  calls.leaveUser(id);
   realtime?.kickUser(id);
   // Everything that named them is now wrong: the member list, every message
   // they wrote, every roster they were in.
@@ -1225,7 +1263,9 @@ app.get('/api/uploads/:hash', requireLogin, (req, res) => {
   const hash = String(req.params.hash);
   if (!/^[0-9a-f]{64}$/.test(hash)) return res.status(400).json({ error: 'bad_hash' });
 
-  const info = chat.fileInfo(hash);
+  // A private conversation's file is served by that conversation's own route,
+  // to its two people; here it does not exist, whoever asks and whatever they know.
+  const info = chat.isSealed(hash) ? null : chat.fileInfo(hash);
   if (!info) return res.status(404).json({ error: 'no_such_file' });
 
   res.set('Content-Type', info.content_type);
@@ -1234,6 +1274,19 @@ app.get('/api/uploads/:hash', requireLogin, (req, res) => {
   // Content-addressed, so it can never change: cache it forever.
   res.set('Cache-Control', 'public, max-age=31536000, immutable');
   return res.sendFile(info.path);
+});
+
+// ---------------------------------------------------------------------------
+// Private conversations: see dm-routes.js
+// ---------------------------------------------------------------------------
+
+mountDirectMessages(app, {
+  requireLogin,
+  dms,
+  chat,
+  accounts,
+  push: (userIds, payload) => { for (const id of userIds) realtime?.toUser(id, payload); },
+  broadcast: (payload) => realtime?.broadcast(payload),
 });
 
 // ---------------------------------------------------------------------------
@@ -1397,7 +1450,7 @@ app.post('/mediamtx/auth', (req, res) => {
     const token = new URLSearchParams(query ?? '').get('token');
     const claim = readChannelToken(mediaSecret, token);
 
-    if (!claim || claim.cid !== channelTarget.cid) {
+    if (!claim || claim.cid !== channelTarget.cid || claim.flags !== TOKEN_FLAGS.channel) {
       console.warn(`[auth] channel ${action} REJECTED for "${path}" (bad or expired token)`);
       return res.sendStatus(401);
     }
@@ -1428,6 +1481,27 @@ app.post('/mediamtx/auth', (req, res) => {
       return res.sendStatus(204);
     }
 
+    return res.sendStatus(401);
+  }
+
+  /*
+   * A private call's paths. Same token format and secret as a channel's, told
+   * apart by the flag: a token minted for channel 5 must not open call 5.
+   * Only the call's two people are ever issued one, and the frames inside are
+   * sealed end to end anyway -- this keeps strangers off the relay, it is not
+   * what keeps the call private.
+   */
+  const callTarget = parseCallPath(path);
+  if (callTarget) {
+    const token = new URLSearchParams(query ?? '').get('token');
+    const claim = readChannelToken(mediaSecret, token);
+    if (!claim || claim.cid !== callTarget.conversationId || claim.flags !== TOKEN_FLAGS.call) {
+      console.warn(`[auth] call ${action} REJECTED for "${path}" (bad or expired token)`);
+      return res.sendStatus(401);
+    }
+    if (action === 'read' || action === 'playback') return res.sendStatus(204);
+    if (action === 'publish' && claim.mid === callTarget.mid) return res.sendStatus(204);
+    console.warn(`[auth] call ${action} REJECTED for "${path}" (slot mismatch)`);
     return res.sendStatus(401);
   }
 
@@ -1475,11 +1549,20 @@ app.post('/mediamtx/auth', (req, res) => {
  * socket came in with, for HARMONY_SIGNALING_URL=auto.
  */
 function issueTokens(channelId, userId, mid, host) {
+  return mediaTokens({ id: channelId, mid, host, flags: TOKEN_FLAGS.channel, pathFor: channelPath });
+}
+
+/** The same, for one side of a private call: its own namespace and its own flag. */
+function issueCallTokens(conversationId, userId, mid, host) {
+  return mediaTokens({ id: conversationId, mid, host, flags: TOKEN_FLAGS.call, pathFor: callPath });
+}
+
+function mediaTokens({ id, mid, host, flags, pathFor }) {
   const token = mintChannelToken(mediaSecret, {
-    cid: channelId, mid, ttlMs: config.channelTokenTtlMs,
+    cid: id, mid, flags, ttlMs: config.channelTokenTtlMs,
   });
   const base = signalingBase(host);
-  const url = (kind) => `${base}/${channelPath(channelId, mid, kind)}`;
+  const url = (kind) => `${base}/${pathFor(id, mid, kind)}`;
   return {
     token,
     publish: {
@@ -1539,7 +1622,10 @@ realtime = new Realtime({
   channels,
   voice,
   soundpad,
+  dms,
+  calls,
   issueTokens,
+  issueCallTokens,
   kickMember: (channelId, mid) => monitor.kickPath(channelPath(channelId, mid, 'voice')),
 });
 
@@ -1566,6 +1652,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
     console.log(`\n[harmony] ${signal} -- shutting down`);
     monitor.stop();
+    calls.close();
     realtime?.close();
     clearInterval(sessionSweeper);
     server.close(() => {

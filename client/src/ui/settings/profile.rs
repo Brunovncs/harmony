@@ -152,7 +152,7 @@ impl Settings {
         let img = self.session.update(cx, |s, cx| s.avatar(me.id, cx));
         let s = self.session.read(cx);
         let (server_name, base, link_up) = (s.server_name.clone(), s.api.base(), s.link == Link::Up);
-        let call = self.voice.as_ref().map(|v| v.read(cx)).map(|v| (s.channel(v.channel).map(|c| c.name.clone()), v.ping_ms, v.route));
+        let call = self.voice.as_ref().map(|v| v.read(cx)).map(|v| (Some(s.place_name(v.place)), v.ping_ms, v.route));
         let p = crate::prefs::prefs(cx).clone();
 
         let (state, state_color) = match (&call, link_up) {

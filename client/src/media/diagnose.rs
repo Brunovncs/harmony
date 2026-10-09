@@ -100,7 +100,7 @@ pub async fn run(api: Api, report: impl Fn(Step) + Send + Sync) -> Outcome {
     });
     let url = session.whip_url.clone().unwrap_or_default();
     let params = VideoParams { max_bitrate: 150_000, max_fps: 10., sharp: false };
-    let link = rtc::publish(&api, &url, &session.ice_servers, None, Some((track, params))).await;
+    let link = rtc::publish(&api, &url, &session.ice_servers, None, Some((track, params)), None).await;
     let result = match link {
         Err(e) => {
             step(send, Some(false), e.message);

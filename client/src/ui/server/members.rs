@@ -54,7 +54,6 @@ impl ServerView {
     fn member_row(&mut self, u: &User, online: bool, in_voice: bool, t: &Theme, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let me = self.session.read(cx).me.clone();
         let img = self.session.update(cx, |s, cx| s.avatar(u.id, cx));
-        let can_manage = me.role.is_admin() && u.id != me.id && u.role != Role::Owner;
         let user = u.clone();
         let hover = t.layer_hover;
         div()
@@ -93,11 +92,17 @@ impl ServerView {
             )
             .when(u.role == Role::Owner, |d| d.child(icon("crown", 13., t.caution)))
             .when(u.role == Role::Admin, |d| d.child(icon("shield", 13., t.accent)))
-            .when(can_manage, |d| {
-                d.cursor_pointer().on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |this, e: &MouseDownEvent, window, cx| this.member_menu(&user, e.position, window, cx)),
-                )
+            // Anybody but you: a click opens your private conversation with them, and the menu
+            // has the rest.
+            .when(u.id != me.id, |d| {
+                let id = u.id;
+                d.cursor_pointer()
+                    .tooltip(tip(tr!("Click to send a private message", "Clique para mandar uma mensagem privada"), t))
+                    .on_click(cx.listener(move |this, _, window, cx| this.message_user(id, window, cx)))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, e: &MouseDownEvent, window, cx| this.member_menu(&user, e.position, window, cx)),
+                    )
             })
             .into_any_element()
     }
@@ -106,7 +111,28 @@ impl ServerView {
         let me = self.session.read(cx).me.clone();
         let session = self.session.clone();
         let (id, nick) = (u.id, u.nickname.clone());
-        let mut items = Vec::new();
+        let view = cx.entity().downgrade();
+        let (v1, v2) = (view.clone(), view);
+        let mut items = vec![
+            MenuEntry::item("message", tr!("Send a private message", "Mandar mensagem privada"), false, move |window, cx| {
+                if let Some(v) = v1.upgrade() {
+                    v.update(cx, |v, cx| v.message_user(id, window, cx));
+                }
+            }),
+            MenuEntry::item("phone", tr!("Call", "Ligar"), false, move |window, cx| {
+                if let Some(v) = v2.upgrade() {
+                    v.update(cx, |v, cx| v.call_user(id, window, cx));
+                }
+            }),
+        ];
+        if !me.role.is_admin() || u.role == Role::Owner {
+            let menu = cx.new(|_| Menu { items });
+            overlay::open_menu(menu, at, cx);
+            return;
+        }
+        if u.role == Role::Member || me.role == Role::Owner {
+            items.push(MenuEntry::rule());
+        }
         if u.role == Role::Member {
             let session = session.clone();
             items.push(MenuEntry::item("shield", tr!("Make admin", "Tornar admin"), false, move |_, cx| {

@@ -3,6 +3,8 @@
 
 pub mod api;
 pub mod cache;
+pub mod crypto;
+pub mod keystore;
 pub mod lru;
 pub mod realtime;
 pub mod secret;

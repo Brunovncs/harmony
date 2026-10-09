@@ -37,8 +37,27 @@ const ALLOWED_TYPES = new Map([
 export const mediaTypeOf = (contentType) => ALLOWED_TYPES.get(String(contentType).toLowerCase()) ?? null;
 export const allowedTypes = () => [...ALLOWED_TYPES.keys()];
 
+/**
+ * What a private conversation's attachment is stored as.
+ *
+ * Deliberately NOT in the allowlist: it is opaque bytes sealed on the
+ * client, so there is no content type to check and nothing a browser could
+ * do with it. Being outside the list is also what keeps it in its lane --
+ * mediaTypeOf() answers null, so it can never become an avatar, an emoji, a
+ * clip or a channel attachment, and /api/uploads/:hash refuses to serve it.
+ * Only the conversation it was sent in can.
+ */
+export const SEALED_TYPE = 'application/x-harmony-sealed';
+
 /** Hard ceiling per file, regardless of the total quota. */
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+/**
+ * A sealed file is the plaintext plus the client's framing: a version byte,
+ * a 24-byte nonce and a 16-byte tag. The plaintext cap is the same as any
+ * other upload's, so this is that cap and the overhead, not a bigger one.
+ */
+export const MAX_SEALED_BYTES = MAX_UPLOAD_BYTES + 64;
 
 /**
  * Per-clip ceiling for the soundpad, far below the generic upload cap.
@@ -241,16 +260,28 @@ export class Chat {
    * second time, and that a file's name can never collide with or escape into
    * another's -- the hash is the only thing that reaches the filesystem.
    *
+   * `sealed` stores a private conversation's ciphertext: no type to check,
+   * recorded as SEALED_TYPE, and the cap allows for the encryption's framing.
+   *
    * @returns {{ok: true, upload: object} | {ok: false, error: string}}
    */
-  store(buffer, contentType) {
-    const mediaType = mediaTypeOf(contentType);
-    if (!mediaType) return { ok: false, error: 'type_not_allowed' };
+  store(buffer, contentType, { sealed = false } = {}) {
+    if (!sealed && !mediaTypeOf(contentType)) return { ok: false, error: 'type_not_allowed' };
     if (!buffer?.length) return { ok: false, error: 'empty_file' };
-    if (buffer.length > MAX_UPLOAD_BYTES) return { ok: false, error: 'file_too_large' };
+    if (buffer.length > (sealed ? MAX_SEALED_BYTES : MAX_UPLOAD_BYTES)) {
+      return { ok: false, error: 'file_too_large' };
+    }
+    const type = sealed ? SEALED_TYPE : String(contentType).toLowerCase();
 
     const hash = createHash('sha256').update(buffer).digest('hex');
     const existing = this.#q.upload.get(hash);
+    // A hash already stored as the other kind is refused rather than shared:
+    // a sealed row must never be readable through the public route, nor a
+    // public file be swept into a conversation's private ones. Sealed bytes
+    // carry a random nonce, so this only ever happens on purpose.
+    if (existing && (existing.content_type === SEALED_TYPE) !== sealed) {
+      return { ok: false, error: 'type_not_allowed' };
+    }
     if (existing) return { ok: true, upload: existing, deduplicated: true };
 
     // Checked BEFORE writing, and it is not only about uploads: once the
@@ -271,8 +302,13 @@ export class Chat {
     writeFileSync(temp, buffer);
     renameSync(temp, target);
 
-    this.#q.insertUpload.run(hash, String(contentType).toLowerCase(), buffer.length, Date.now());
+    this.#q.insertUpload.run(hash, type, buffer.length, Date.now());
     return { ok: true, upload: this.#q.upload.get(hash), deduplicated: false };
+  }
+
+  /** Whether a stored file is a private conversation's, and so not for the public routes. */
+  isSealed(hash) {
+    return this.#q.upload.get(hash)?.content_type === SEALED_TYPE;
   }
 
   /** Delete unreferenced files until there is room, oldest first. */
@@ -349,7 +385,8 @@ export class Chat {
     let mediaType = null;
     if (attachmentHash) {
       const upload = this.#q.upload.get(attachmentHash);
-      if (!upload) return { ok: false, error: 'no_such_upload' };
+      // A conversation's sealed file is not a channel's to show.
+      if (!upload || upload.content_type === SEALED_TYPE) return { ok: false, error: 'no_such_upload' };
       mediaType = mediaTypeOf(upload.content_type);
     }
 
@@ -545,7 +582,7 @@ export class Chat {
     let mediaType = null;
     if (hash) {
       const upload = this.#q.upload.get(hash);
-      if (!upload) return { ok: false, error: 'no_such_upload' };
+      if (!upload || upload.content_type === SEALED_TYPE) return { ok: false, error: 'no_such_upload' };
       mediaType = mediaTypeOf(upload.content_type);
     } else if (!message.body.trim()) {
       return { ok: false, error: 'empty_message' };

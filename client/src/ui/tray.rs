@@ -74,6 +74,21 @@ fn on_close(window: &mut Window, cx: &mut App) -> bool {
     false
 }
 
+/// Something needs you while the window is in the background: a call, a private message. The
+/// taskbar button flashes and, from the tray, Windows shows a notification. Says only who, never
+/// what: a notification is on a screen anyone nearby can read.
+pub fn attention(window: &Window, title: &str, text: &str, cx: &App) {
+    if window.is_window_active() {
+        return;
+    }
+    if let Some(hwnd) = hwnd(window) {
+        crate::tray::flash_window(hwnd);
+    }
+    if let Some(tray) = cx.try_global::<TrayState>().and_then(|s| s.tray.as_ref()) {
+        tray.notify(title, text);
+    }
+}
+
 fn show(cx: &mut App) {
     let window = cx.global::<TrayState>().window;
     let _ = window.update(cx, |_, window, _| {
@@ -107,7 +122,7 @@ fn tip(cx: &App) -> String {
     let mut tip = format!("Harmony\n{}", session.server_name);
     if let Some(call) = &view.call {
         let call = call.read(cx);
-        let channel = session.channels.iter().find(|c| c.id == call.channel).map_or("", |c| c.name.as_str());
+        let channel = session.place_name(call.place);
         tip.push('\n');
         tip.push_str(&trf!("In call: {}", "Em chamada: {}", channel));
         if call.deafened {

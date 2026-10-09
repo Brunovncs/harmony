@@ -152,7 +152,7 @@ async fn run(url: String, api: Api, mut commands: mpsc::UnboundedReceiver<Comman
                                         continue;
                                     }
                                     if let Some(tx) = rid.and_then(|r| pending.remove(&r)) {
-                                        let failed = matches!(kind, "error" | "voice:error" | "hello-failed");
+                                        let failed = matches!(kind, "error" | "voice:error" | "call:error" | "hello-failed");
                                         let _ = tx.send(if failed {
                                             let code = v.get("error").and_then(Value::as_str).map(ErrorCode::parse).unwrap_or(ErrorCode::Unknown);
                                             Err(RequestError { code, reply: v })

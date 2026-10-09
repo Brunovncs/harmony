@@ -2,6 +2,7 @@
 //! sound, camera and background, appearance and language, sounds, advanced. Changes apply as they
 //! are made, with no Save button.
 
+mod privacy;
 mod profile;
 
 use crate::core::settings::{Background, CustomTheme, HotkeyAction};
@@ -37,6 +38,7 @@ enum Section {
     Appearance,
     Sounds,
     Hotkeys,
+    Privacy,
     Advanced,
 }
 
@@ -438,6 +440,18 @@ impl Settings {
                 t,
                 cx,
                 |cx| set_prefs(cx, |p| p.confirm_voice_join = !p.confirm_voice_join),
+            ))
+            .child(toggle_row(
+                "join-muted",
+                tr!("Join voice channels muted", "Entrar mutado nos canais de voz"),
+                tr!(
+                    "Your microphone starts off in every voice channel; unmute when you want to talk.",
+                    "Seu microfone começa desligado em todo canal de voz; desmute quando quiser falar."
+                ),
+                p.join_muted,
+                t,
+                cx,
+                |cx| set_prefs(cx, |p| p.join_muted = !p.join_muted),
             ))
             .into_any_element()
     }
@@ -1083,6 +1097,7 @@ impl Render for Settings {
             Section::Appearance => self.appearance_section(&t, cx),
             Section::Sounds => self.sounds_section(&t, cx),
             Section::Hotkeys => self.hotkeys_section(&t, cx),
+            Section::Privacy => self.privacy_section(&t, cx),
             Section::Advanced => self.advanced_section(&t, cx),
         };
         let heading = match self.section {
@@ -1092,6 +1107,7 @@ impl Render for Settings {
             Section::Appearance => tr!("Appearance and language", "Aparência e idioma"),
             Section::Sounds => tr!("Sounds", "Sons"),
             Section::Hotkeys => tr!("Hotkeys", "Atalhos globais"),
+            Section::Privacy => tr!("Private messages", "Mensagens privadas"),
             Section::Advanced => tr!("Advanced", "Avançado"),
         };
         // A fixed height, so the rail stays put while sections of different lengths come and go.
@@ -1119,6 +1135,7 @@ impl Render for Settings {
                     .child(nav("nav-appearance", Some("palette"), tr!("Appearance", "Aparência"), Section::Appearance, self, cx))
                     .child(nav("nav-sounds", Some("music"), tr!("Sounds", "Sons"), Section::Sounds, self, cx))
                     .child(nav("nav-hotkeys", Some("keyboard"), tr!("Hotkeys", "Atalhos globais"), Section::Hotkeys, self, cx))
+                    .child(nav("nav-privacy", Some("lock"), tr!("Privacy", "Privacidade"), Section::Privacy, self, cx))
                     .child(nav("nav-advanced", Some("settings"), tr!("Advanced", "Avançado"), Section::Advanced, self, cx))
                     .child(div().flex_1())
                     .child(
