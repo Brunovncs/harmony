@@ -46,6 +46,15 @@ install beyond the Windows SDK.
      `WEBRTC_VIDEO_CODEC_FALLBACK_SOFTWARE`, and the wrapper continues on OpenH264.
    - `h264_decoder_impl.*`: a DXVA H.264 decoder. **Not compiled** (see below).
 
+4. **`src/adm_proxy.cpp`**, `AdmProxy::Terminate()`: no longer terminates the sub-ADMs; they live
+   as long as the proxy and are terminated in `~AdmProxy`, as upstream issue
+   [livekit/rust-sdks#1468](https://github.com/livekit/rust-sdks/issues/1468) proposes. WebRTC
+   terminates the ADM when the last peer connection closes and calls the no-op `Init()` for the
+   next one; the synthetic ADM's 10 ms pumping task died with `Terminate`, so upstream never
+   pulled remote audio again: after leaving a channel, a call ending or being left alone in one,
+   every voice received played nothing until the app restarted.
+   `voice_plays_after_a_private_call` in `src/media/rtc.rs` covers it.
+
 Nothing else is changed; the upstream files keep their bytes.
 
 ## Environment variables
@@ -74,7 +83,9 @@ once decoded frames can stay on the GPU up to the screen. To wire it:
 ## Upgrading webrtc-sys
 
 1. Copy the new version from the registry over this directory, keeping `src/mf/` and this file.
-2. Re-apply the `build.rs` block and the three `video_encoder_factory.cpp` hunks above.
+2. Re-apply the `build.rs` block, the three `video_encoder_factory.cpp` hunks and the
+   `AdmProxy::Terminate` fix above, unless #1468 is fixed by then (run
+   `voice_plays_after_a_private_call` without it to see).
 3. Build and check what moved in the APIs used by `src/mf`: `VideoEncoder`/`EncoderInfo`,
    `CreateVideoEncoderSoftwareFallbackWrapper`, `H264::FindNaluIndices` and
    `H264BitstreamParser::ParseBitstream` (both take `std::span`), `NV12BufferInterface`.

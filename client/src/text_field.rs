@@ -10,8 +10,8 @@ use gpui::{
     App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, InspectorElementId, InteractiveElement, IntoElement,
     KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, ParentElement, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, Style, Styled, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions,
-    div, fill, point, px, relative, size,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement, Style, Styled, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle,
+    Window, WrappedLine, actions, div, fill, point, px, relative, size,
 };
 use std::ops::Range;
 use std::time::Duration;
@@ -178,6 +178,8 @@ pub struct TextField {
     bare: bool,
     /// Shows a dot for every character, for passwords.
     masked: bool,
+    /// A masked field's text shown as it is, through the eye at its end.
+    revealed: bool,
     layout: Option<Layout>,
     scroll: Point<Pixels>,
     /// Set when the caret moves, so the next frame scrolls it into view; the wheel leaves it.
@@ -209,6 +211,7 @@ impl TextField {
             enter_submits: false,
             bare: false,
             masked: false,
+            revealed: false,
             layout: None,
             scroll: Point::default(),
             reveal: false,
@@ -249,6 +252,20 @@ impl TextField {
 
     pub fn set_masked(&mut self, masked: bool) {
         self.masked = masked;
+        self.revealed = false;
+    }
+
+    /// Drawn as dots right now: masked, and the eye not open.
+    fn hidden(&self) -> bool {
+        self.masked && !self.revealed
+    }
+
+    fn toggle_reveal(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        window.focus(&self.focus, cx);
+        self.revealed = !self.revealed;
+        self.reveal = true;
+        cx.notify();
     }
 
     pub fn bare(mut self) -> TextField {
@@ -511,14 +528,15 @@ impl TextField {
         self.erase_to(self.buf.next_word(self.buf.cursor()), cx);
     }
 
+    /// A hidden password stays out of the clipboard, as in a browser; the eye shows it first.
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.buf.selected.is_empty() {
+        if !self.buf.selected.is_empty() && !self.hidden() {
             cx.write_to_clipboard(ClipboardItem::new_string(self.buf.text[self.buf.selected.clone()].to_string()));
         }
     }
 
     fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.buf.selected.is_empty() {
+        if !self.buf.selected.is_empty() && !self.hidden() {
             cx.write_to_clipboard(ClipboardItem::new_string(self.buf.text[self.buf.selected.clone()].to_string()));
             self.put(None, "", cx);
         }
@@ -713,7 +731,30 @@ impl Render for TextField {
             .text_size(spx(text::BODY.0))
             .line_height(spx(text::BODY.1))
             .text_color(t.text)
-            .child(FieldText { field: cx.entity(), colors })
+            .when(!self.masked, |d| d.child(FieldText { field: cx.entity(), colors }))
+            .when(self.masked, |d| {
+                let (glyph, hint) = if self.revealed {
+                    ("eye-off", tr!("Hide password", "Esconder senha"))
+                } else {
+                    ("eye", tr!("Show password", "Mostrar senha"))
+                };
+                d.flex()
+                    .items_center()
+                    .gap(spx(8.))
+                    .child(div().flex_1().min_w(px(0.)).child(FieldText { field: cx.entity(), colors }))
+                    .child(
+                        div()
+                            .id("reveal")
+                            .flex_none()
+                            .p(spx(2.))
+                            .cursor(CursorStyle::PointingHand)
+                            .opacity(0.7)
+                            .hover(|s| s.opacity(1.))
+                            .tooltip(crate::widgets::tip(hint, &t))
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::toggle_reveal))
+                            .child(crate::widgets::icon(glyph, 16., t.text2)),
+                    )
+            })
     }
 }
 
@@ -1138,13 +1179,13 @@ impl Element for FieldText {
         let empty = field.buf.text.is_empty();
         let (text, color) = if empty {
             (field.placeholder.clone(), self.colors.placeholder)
-        } else if field.masked {
+        } else if field.hidden() {
             (MASK.repeat(field.buf.text.chars().count()).into(), self.colors.text)
         } else {
             (field.buf.text.clone().into(), self.colors.text)
         };
         let run = TextRun { len: text.len(), font: style.font(), color, background_color: None, underline: None, strikethrough: None };
-        let runs = match field.buf.marked.clone().filter(|_| !empty && !field.masked) {
+        let runs = match field.buf.marked.clone().filter(|_| !empty && !field.hidden()) {
             Some(m) => {
                 let underline = UnderlineStyle { color: Some(color), thickness: px(1.), wavy: false };
                 [
@@ -1196,7 +1237,7 @@ impl Element for FieldText {
         let line_height = window.line_height();
         let mut layout = Layout::new(lines, line_height, bounds);
         let field = self.field.read(cx);
-        if field.masked && !field.buf.text.is_empty() {
+        if field.hidden() && !field.buf.text.is_empty() {
             layout.masked = Some(field.buf.text.clone());
         }
         let empty = field.buf.text.is_empty();

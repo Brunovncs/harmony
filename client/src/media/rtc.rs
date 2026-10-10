@@ -873,6 +873,79 @@ mod tests {
         assert_eq!((received.frame_width, received.frame_height), (w, h));
     }
 
+    /// A tone sent from one connection to another in this process, the receiver's sealed and
+    /// opened with `key` when there is one, as in a private call: how many 10 ms frames the
+    /// receiving track delivered with sound in them, over two seconds.
+    async fn audio_loopback(key: Option<&FrameKey>) -> usize {
+        use futures::StreamExt;
+        use libwebrtc::audio_source::AudioSourceOptions;
+        use libwebrtc::audio_source::native::NativeAudioSource;
+        use libwebrtc::audio_stream::native::NativeAudioStream;
+        use libwebrtc::peer_connection_factory::native::PeerConnectionFactoryExt;
+        let source = NativeAudioSource::new(AudioSourceOptions::default(), 48_000, 1, 0);
+        let (tx, tx_ice) = new_pc(&[]).unwrap();
+        let (rx, rx_ice) = new_pc(&[]).unwrap();
+        let send =
+            RtpTransceiverInit { direction: RtpTransceiverDirection::SendOnly, stream_ids: vec!["t".into()], send_encodings: Vec::new() };
+        let t = tx.add_transceiver(MediaStreamTrack::Audio(factory().create_audio_track("tone", source.clone())), send).unwrap();
+        let mut cryptors: Vec<FrameCryptor> = key.map(|k| k.cryptor_for(Side::Send(t.sender()))).into_iter().collect();
+        let offer = tx.create_offer(OfferOptions::default()).await.unwrap();
+        let offer_sdp = offer.to_string();
+        tx.set_local_description(offer).await.unwrap();
+        wait_for_ice(&tx, &tx_ice).await;
+        let offer = SessionDescription::parse(&with_candidates(&offer_sdp, &tx_ice.candidates.lock()), SdpType::Offer).unwrap();
+        rx.set_remote_description(offer).await.unwrap();
+        let receiver = rx.transceivers().into_iter().next().unwrap().receiver();
+        cryptors.extend(key.map(|k| k.cryptor_for(Side::Receive(receiver.clone()))));
+        let answer = rx.create_answer(Default::default()).await.unwrap();
+        let answer_sdp = answer.to_string();
+        rx.set_local_description(answer).await.unwrap();
+        wait_for_ice(&rx, &rx_ice).await;
+        let answer = SessionDescription::parse(&with_candidates(&answer_sdp, &rx_ice.candidates.lock()), SdpType::Answer).unwrap();
+        tx.set_remote_description(answer).await.unwrap();
+
+        let Some(MediaStreamTrack::Audio(track)) = receiver.track() else { panic!("no audio track") };
+        let heard = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = heard.clone();
+        let pump = tokio::spawn(async move {
+            let mut stream = NativeAudioStream::new(track, 48_000, 1);
+            while let Some(frame) = stream.next().await {
+                if frame.data.iter().any(|&s| s.unsigned_abs() > 300) {
+                    count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        });
+        let start = std::time::Instant::now();
+        let mut n = 0u64;
+        while start.elapsed() < Duration::from_secs(2) {
+            let data: Vec<i16> =
+                (0..480).map(|i| ((((n * 480 + i) as f32) * 440. * std::f32::consts::TAU / 48_000.).sin() * 8000.) as i16).collect();
+            let frame =
+                libwebrtc::audio_frame::AudioFrame { data: data.into(), sample_rate: 48_000, num_channels: 1, samples_per_channel: 480 };
+            source.capture_frame(&frame).await.unwrap();
+            n += 1;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        pump.abort();
+        drop(cryptors);
+        tx.close();
+        rx.close();
+        heard.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A private call's sealed audio, and voice again after it: hearing nothing once a call had
+    /// ended was the bug, until the app restarted.
+    #[test]
+    fn voice_plays_after_a_private_call() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let heard = crate::core::runtime().block_on(async {
+            let key = FrameKey::new(&[7; 32]);
+            [audio_loopback(None).await, audio_loopback(Some(&key)).await, audio_loopback(None).await]
+        });
+        eprintln!("frames with sound: before {}, in the call {}, after {}", heard[0], heard[1], heard[2]);
+        assert!(heard.iter().all(|&n| n > 50), "frames with sound: {heard:?}");
+    }
+
     #[test]
     fn only_turn_survives() {
         let server = |urls: &[&str]| IceServer {

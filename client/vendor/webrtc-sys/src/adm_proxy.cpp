@@ -356,18 +356,13 @@ int32_t AdmProxy::Init() {
 }
 
 int32_t AdmProxy::Terminate() {
-  return RunOnWorker([this] {
-    RTC_DCHECK_RUN_ON(worker_thread_);
-    int32_t result = 0;
-    if (synthetic_adm_) {
-      result = synthetic_adm_->Terminate();
-    }
-    if (platform_adm_) {
-      int32_t platform_result = platform_adm_->Terminate();
-      if (result == 0) result = platform_result;
-    }
-    return result;
-  });
+  // WebRTC terminates the ADM when the last peer connection closes and calls
+  // Init again for the next one, but Init is a no-op: terminating the sub ADMs
+  // here took the synthetic ADM's pumping task with them, and no remote audio
+  // was pulled again for the life of the process. They live as long as the
+  // proxy and are terminated in ~AdmProxy. The voice engine has already stopped
+  // playout and recording and dropped its callback by the time it gets here.
+  return 0;
 }
 
 bool AdmProxy::Initialized() const {
