@@ -51,8 +51,8 @@ install beyond the Windows SDK.
    [livekit/rust-sdks#1468](https://github.com/livekit/rust-sdks/issues/1468) proposes. WebRTC
    terminates the ADM when the last peer connection closes and calls the no-op `Init()` for the
    next one; the synthetic ADM's 10 ms pumping task died with `Terminate`, so upstream never
-   pulled remote audio again: after leaving a channel, a call ending or being left alone in one,
-   every voice received played nothing until the app restarted.
+   pulled remote audio again: once every connection had closed (leaving a channel, or a call
+   ending outside one), every voice received played nothing until the app restarted.
    `voice_plays_after_a_private_call` in `src/media/rtc.rs` covers it.
 
 Nothing else is changed; the upstream files keep their bytes.
